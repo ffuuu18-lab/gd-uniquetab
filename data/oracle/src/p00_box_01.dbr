@@ -1,0 +1,5 @@
+templateName,database/templates/ingameui/uireagentitem.tpl,
+FileDescription,UIItemReagent,
+itemBoxX,105,
+itemBoxY,76,
+reagentName,records/items/gearhead/d004_head.dbr,

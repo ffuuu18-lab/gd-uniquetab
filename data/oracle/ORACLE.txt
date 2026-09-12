@@ -1,0 +1,13 @@
+Test fixtures, not shipped.
+
+The DLL generates catalogue.bin, uniq-records.txt, uniq-pages.txt and uniq-groups.txt into its
+own mod folder at start-up (src\gen). The copies here are what the Python reference tools wrote;
+the catalogue harness (tools\build_test_catalogue.bat) compares the DLL's output against them
+byte for byte, and the model suite loads catalogue.bin. src\ holds the sample .dbr text
+tools\build_uniq_db.py dumps next to the archive it writes.
+
+Nothing in this folder goes into the release package. The shipped data is data\plates\*.tex
+and data\uniq\uniq-pages.arz.
+
+uniq-pages.json (the per-page manifest a full build_uniq_db.py run writes beside the .arz) is not
+published: it is 0.9 MB of derived data that no harness compares. A full run of the tool recreates it.

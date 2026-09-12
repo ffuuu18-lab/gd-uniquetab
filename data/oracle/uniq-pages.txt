@@ -1,0 +1,96 @@
+0	records/ui/caravan/uniq_p00.dbr	Helms 1/8	40
+1	records/ui/caravan/uniq_p01.dbr	Helms 2/8	40
+2	records/ui/caravan/uniq_p02.dbr	Helms 3/8	40
+3	records/ui/caravan/uniq_p03.dbr	Helms 4/8	40
+4	records/ui/caravan/uniq_p04.dbr	Helms 5/8	40
+5	records/ui/caravan/uniq_p05.dbr	Helms 6/8	40
+6	records/ui/caravan/uniq_p06.dbr	Helms 7/8	40
+7	records/ui/caravan/uniq_p07.dbr	Helms 8/8	8
+8	records/ui/caravan/uniq_p08.dbr	Shoulders 1/6	40
+9	records/ui/caravan/uniq_p09.dbr	Shoulders 2/6	40
+10	records/ui/caravan/uniq_p10.dbr	Shoulders 3/6	40
+11	records/ui/caravan/uniq_p11.dbr	Shoulders 4/6	40
+12	records/ui/caravan/uniq_p12.dbr	Shoulders 5/6	40
+13	records/ui/caravan/uniq_p13.dbr	Shoulders 6/6	9
+14	records/ui/caravan/uniq_p14.dbr	Chest 1/10	25
+15	records/ui/caravan/uniq_p15.dbr	Chest 2/10	25
+16	records/ui/caravan/uniq_p16.dbr	Chest 3/10	25
+17	records/ui/caravan/uniq_p17.dbr	Chest 4/10	25
+18	records/ui/caravan/uniq_p18.dbr	Chest 5/10	25
+19	records/ui/caravan/uniq_p19.dbr	Chest 6/10	25
+20	records/ui/caravan/uniq_p20.dbr	Chest 7/10	25
+21	records/ui/caravan/uniq_p21.dbr	Chest 8/10	25
+22	records/ui/caravan/uniq_p22.dbr	Chest 9/10	25
+23	records/ui/caravan/uniq_p23.dbr	Chest 10/10	9
+24	records/ui/caravan/uniq_p24.dbr	Gloves 1/4	40
+25	records/ui/caravan/uniq_p25.dbr	Gloves 2/4	40
+26	records/ui/caravan/uniq_p26.dbr	Gloves 3/4	40
+27	records/ui/caravan/uniq_p27.dbr	Gloves 4/4	18
+28	records/ui/caravan/uniq_p28.dbr	Belts 1/3	80
+29	records/ui/caravan/uniq_p29.dbr	Belts 2/3	80
+30	records/ui/caravan/uniq_p30.dbr	Belts 3/3	7
+31	records/ui/caravan/uniq_p31.dbr	Pants 1/5	25
+32	records/ui/caravan/uniq_p32.dbr	Pants 2/5	25
+33	records/ui/caravan/uniq_p33.dbr	Pants 3/5	25
+34	records/ui/caravan/uniq_p34.dbr	Pants 4/5	25
+35	records/ui/caravan/uniq_p35.dbr	Pants 5/5	14
+36	records/ui/caravan/uniq_p36.dbr	Boots 1/3	40
+37	records/ui/caravan/uniq_p37.dbr	Boots 2/3	40
+38	records/ui/caravan/uniq_p38.dbr	Boots 3/3	26
+39	records/ui/caravan/uniq_p39.dbr	Amulets 1/2	160
+40	records/ui/caravan/uniq_p40.dbr	Amulets 2/2	131
+41	records/ui/caravan/uniq_p41.dbr	Medals 1/2	160
+42	records/ui/caravan/uniq_p42.dbr	Medals 2/2	42
+43	records/ui/caravan/uniq_p43.dbr	Rings 1/2	160
+44	records/ui/caravan/uniq_p44.dbr	Rings 2/2	104
+45	records/ui/caravan/uniq_p45.dbr	Off-hands 1/7	25
+46	records/ui/caravan/uniq_p46.dbr	Off-hands 2/7	25
+47	records/ui/caravan/uniq_p47.dbr	Off-hands 3/7	25
+48	records/ui/caravan/uniq_p48.dbr	Off-hands 4/7	25
+49	records/ui/caravan/uniq_p49.dbr	Off-hands 5/7	25
+50	records/ui/caravan/uniq_p50.dbr	Off-hands 6/7	25
+51	records/ui/caravan/uniq_p51.dbr	Off-hands 7/7	22
+52	records/ui/caravan/uniq_p52.dbr	Shields 1/5	25
+53	records/ui/caravan/uniq_p53.dbr	Shields 2/5	25
+54	records/ui/caravan/uniq_p54.dbr	Shields 3/5	25
+55	records/ui/caravan/uniq_p55.dbr	Shields 4/5	25
+56	records/ui/caravan/uniq_p56.dbr	Shields 5/5	17
+57	records/ui/caravan/uniq_p57.dbr	1H Axes 1/4	25
+58	records/ui/caravan/uniq_p58.dbr	1H Axes 2/4	25
+59	records/ui/caravan/uniq_p59.dbr	1H Axes 3/4	25
+60	records/ui/caravan/uniq_p60.dbr	1H Axes 4/4	9
+61	records/ui/caravan/uniq_p61.dbr	Daggers 1/5	25
+62	records/ui/caravan/uniq_p62.dbr	Daggers 2/5	25
+63	records/ui/caravan/uniq_p63.dbr	Daggers 3/5	25
+64	records/ui/caravan/uniq_p64.dbr	Daggers 4/5	25
+65	records/ui/caravan/uniq_p65.dbr	Daggers 5/5	9
+66	records/ui/caravan/uniq_p66.dbr	1H Maces 1/4	25
+67	records/ui/caravan/uniq_p67.dbr	1H Maces 2/4	25
+68	records/ui/caravan/uniq_p68.dbr	1H Maces 3/4	25
+69	records/ui/caravan/uniq_p69.dbr	1H Maces 4/4	24
+70	records/ui/caravan/uniq_p70.dbr	Scepters 1/3	50
+71	records/ui/caravan/uniq_p71.dbr	Scepters 2/3	50
+72	records/ui/caravan/uniq_p72.dbr	Scepters 3/3	6
+73	records/ui/caravan/uniq_p73.dbr	1H Swords 1/2	50
+74	records/ui/caravan/uniq_p74.dbr	1H Swords 2/2	47
+75	records/ui/caravan/uniq_p75.dbr	Guns 1/4	40
+76	records/ui/caravan/uniq_p76.dbr	Guns 2/4	40
+77	records/ui/caravan/uniq_p77.dbr	Guns 3/4	40
+78	records/ui/caravan/uniq_p78.dbr	Guns 4/4	12
+79	records/ui/caravan/uniq_p79.dbr	2H Axes 1/3	20
+80	records/ui/caravan/uniq_p80.dbr	2H Axes 2/3	20
+81	records/ui/caravan/uniq_p81.dbr	2H Axes 3/3	7
+82	records/ui/caravan/uniq_p82.dbr	2H Maces 1/2	20
+83	records/ui/caravan/uniq_p83.dbr	2H Maces 2/2	19
+84	records/ui/caravan/uniq_p84.dbr	Spears 1/1	6
+85	records/ui/caravan/uniq_p85.dbr	2H Swords 1/3	20
+86	records/ui/caravan/uniq_p86.dbr	2H Swords 2/3	20
+87	records/ui/caravan/uniq_p87.dbr	2H Swords 3/3	9
+88	records/ui/caravan/uniq_p88.dbr	2H Guns 1/7	20
+89	records/ui/caravan/uniq_p89.dbr	2H Guns 2/7	20
+90	records/ui/caravan/uniq_p90.dbr	2H Guns 3/7	20
+91	records/ui/caravan/uniq_p91.dbr	2H Guns 4/7	20
+92	records/ui/caravan/uniq_p92.dbr	2H Guns 5/7	20
+93	records/ui/caravan/uniq_p93.dbr	2H Guns 6/7	20
+94	records/ui/caravan/uniq_p94.dbr	2H Guns 7/7	7
+95	records/ui/caravan/uniq_p95.dbr	Relics 1/1	91

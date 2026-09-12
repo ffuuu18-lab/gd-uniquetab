@@ -1,0 +1,9 @@
+# generated cover plates (tools/make_plates.py)
+# resource path -> local file
+ui/caravan/uniq_plate_32x32.tex	uniq_plate_32x32.tex	10x16	160 frames	Amulets,Medals,Rings,Relics
+ui/caravan/uniq_plate_32x96.tex	uniq_plate_32x96.tex	10x5	50 frames	Scepters,1H Swords
+ui/caravan/uniq_plate_32x128.tex	uniq_plate_32x128.tex	10x4	40 frames	Spears
+ui/caravan/uniq_plate_64x32.tex	uniq_plate_64x32.tex	5x16	80 frames	Belts
+ui/caravan/uniq_plate_64x64.tex	uniq_plate_64x64.tex	5x8	40 frames	Helms,Shoulders,Gloves,Boots,Guns
+ui/caravan/uniq_plate_64x96.tex	uniq_plate_64x96.tex	5x5	25 frames	Chest,Pants,Off-hands,Shields,1H Axes,Daggers,1H Maces
+ui/caravan/uniq_plate_64x128.tex	uniq_plate_64x128.tex	5x4	20 frames	2H Axes,2H Maces,2H Swords,2H Guns

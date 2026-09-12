@@ -1,0 +1,4 @@
+# The files under data\oracle\ are compared BYTE FOR BYTE against what the DLL writes into its
+# own mod folder, so their CRLF line endings are content. Git must not translate them on the way
+# in or out, or the catalogue harness fails on a fresh clone.
+data/oracle/** -text
