@@ -35,6 +35,12 @@ namespace ut {
 // Loads uniq-groups.txt from the mod folder and resolves the three signatures. Safe to call twice.
 bool liveInit(HMODULE selfModule);
 
+// The active view changed: re-read uniq-groups.txt from the new view's folder, so the P line,
+// the per-group grids and the plate names are that view's. GAME THREAD, from the database
+// detour, where no HUD exists and nothing is walking the table. False when the file could not
+// be read, and the table then stays as it was.
+bool liveReloadView(HMODULE selfModule);
+
 // Installs the UIReagentItem::Load detour (box capture). Adds its target count to `total`.
 int liveInstall(int* total);
 
@@ -201,6 +207,23 @@ bool liveViewInfo(LiveView* out);
 // it to probe every plate texture once, at the main menu, so the install can be verified without
 // loading a character.
 int liveCellSizes(int* w, int* h, int cap);
+
+// ---- the derived geometry ----------------------------------------------------------------
+// The P line of uniq-groups.txt: what the generator derived from the database the engine
+// merged, so a stash-UI mod that moves or enlarges the caravan is followed. src\gen\
+// ui_geometry.cpp (tools\ui_geometry.py is the reference) is what wrote it. A file without a
+// P line - anything generated before the line existed - leaves the vanilla values below, which
+// is exactly what such a file described.
+struct LiveGeometry {
+    int x0, y0;                // the grid origin, window units
+    int usableW, usableH;      // the rectangle the grid is laid out in
+    int plateW, plateH;        // the cover texture's real pixel size
+    const char* plate;         // its bitmapName, never null
+    bool derived;              // a P line was read (false = the vanilla defaults)
+};
+
+// Never fails; fills out with the vanilla values when no P line was read.
+void liveGeometry(LiveGeometry* out);
 
 // The box widgets captured during the last material `ReagentWindow::Load`, in build order.
 // Writes at most `cap` of them and returns how many were captured (which can exceed `cap`).

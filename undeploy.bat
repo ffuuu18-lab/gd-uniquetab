@@ -55,7 +55,8 @@ echo [undeploy] game "%GAME%"
 rem ---- THE SAFETY INTERLOCK --------------------------------------------------------------------
 rem The collection is uniquetab\uniq-items.jsonl and the items it names are held in the mod's own
 rem private table - with the mod gone they are not in the game at all. tools\journal_guard.ps1
-rem exits 1 while that journal still holds entries and no NEWER rescue-report.txt sits beside it.
+rem exits 1 while that journal, or a custom game's own under views\custom-<name>\, still holds
+rem entries and no NEWER rescue-report.txt sits beside it.
 rem Use "undeploy.bat --force" to accept the loss.
 if defined FORCE (
     echo [undeploy] --force: skipping the collection check. Anything the mod still holds will be
@@ -69,14 +70,18 @@ if defined FORCE (
 )
 
 rem ---- the mod folder ---------------------------------------------------------------------------
-rem Only the files the mod SHIPS are deleted. The ini, the log, the collection and the exports are
-rem the user's, so the folder is left in place holding them; delete it by hand when you are done.
-for %%N in (catalogue.bin uniq-pages.arz uniq-vanilla.arz uniq-records.txt uniq-pages.txt uniq-groups.txt) do (
+rem Only the files the mod GENERATES (and older builds shipped) are deleted: the catalogue, its
+rem stamp, the three lists and the page overlay. The ini, the log, the collection and the exports
+rem are the user's, so the folder is left in place holding them; delete it by hand when you are
+rem done. views\ holds a custom game's collection beside its generated set and is never touched.
+for %%N in (catalogue.bin catalogue.stamp uniq-pages.arz uniq-vanilla.arz uniq-records.txt uniq-pages.txt uniq-groups.txt) do (
     if exist "%MODDIR%\%%N" (
         del /q "%MODDIR%\%%N"
         if exist "%MODDIR%\%%N" (echo [undeploy] WARNING: could not delete "%MODDIR%\%%N") else (echo [undeploy] removed "%MODDIR%\%%N")
     )
 )
+rem The plates the mod painted, every view's: they are all named uniq_plate_*.tex, and no other
+rem name in that folder is ever written or removed.
 if exist "%GAME%\settings\ui\caravan\uniq_plate_*.tex" (
     del /q "%GAME%\settings\ui\caravan\uniq_plate_*.tex" 2>nul
     echo [undeploy] removed the plates from "%GAME%\settings\ui\caravan" ^(only uniq_plate_*.tex; the folder stays^)

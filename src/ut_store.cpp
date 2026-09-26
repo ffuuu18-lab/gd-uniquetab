@@ -328,15 +328,22 @@ void storeInit() {
     }
     logI("store: armed - export_gds=%d export_csv=%d", g_cfg.exportGds, g_cfg.exportCsv);
     // The table's own start-up line, kept separate from the "armed" line above so that line
-    // stays word for word what it is at the defaults.
+    // stays word for word what it is at the defaults. At start-up no character is loaded, so the
+    // mode is usually not known yet: that is a wait, not a refusal, and the line says so. Only a
+    // journal that is read-only or has no path cannot own anything this session.
+    const char* jp = journalPath();
+    const bool fileUsable = !journalReadOnly() && jp && *jp;
     logD("store: the private table %s. Journal format %d; it holds %u cop%s right now. "
          "count >= 1 is the only authorisation to paint a box from the table, to take from it or "
          "to rescue out of it.",
          storeTableOwns()
              ? "OWNS the collection: every deposit is written into the mod's own file and that "
                "file is on disk BEFORE the deposit is accepted"
-             : "CANNOT OWN ANYTHING THIS SESSION - the journal is read-only or has no path, so "
-               "every deposit is refused",
+             : !fileUsable
+                   ? "CANNOT OWN ANYTHING THIS SESSION - the journal is read-only or has no path, "
+                     "so every deposit is refused"
+                   : "waits for a character: there is one collection per mode, and it owns the "
+                     "collection once a world says hardcore or softcore",
          (int)UT_JOURNAL_FORMAT, journalCollectedTotal(),
          journalCollectedTotal() == 1 ? "y" : "ies");
     tablePublish(true);

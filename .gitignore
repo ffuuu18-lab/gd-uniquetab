@@ -7,3 +7,6 @@ __pycache__/
 
 # build_model.bat drops the model suite's transcript here.
 tests/model_test.out.txt
+
+# build_catalogue.py writes this next to the fixtures; only catalogue.bin is committed.
+data/oracle/catalogue.json

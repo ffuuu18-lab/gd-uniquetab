@@ -66,7 +66,7 @@ bool utGameDirFromExeW(const wchar_t* hostExe, char* out, size_t cap);
 // in DllMain, before the log file exists, so the warning cannot report itself.
 const char* utModDirWarning();
 
-// A file the mod SHIPS (catalogue.bin, uniq-*.arz, uniq-*.txt, plates\*.tex). Looks in the mod
+// A file the mod reads (catalogue.bin, uniq-pages.arz, uniq-*.txt). Looks in the mod
 // folder and, when that is the Documents fallback, beside the .asi as well - the two places the
 // resolver above knows about and no other. Writes the winner into `out` and returns whether it
 // exists; on a miss `out` holds the primary path, which is what an error line should name.

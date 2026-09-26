@@ -315,6 +315,30 @@ set "UNIQUETAB_OUT=%GDSE%"
 if errorlevel 1 set RC=1
 if exist "%GDSE%\uniq-items.jsonl" (echo [test] FAIL: the empty-journal .gds case created a journal file & set RC=1)
 
+rem ---- one journal set per custom game ----------------------------------------------------------
+rem A custom game's journal, exports, prune copy and rescue report stay in views\custom-<name>\;
+rem the start-up files come back byte-identical.
+set "JVIEW=%OUT%\journal-views"
+if exist "%JVIEW%" rd /s /q "%JVIEW%"
+mkdir "%JVIEW%"
+set "UNIQUETAB_OUT=%JVIEW%"
+"%OUT%\test_journal.exe" --case-views
+if errorlevel 1 set RC=1
+rem The uninstall guard sees a custom game's collection too. With the start-up journal gone, the
+rem custom game's is left with a stored entry written AFTER its report, so it must refuse ...
+del /q "%JVIEW%\uniq-items.jsonl" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JVIEW%" >"%JVIEW%\guard.txt"
+set GRC=%ERRORLEVEL%
+findstr /c:"(custom-lootascension)" "%JVIEW%\guard.txt" >nul
+if errorlevel 1 (echo [test] FAIL: the guard did not look at the custom game's journal & set RC=1)
+rem ... and with the custom game's journal gone as well, it allows.
+del /q "%JVIEW%\views\custom-lootascension\uniq-items.jsonl" 2>nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JVIEW%" >nul
+set GRC2=%ERRORLEVEL%
+echo [test] guard over a custom game's journal = %GRC% (1 = refuses), with no journal left = %GRC2% (0 = allows)
+if not "%GRC%"=="1" (echo [test] FAIL: the guard allowed an uninstall over a custom game's collection & set RC=1)
+if not "%GRC2%"=="0" (echo [test] FAIL: the guard refused with no journal present & set RC=1)
+
 rem ---- case (m): a FORMAT-3 file, the shape an existing install has -----------------------------
 rem Format 3 with 7 entries, every one of them an item the ENGINE reagent map holds. The upgrade
 rem rule must read it whole, leave every row at count 0 (the private table holds none of it) and

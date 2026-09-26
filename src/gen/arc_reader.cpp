@@ -17,19 +17,6 @@ std::uint64_t rd64(const std::uint8_t* p) {
     return std::uint64_t(rd32(p)) | (std::uint64_t(rd32(p + 4)) << 32);
 }
 
-bool readFile(const std::string& path, std::vector<std::uint8_t>& out) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
-    std::fseek(f, 0, SEEK_END);
-    long n = std::ftell(f);
-    if (n < 0) { std::fclose(f); return false; }
-    std::fseek(f, 0, SEEK_SET);
-    out.resize(std::size_t(n));
-    std::size_t got = n ? std::fread(out.data(), 1, out.size(), f) : 0;
-    std::fclose(f);
-    return got == out.size();
-}
-
 const std::uint32_t kArcMagic = 0x00435241;   // "ARC\0"
 
 // True when the whole buffer is well-formed UTF-8 (the same test Python's decode makes).
@@ -103,12 +90,13 @@ bool ArcArchive::load(const std::string& path, std::string* error) {
         std::size_t d = base.find_last_of('.');
         m_tag = d == std::string::npos ? base : base.substr(0, d);
     }
-    if (!readFile(path, m_blob)) { if (error) *error = "cannot read " + path; return false; }
-    const std::uint8_t* b = m_blob.data();
-    const std::size_t n = m_blob.size();
-    if (n < 28) { if (error) *error = path + ": too short"; return false; }
-    std::uint32_t magic = rd32(b), version = rd32(b + 4), nFiles = rd32(b + 8), nRecs = rd32(b + 12);
-    std::uint32_t recSize = rd32(b + 16), strSize = rd32(b + 20), recOff = rd32(b + 24);
+    if (!m_file.open(path)) { if (error) *error = "cannot read " + path; return false; }
+    m_fileSize = m_file.size();
+    const std::uint64_t n = m_fileSize;
+    std::uint8_t hdr[28];
+    if (n < 28 || !m_file.readAt(0, 28, hdr)) { if (error) *error = path + ": too short"; return false; }
+    std::uint32_t magic = rd32(hdr), version = rd32(hdr + 4), nFiles = rd32(hdr + 8), nRecs = rd32(hdr + 12);
+    std::uint32_t recSize = rd32(hdr + 16), strSize = rd32(hdr + 20), recOff = rd32(hdr + 24);
     if (magic != kArcMagic || version != 3) { if (error) *error = path + ": not an ARC v3"; return false; }
     std::uint64_t strOff = std::uint64_t(recOff) + recSize;
     std::uint64_t entOff = strOff + strSize;
@@ -116,16 +104,26 @@ bool ArcArchive::load(const std::string& path, std::string* error) {
         if (error) *error = path + ": tables outside the file";
         return false;
     }
+    // the three tables, contiguous from recOff, are the index and stay; the entry bodies
+    // between the header and recOff - all but a few MB of the archive - never come in
+    const std::size_t tblLen = std::size_t(recSize) + strSize + std::size_t(nFiles) * 44;
+    std::vector<std::uint8_t> tbl(tblLen);
+    if (!m_file.readAt(recOff, tblLen, tbl.data())) {
+        if (error) *error = path + ": cannot read the tables";
+        return false;
+    }
+    const std::uint8_t* const b = tbl.data();              // b[0] is the byte at recOff
+    const std::size_t strAt = recSize, entAt = std::size_t(recSize) + strSize;
     m_parts.reserve(nRecs);
     for (std::uint32_t i = 0; i < nRecs; ++i) {
-        const std::uint8_t* p = b + recOff + 12 * i;
+        const std::uint8_t* p = b + 12 * i;
         Part pt{rd32(p), rd32(p + 4), rd32(p + 8)};
         if (std::uint64_t(pt.offset) + pt.csize > n) { if (error) *error = path + ": part outside the file"; return false; }
         m_parts.push_back(pt);
     }
     m_entries.reserve(nFiles);
     for (std::uint32_t i = 0; i < nFiles; ++i) {
-        const std::uint8_t* p = b + entOff + 44 * i;
+        const std::uint8_t* p = b + entAt + 44 * i;
         ArcEntry e;
         e.etype = rd32(p);
         e.offset = rd32(p + 4);
@@ -142,7 +140,7 @@ bool ArcArchive::load(const std::string& path, std::string* error) {
             if (error) *error = path + ": entry parts outside the part table";
             return false;
         }
-        e.name = latin1ToUtf8(b + strOff + noff, nlen);
+        e.name = latin1ToUtf8(b + strAt + noff, nlen);
         for (char& c : e.name) if (c == '\\') c = '/';
         e.key = normKey(e.name);
         m_index[e.key] = m_entries.size();
@@ -156,23 +154,28 @@ const ArcEntry* ArcArchive::entry(const std::string& name) const {
     return it == m_index.end() ? nullptr : &m_entries[it->second];
 }
 
-bool ArcArchive::read(const ArcEntry& e, std::vector<std::uint8_t>& out) const {
+bool ArcArchive::read(const ArcEntry& e, std::vector<std::uint8_t>& out, std::size_t limit) const {
     out.clear();
     if (e.numParts == 0) {
-        if (std::uint64_t(e.offset) + e.dsize > m_blob.size()) return false;
-        out.assign(m_blob.begin() + e.offset, m_blob.begin() + e.offset + e.dsize);
-        return true;
+        if (std::uint64_t(e.offset) + e.dsize > m_fileSize) return false;
+        std::size_t want = (limit && limit < e.dsize) ? limit : e.dsize;
+        out.resize(want);
+        return m_file.readAt(e.offset, want, out.data());
     }
     if (std::uint64_t(e.firstPart) + e.numParts > m_parts.size()) return false;
     for (std::uint32_t i = e.firstPart; i < e.firstPart + e.numParts; ++i) {
+        if (limit && out.size() >= limit) break;
         const Part& pt = m_parts[i];
-        if (std::uint64_t(pt.offset) + pt.csize > m_blob.size()) return false;
+        if (std::uint64_t(pt.offset) + pt.csize > m_fileSize) return false;
         std::size_t at = out.size();
         if (pt.csize == pt.dsize) {
-            out.insert(out.end(), m_blob.begin() + pt.offset, m_blob.begin() + pt.offset + pt.csize);
+            out.resize(at + pt.csize);
+            if (!m_file.readAt(pt.offset, pt.csize, out.data() + at)) return false;
         } else {
+            m_scratch.resize(pt.csize);
+            if (!m_file.readAt(pt.offset, pt.csize, m_scratch.data())) return false;
             out.resize(at + pt.dsize);
-            if (!lz4BlockDecode(m_blob.data() + pt.offset, pt.csize, out.data() + at, pt.dsize))
+            if (!lz4BlockDecode(m_scratch.data(), pt.csize, out.data() + at, pt.dsize))
                 return false;
         }
     }
@@ -213,12 +216,13 @@ std::string ArcSet::sourceOf(const std::string& name) const {
     return it == m_index.end() ? std::string() : m_archives[it->second].tag();
 }
 
-bool ArcSet::read(const std::string& name, std::vector<std::uint8_t>& out) const {
+bool ArcSet::read(const std::string& name, std::vector<std::uint8_t>& out,
+                  std::size_t limit) const {
     auto it = m_index.find(ArcArchive::normKey(name));
     if (it == m_index.end()) return false;
     const ArcArchive& a = m_archives[it->second];
     const ArcEntry* e = a.entry(name);
-    return e && a.read(*e, out);
+    return e && a.read(*e, out, limit);
 }
 
 // ---------------------------------------------------------------- tag files

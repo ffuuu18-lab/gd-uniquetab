@@ -195,7 +195,12 @@ char g_path[MAX_PATH] = {0};      // <journal dir>\uniq-items.jsonl - THE journa
 char g_reportPath[MAX_PATH] = {0};
 // The resolved journal folder, kept so the three paths can be re-composed when the
 // mode switches, and the mode itself - 0 the softcore names, 1 the `-hc` ones. See ut_rescue.h.
+// g_dir is the ACTIVE folder: the start-up one (g_baseDir) or a custom game's
+// <g_baseDir>\views\<g_viewKey>; the rescue report follows it the same way.
 char g_dir[MAX_PATH] = {0};
+char g_baseDir[MAX_PATH] = {0};
+char g_baseReport[MAX_PATH] = {0};
+char g_viewKey[64] = {0};
 volatile LONG g_mode = 0;
 volatile LONG g_modeKnown = 0;
 HANDLE g_event = nullptr;
@@ -1743,6 +1748,7 @@ bool journalInit(HMODULE selfModule, const char* journalDir) {
     char outDir[MAX_PATH] = {0};
     utModDirA(selfModule, outDir, sizeof(outDir));
     utModPathA(selfModule, "rescue-report.txt", g_reportPath, sizeof(g_reportPath));
+    _snprintf_s(g_baseReport, sizeof(g_baseReport), _TRUNCATE, "%s", g_reportPath);
     g_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
     // Name the resolved folder and say WHY it won, every session, in one line.
@@ -1781,6 +1787,8 @@ bool journalInit(HMODULE selfModule, const char* journalDir) {
     // names are what the journal opens on; journalFollowMode() moves it when the first world
     // says otherwise. The folder is kept, because that re-open has to compose the paths again.
     _snprintf_s(g_dir, sizeof(g_dir), _TRUNCATE, "%s", dir);
+    _snprintf_s(g_baseDir, sizeof(g_baseDir), _TRUNCATE, "%s", dir);
+    g_viewKey[0] = 0;
     composePaths(g_dir, (int)InterlockedCompareExchange(&g_mode, 0, 0));
 
     // ---- the ladder. ONE rule decides: the ABSENCE of uniq-items.jsonl means
@@ -2653,15 +2661,58 @@ void journalForgetMode() {
 }
 
 bool journalFollowMode(int variant) {
+    char key[sizeof(g_viewKey)];
+    _snprintf_s(key, sizeof(key), _TRUNCATE, "%s", g_viewKey);
+    return journalFollow(variant, key);
+}
+
+// "custom-<name>" for both forms of a custom game's view, "" for the start-up views. The key is
+// the custom mod's name alone, so the same mod with and without /basemods is ONE collection.
+bool journalViewKeyFor(const char* viewName, char* out, size_t cap) {
+    if (!out || !cap) return false;
+    out[0] = 0;
+    if (!viewName) return true;
+    const char* v = viewName;
+    if (!_strnicmp(v, "basemods+", 9)) v += 9;
+    if (_strnicmp(v, "custom-", 7) != 0) return true;   // vanilla, basemods: the start-up files
+    const size_t n = strlen(v);
+    if (n <= 7 || n >= cap) return false;
+    for (size_t i = 7; i < n; ++i) {
+        const char c = v[i];
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' ||
+                        c == '_' || c == '-';
+        if (!ok) return false;
+    }
+    if (!strcmp(v + 7, ".") || !strcmp(v + 7, "..")) return false;
+    _snprintf_s(out, cap, _TRUNCATE, "%s", v);
+    return true;
+}
+
+const char* journalViewKey() {
+    return g_viewKey;
+}
+
+const char* journalBaseDir() {
+    return g_baseDir;
+}
+
+bool journalFollow(int variant, const char* viewKey) {
     // Anything but 0 or 1 is "the mode could not be read": stay on the file we are on and say
     // nothing. Guessing here would be the one mistake that writes a hardcore item into the
     // softcore collection.
     if (variant != 0 && variant != 1) return false;
-    if (!g_entries || !g_csReady || !g_dir[0]) return false;
+    if (!g_entries || !g_csReady || !g_dir[0] || !g_baseDir[0]) return false;
+    // The same for the view: a key that is not one journalViewKeyFor could have produced never
+    // becomes a folder name.
+    char key[sizeof(g_viewKey)] = {0};
+    if (viewKey && viewKey[0]) {
+        if (!journalViewKeyFor(viewKey, key, sizeof(key)) || !key[0]) return false;
+    }
     const char* name = variant == 1 ? "hardcore" : "softcore";
+    const bool sameView = _stricmp(key, g_viewKey) == 0;
     const LONG had = InterlockedExchange(&g_mode, (LONG)variant);
     const bool first = InterlockedExchange(&g_modeKnown, 1) == 0;
-    if (had == (LONG)variant) {
+    if (had == (LONG)variant && sameView) {
         // Already on the right files. Pin the header's variant to the mode anyway: the files are
         // per mode now, so a header carried over from a build that kept one journal for both is
         // simply wrong about which stash THIS file belongs to.
@@ -2669,11 +2720,26 @@ bool journalFollowMode(int variant) {
         if (first) logI("collection: %s mode - using \"%s\"", name, g_path);
         return false;
     }
-    // The mode CHANGED. Flush what the file we are leaving still owes BEFORE a single path moves
-    // - after composePaths the old name is gone and that write would land in the wrong file.
-    journalFlushNow();
-    logI("collection: %s mode - leaving \"%s\" (%zu entries flushed)", name, g_path,
-         g_entries->size());
+    // The mode or the view CHANGED. Flush what the file we are leaving still owes BEFORE a single
+    // path moves - after composePaths the old name is gone and that write would land in the wrong
+    // file. The mode was swapped above; the flush writes entries, never the mode.
+    char dir[MAX_PATH];
+    if (key[0]) {
+        _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\views", g_baseDir);
+        CreateDirectoryA(dir, nullptr);
+        _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\views\\%s", g_baseDir, key);
+        CreateDirectoryA(dir, nullptr);
+    } else {
+        _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s", g_baseDir);
+    }
+    // Only what is owed: a file with nothing pending is left exactly as it is on the disk, so
+    // leaving the start-up collection for a custom game's never rewrites it.
+    const bool owed = InterlockedCompareExchange(&g_dirty, 0, 0) != 0;
+    if (owed) journalFlushNow();
+    logI("collection: %s mode - leaving \"%s\" (%zu entries, %s)%s", name, g_path,
+         g_entries->size(), owed ? "flushed" : "nothing was pending",
+         sameView ? "" : (key[0] ? " - a custom game has a collection of its own"
+                                 : " - back to the start-up view's collection"));
     EnterCriticalSection(&g_cs);
     try {
         g_entries->clear();
@@ -2686,6 +2752,13 @@ bool journalFollowMode(int variant) {
     InterlockedExchange(&g_copyAside, 0);
     InterlockedExchange(&g_readOnlySaid, 0);
     InterlockedExchange(&g_saveVariant, (LONG)variant);
+    _snprintf_s(g_viewKey, sizeof(g_viewKey), _TRUNCATE, "%s", key);
+    _snprintf_s(g_dir, sizeof(g_dir), _TRUNCATE, "%s", dir);
+    if (key[0]) {
+        _snprintf_s(g_reportPath, sizeof(g_reportPath), _TRUNCATE, "%s\\rescue-report.txt", dir);
+    } else {
+        _snprintf_s(g_reportPath, sizeof(g_reportPath), _TRUNCATE, "%s", g_baseReport);
+    }
     composePaths(g_dir, variant);
     LeaveCriticalSection(&g_cs);
     // Re-open: journalInit's read, without journalInit's ladder. The old binary journal is a
@@ -2702,12 +2775,23 @@ bool journalFollowMode(int variant) {
     // The exports are derived from the entry list that just changed under them, so arm the ones
     // that are on - the new mode's .gds and .csv are written on the worker's next pass instead
     // of staying the other mode's until the next deposit.
-    if (InterlockedCompareExchange(&g_gdsMode, 0, 0) != 0) InterlockedExchange(&g_gdsArm, 1);
-    if (InterlockedCompareExchange(&g_csvMode, 0, 0) != 0) InterlockedExchange(&g_csvArm, 1);
+    // A view change alone arms nothing: the file just opened was last written together with its
+    // exports, and re-writing them would touch the files of a collection nobody deposited into.
+    if (had != (LONG)variant) {
+        if (InterlockedCompareExchange(&g_gdsMode, 0, 0) != 0) InterlockedExchange(&g_gdsArm, 1);
+        if (InterlockedCompareExchange(&g_csvMode, 0, 0) != 0) InterlockedExchange(&g_csvArm, 1);
+    }
     if (g_event) SetEvent(g_event);
     logI("collection: %s mode - using \"%s\" (%zu entr%s)%s%s", name, g_path, g_entries->size(),
          g_entries->size() == 1 ? "y" : "ies", had2 ? "" : " (no file yet)",
          InterlockedCompareExchange(&g_readOnly, 0, 0) ? " [READ-ONLY this session]" : "");
+    if (!sameView) {
+        logI("collection: the journal is the %s one - \"%s\"%s", g_viewKey[0] ? g_viewKey : "start-up view's",
+             g_path,
+             g_viewKey[0] ? " (keyed by the custom game's name, so /basemods or not is the same "
+                            "collection; the start-up view's files are untouched)"
+                          : " (the custom game's collection was flushed and closed)");
+    }
     return true;
 }
 

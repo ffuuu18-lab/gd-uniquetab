@@ -1,13 +1,33 @@
-Test fixtures, not shipped.
+Test fixtures, not shipped, not published.
 
-The DLL generates catalogue.bin, uniq-records.txt, uniq-pages.txt and uniq-groups.txt into its
-own mod folder at start-up (src\gen). The copies here are what the Python reference tools wrote;
-the catalogue harness (tools\build_test_catalogue.bat) compares the DLL's output against them
-byte for byte, and the model suite loads catalogue.bin. src\ holds the sample .dbr text
-tools\build_uniq_db.py dumps next to the archive it writes.
+Nothing a player installs comes from this folder. The DLL generates catalogue.bin,
+uniq-records.txt, uniq-pages.txt, uniq-groups.txt and uniq-pages.arz into its own mod folder at
+start-up, and paints the cover plates into <game>\settings\ui\caravan\ (src\gen). The copies here
+are what the Python reference tools wrote from a Grim Dawn 1.3.0.8 game folder, and the catalogue
+harness (tools\build_test_catalogue.bat) compares the DLL's output against them:
 
-Nothing in this folder goes into the release package. The shipped data is data\plates\*.tex
-and data\uniq\uniq-pages.arz.
+    catalogue.bin, uniq-*.txt   byte for byte
+    uniq-pages.arz              record for record (only the LZ4 encoding differs)
+    plates\uniq_plate_*.tex     byte for byte, on the vanilla view
 
-uniq-pages.json (the per-page manifest a full build_uniq_db.py run writes beside the .arz) is not
-published: it is 0.9 MB of derived data that no harness compares. A full run of the tool recreates it.
+The model suite (build_model.bat) loads catalogue.bin. src\ holds the sample .dbr text
+tools\build_uniq_db.py dumps next to the archive it writes; plates\src\ holds the game's own
+caravan textures tools\make_plates.py paints over (see the README.txt there).
+
+Everything here is derived from the game's data, so none of it is in the public tree. To run the
+harness from there, rebuild it from your own copy of Grim Dawn 1.3.0.8, with GD_DIR naming that
+game folder, in this order:
+
+    python tools\build_catalogue.py     catalogue.json, catalogue-stats.md
+    python tools\pack_catalogue.py      catalogue.bin
+    python tools\build_uniq_db.py       uniq-pages.arz, the three uniq-*.txt, uniq-pages.json,
+                                        src\*.dbr
+    (extract the three textures plates\src\README.txt names)
+    python tools\make_plates.py         plates\uniq_plate_*.tex, plates\PLATES.txt
+
+The oracle is a 1.3.0.8 artefact: point UNIQUETAB_TEST_GAME_DIR at a 1.3.0.8 game folder when
+the harness runs, whatever version the installed game has moved on to.
+
+uniq-pages.json (the per-page manifest a full build_uniq_db.py run writes beside the .arz) is
+0.9 MB of derived data that no harness compares; catalogue.json is the 4 MB intermediate and is
+not committed.

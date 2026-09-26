@@ -399,8 +399,8 @@ int main() {
         writeText(ini, old);
         logClear();
         ut::configReload(ini);
-        check(logHas("34 setting(s) kept, 5 new one(s) defaulted"),
-              "34 of the 43 old keys are still settings, and 5 are new");
+        check(logHas("34 setting(s) kept, 6 new one(s) defaulted"),
+              "34 of the 43 old keys are still settings, and 6 are new");
         check(logHas("9 setting(s) this build no longer has"), "the other 9 became fixed");
         check(logHas("db_load, uniq_page, live_pages, group_buttons_observe, button_icons, "
                      "journal, take_watch, identity, identity_require_callsite"),

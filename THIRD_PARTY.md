@@ -7,7 +7,7 @@ that means for anyone who ships, forks or repackages it.
 | --- | --- | --- |
 | MinHook | BSD 2-Clause | vendored source under `third_party\minhook`, compiled into `uniquetab.asi` |
 | Ultimate ASI Loader | MIT | required at run time, linked to, **not** redistributed here |
-| Grim Dawn's own data | not ours | the catalogue is built at run time from the player's own installation; the page and plate files are derived from it - see below |
+| Grim Dawn's own data | not ours | read at run time from the player's own installation; nothing derived from it ships - see below |
 
 ---
 
@@ -129,36 +129,34 @@ its documented behaviour: a `.asi` file next to the host executable (or in `scri
 Grim Dawn is Crate Entertainment's. No part of the game's program is here: no executable, no
 library, no game archive, no icon.
 
-**The catalogue comes from the player's own copy.** Every item name, icon size, class and record
-path the tab shows is read at run time out of the archives the player already has. On the first
-launch, and again whenever the game's archives change, the mod writes `catalogue.bin` and three
-record lists into its own folder. The release package ships none of them.
+**Everything the tab shows is made on the player's machine, out of the player's own copy.** On
+the first launch, and again whenever the game's archives change, the mod reads the archives the
+player already has and writes into its own folder:
 
-**The repository does carry one copy of that generated data**, under `data\oracle\`, as the test
-fixtures the generator is compared against byte for byte: `catalogue.bin` (the English display
-names of about 2,700 items, and about 6,300 record and bitmap paths), `uniq-records.txt` and
-`uniq-groups.txt` (record paths) and `catalogue-stats.md`. That is item text and record paths
-extracted from the game, kept so the test suite can prove the generator's output. It is not in
-the package a player installs, and a maintainer who would rather not publish it can delete the
-folder and regenerate the fixtures from a copy of the game before running the catalogue harness.
+- `catalogue.bin` and three record lists - the item names, icon sizes, classes and record paths
+  the tab shows;
+- `uniq-pages.arz`, the page database. Its records are new - one page window and its boxes per
+  page, at coordinates the mod derives from the caravan window it finds - but each box names an
+  item record of the game's, so the file holds a long list of the game's own record paths.
 
-**Two shipped files are derived from the game's own data, and it is worth being exact about
-them**, because "derived" is not "unrelated":
+At the same time it paints the page backgrounds into `<game>\settings\ui\caravan\`. On the
+vanilla layout they are painted on top of the game's own stash cover texture, read out of the
+player's `UI.arc`: its lattice erased, the new box frames alpha-stamped from one real vanilla
+frame, the border and tab strip composited back on top. Under a stash-UI mod they are one flat
+colour with the collection's own frame lines, and nothing of that mod's art is copied.
 
-- `uniq-pages.arz` is written by `tools\build_uniq_db.py`. Its records are new - one page
-  window and forty boxes per page, at coordinates this project chose - but each box names an
-  item record of the game's, so the file contains a long list of the game's own record paths.
-- the plate textures in `plates\` are painted by `tools\make_plates.py` **on top of** two vanilla
-  caravan textures: the ground is the game's cover image with its lattice erased, the new box
-  frames are alpha-stamped from one real vanilla frame, and the border and tab strip are the
-  game's, composited back on top. The vanilla textures themselves are not in the repository;
-  `data\plates\src\README.txt` says which archive entries to extract to run the script.
+**The release package ships none of it.** It is `uniquetab.asi` and three documents; the files
+above exist only on the machine of a player who owns the game, written from that player's copy.
 
-So the package includes work derived from Crate's data and artwork, in the ordinary way a mod
-does. It is useless without the game, replaces nothing in the installation, and is offered as a
-free unofficial mod. Anyone republishing it should know exactly this much and decide for
-themselves; a maintainer who wants the derivation gone can generate the plates at run time from
-the player's own archives instead of shipping them.
+**The development repository carries one copy of that derived data**, under `data\oracle\`, as
+the fixtures the generator is compared against: `catalogue.bin` (the English display names of
+about 4,000 items and their record and bitmap paths), `uniq-records.txt`, `uniq-pages.txt` and
+`uniq-groups.txt` (record paths), `catalogue-stats.md`, `uniq-pages.arz`, the seven vanilla
+plates, a few sample records as text, and, under `plates\src\`, the three vanilla caravan
+textures the plates are painted over. That is item text, record paths and artwork extracted from
+the game, kept so the test suite can prove the generator's output. It is not in the package and
+not in the public tree; `data\oracle\ORACLE.txt` says how to rebuild it from a copy of Grim Dawn
+1.3.0.8 before running the catalogue harness.
 
 Grim Dawn is a trademark of its owner. This is an unofficial mod. It is not endorsed by, nor
 affiliated with, Crate Entertainment.

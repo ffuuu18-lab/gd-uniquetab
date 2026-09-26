@@ -987,6 +987,123 @@ static int passModes() {
     return g_fail ? 1 : 0;
 }
 
+// ---- pass 9: ONE COLLECTION PER CUSTOM GAME ----------------------------------------------------
+// A custom game with a view of its own keeps its own journal set under
+// <journal dir>\views\custom-<name>\, keyed by the custom mod's name so the same mod with and
+// without /basemods is one collection; the start-up files never move. This pass drives
+// journalFollow() the way the world's first tick does after a view change: rows on both sides
+// of a switch made mid-process, then both files read off the disk.
+static int passViews() {
+    static const char* const kMain = "records/items/view/main_one.dbr";
+    static const char* const kCustom = "records/items/view/custom_two.dbr";
+    static const char* const kCustomHc = "records/items/view/custom_hc_three.dbr";
+    if (!ut::journalInit(nullptr)) {
+        printf("  [FAIL] journalInit\n");
+        return 1;
+    }
+    printf("\n17. the collection follows the view\n");
+    char key[64];
+    check(ut::journalViewKeyFor("vanilla", key, sizeof key) && !key[0] &&
+              ut::journalViewKeyFor("basemods", key, sizeof key) && !key[0],
+          "the start-up views (vanilla, basemods) have no key - they keep the start-up files");
+    check(ut::journalViewKeyFor("custom-lootascension", key, sizeof key) &&
+              !strcmp(key, "custom-lootascension"),
+          "custom-lootascension keys its journal as custom-lootascension");
+    check(ut::journalViewKeyFor("basemods+custom-lootascension", key, sizeof key) &&
+              !strcmp(key, "custom-lootascension"),
+          "basemods+custom-lootascension keys it the SAME - the custom mod's name, not the view's");
+    check(!ut::journalViewKeyFor("custom-..", key, sizeof key) &&
+              !ut::journalViewKeyFor("custom-a\\b", key, sizeof key) &&
+              !ut::journalViewKeyFor("custom-", key, sizeof key) &&
+              !ut::journalViewKeyFor("custom-A b", key, sizeof key),
+          "a name that is not a safe folder name gives no key");
+
+    check(!ut::journalFollow(0, ""), "a softcore world in the start-up view confirms the files");
+    const std::string mainPath = ut::journalPath();
+    check(endsWith(mainPath.c_str(), "\\uniq-items.jsonl") && !strcmp(ut::journalViewKey(), ""),
+          "the start-up journal keeps its name and place");
+    ut::UtReplicaCapture a, c, h;
+    fill(&a, kMain, 1);
+    check(ut::journalUpsertCount(a, 1) && ut::journalFlushNow(), "a start-up deposit is written");
+    std::string mainBefore;
+    check(slurp(mainPath.c_str(), &mainBefore), "the start-up journal is on the disk");
+
+    // the view changed at the database load; the world's first tick moves the files
+    check(ut::journalFollow(0, "custom-lootascension"), "a custom game's world switches the collection");
+    const std::string viewPath = ut::journalPath();
+    check(endsWith(viewPath.c_str(), "\\views\\custom-lootascension\\uniq-items.jsonl"),
+          "its journal is <journal dir>\\views\\custom-lootascension\\uniq-items.jsonl");
+    check(endsWith(ut::journalGdsPath(), "\\views\\custom-lootascension\\uniq-export.gds") &&
+              endsWith(ut::journalCsvPath(), "\\views\\custom-lootascension\\uniq-export.csv"),
+          "... with its own .gds and .csv beside it");
+    check(endsWith(ut::rescueReportPath(), "\\views\\custom-lootascension\\rescue-report.txt"),
+          "... and its own rescue-report.txt");
+    check(ut::journalCount() == 0 && !ut::journalHas(kMain),
+          "it starts empty - the start-up rows did not come with it");
+    check(paintLikeStore(kMain).why == ut::kUtPaintWhyNoEntry,
+          "a start-up row paints nothing in the custom game");
+    fill(&c, kCustom, 1);
+    check(depositLikeStore(c, kCustom), "a deposit in the custom game is accepted");
+    check(countOf(kCustom) == 1, "... and lands in the custom game's table");
+    std::string mainMid;
+    check(slurp(mainPath.c_str(), &mainMid) && mainMid == mainBefore,
+          "the start-up journal is byte-identical while the custom game is played");
+
+    // the same mod through /basemods is the same collection
+    check(ut::journalViewKeyFor("basemods+custom-lootascension", key, sizeof key) &&
+              !ut::journalFollow(0, key),
+          "the same mod under /basemods moves NO file - it is the same journal");
+    check(std::string(ut::journalPath()) == viewPath && ut::journalHas(kCustom),
+          "and its row is there");
+
+    // hardcore inside the custom game: the -hc set in the same view folder
+    check(ut::journalFollow(1, key), "a hardcore character in the custom game switches the mode");
+    check(endsWith(ut::journalPath(), "\\views\\custom-lootascension\\uniq-items-hc.jsonl"),
+          "its hardcore journal is the -hc file in the same view folder");
+    fill(&h, kCustomHc, 1);
+    check(ut::journalUpsertCount(h, 1) && ut::journalFlushNow(), "a hardcore custom deposit is written");
+    check(ut::journalFollow(0, key) && std::string(ut::journalPath()) == viewPath,
+          "back to softcore in the custom game");
+
+    // a bad key never becomes a folder and never moves the collection
+    check(!ut::journalFollow(0, "custom-../x") && std::string(ut::journalPath()) == viewPath,
+          "an unusable key moves nothing");
+
+    // the return: the start-up files, as they were
+    check(ut::journalFollow(0, ""), "the main campaign's world switches back");
+    check(std::string(ut::journalPath()) == mainPath && !strcmp(ut::journalViewKey(), ""),
+          "the start-up path is composed again exactly");
+    check(endsWith(ut::rescueReportPath(), "\\rescue-report.txt") &&
+              !strstr(ut::rescueReportPath(), "\\views\\"),
+          "and the rescue report is the start-up one again");
+    check(ut::journalCount() == 1 && ut::journalHas(kMain) && !ut::journalHas(kCustom),
+          "the start-up table holds its own row and nothing of the custom game's");
+    check(countOf(kMain) == 1, "with its count untouched");
+
+    std::string mainText, viewText, hcText;
+    check(slurp(mainPath.c_str(), &mainText) && slurp(viewPath.c_str(), &viewText),
+          "both journals are on the disk");
+    const std::string hcPath = viewPath.substr(0, viewPath.size() - 6) + "-hc.jsonl";
+    check(slurp(hcPath.c_str(), &hcText), "and the custom game's hardcore one");
+    check(mainText == mainBefore, "the start-up journal was never rewritten by the custom game");
+    check(mainText.find(kCustom) == std::string::npos && mainText.find(kCustomHc) == std::string::npos,
+          "uniq-items.jsonl holds no custom-game row");
+    check(viewText.find(kCustom) != std::string::npos && viewText.find(kMain) == std::string::npos &&
+              viewText.find(kCustomHc) == std::string::npos,
+          "the custom game's journal holds its softcore row and nothing else");
+    check(hcText.find(kCustomHc) != std::string::npos && hcText.find(kCustom) == std::string::npos,
+          "its -hc journal holds its hardcore row and nothing else");
+
+    // and entering again finds the row where it was left
+    check(ut::journalFollow(0, "custom-lootascension") && ut::journalHas(kCustom) &&
+              countOf(kCustom) == 1 && !ut::journalHas(kMain),
+          "entering the custom game again hands back exactly what its journal holds");
+    check(ut::journalFollow(0, ""), "and leaving it once more");
+    ut::logFlush();
+    printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail, g_fail == 1 ? "" : "s");
+    return g_fail ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     // An ABSOLUTE path, the way tools\test_journal.cpp does it. A relative `L"test_store.log"`
     // would resolve against the PROCESS's current directory, which is whatever shell called the
@@ -1005,5 +1122,6 @@ int main(int argc, char** argv) {
     if (!strcmp(mode, "--legacy")) return passLegacyFile(argc > 2 ? argv[2] : "uniq-items.jsonl");
     if (!strcmp(mode, "--live")) return passLive();
     if (!strcmp(mode, "--modes")) return passModes();
+    if (!strcmp(mode, "--views")) return passViews();
     return passMain();
 }

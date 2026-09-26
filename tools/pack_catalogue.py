@@ -116,7 +116,7 @@ SLOT_TO_GROUP = {
 # entries.  They are packed as Epic (0) - a deliberate, logged narrowing, NOT a silent one: the
 # true word stays in catalogue.json, catalogue.bin's classification byte is read by nothing
 # outside the overlay (`g_cat` appears only in ut_panel.cpp, which runs with `enabled=0`), and
-# the collection page itself is driven by data/uniq/*, not by this file.
+# the collection page itself is driven by uniq-pages.arz, not by this file.
 # To carry Rare honestly, model/catalogue.h needs `Rare = 2` + `kClassificationCount = 3`, and
 # layout.h's kAllClassificationsMask then follows automatically - a C++ change, not this tool's.
 #

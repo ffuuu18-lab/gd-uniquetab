@@ -5,12 +5,13 @@
 //
 // Two mechanisms:
 //
-//  1. DATABASE. data/uniq/uniq.arz overrides records/ui/caravan/caravan_materialwindow.dbr so the
-//     Crafting Materials page lists the mod's boxes, one per unique. It is loaded by calling
+//  1. DATABASE. uniq-pages.arz, generated into the mod folder, adds the collection's own page and
+//     box records, one box per unique; the vanilla caravan_materialwindow.dbr is never
+//     overridden, one of our pages is handed back in its place. It is loaded by calling
 //     Engine::LoadDatabase from a post-detour on Engine::LoadMainDatabase - i.e. after the game's
 //     own archives and after Engine::GetDatabaseArchiveChecksum has already been computed, so the
 //     multiplayer database checksum is unchanged and HasLoadedCustomDatabase stays false.
-//     Nothing in the game folder is modified; uniq.arz lives next to the DLL.
+//     Nothing in the game's database is modified; uniq-pages.arz lives in the mod folder.
 //
 //  2. GATE. What may enter a reagent box is a single bool at Item + 0xC64, loaded from the
 //     record field `craftingMaterial` by Item::Load. The exported getter
@@ -228,6 +229,11 @@ struct UtReplicaCapture;  // ut_rescue.h - same namespace, declared there
 
 // Is `record` one of the mod's page records (uniq-records.txt)?
 bool reagentIsCollectionRecord(const char* record);
+
+// Where the active view's page archive puts the page: the frame record's WindowLocationX/Y in
+// window units and its box count, read back out of the file the engine loaded. False when that
+// record could not be read. Mod-owned values, no engine call.
+bool reagentWrittenFrame(int* x, int* y, int* boxes);
 // Is `item` still a live Item whose object id is `id`?
 bool reagentItemIsLive(GdItem* item, unsigned int id);
 // The live object behind an object id, or nullptr.

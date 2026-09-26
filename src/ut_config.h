@@ -24,7 +24,7 @@
 // every key that still exists keeps the user's value, new keys take their default, keys this
 // build no longer has are dropped with one log line naming them, and the file is rewritten in the
 // current layout. See configReload().
-#define UT_INI_VERSION 35
+#define UT_INI_VERSION 36
 
 struct UtConfig {
     int iniVersion = 0;
@@ -137,6 +137,12 @@ struct UtConfig {
     // 1 = the painted cover plate follows the group: a generated per-cell-size plate behind a
     // collection group, the ORIGINAL vanilla plate on group -1. 0 = never touch it.
     int plateSwap = 1;
+    // The flat ground a cover plate gets when the caravan is a MOD's: six hex digits RRGGBB,
+    // empty = the vanilla ground's own tone, sampled from the vanilla stash cover at generation
+    // (06 06 06). A mod's cover carries its own baked box lattice that our frames cannot be
+    // aligned to, so no pixel of it is used; only the mod's page is affected, never a vanilla
+    // plate. Changing it regenerates the set on the next launch (it is part of catalogue.stamp).
+    char plateGround[8] = {0};
     // The two tooltip texts, ASCII, read ONCE at start-up (they become engine-owned strings, so a
     // change applies from the next launch). Empty = the built-in wording.
     char tooltipTextYes[96] = {0};

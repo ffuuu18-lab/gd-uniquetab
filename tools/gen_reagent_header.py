@@ -170,6 +170,9 @@ WANTED = [
     ("GD_LOADTABLEBINARY_GETNUMELEMENTSFORFIELD", "Engine",
      "?GetNumElementsForField@LoadTableBinary@GAME@@UEBAIPEBD@Z",
      "verification: how many entries the record's reagentBoxes array has"),
+    ("GD_LOADTABLEBINARY_GETINT", "Engine",
+     "?GetInt@LoadTableBinary@GAME@@UEBAHPEBDH@Z",
+     "verification: an int field of the record the engine serves (the frame's WindowLocationX/Y)"),
     # ---- the rescue command mirrors the exe's own reagent take -----------------------------
     # Grim Dawn.exe 0x132B10..0x132C1D, disassembled out of the decrypted exe image. Every step of
     # it is one of these exports; none of the four Item vtable slots it uses (0x410 PlayDropSound,

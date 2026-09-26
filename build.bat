@@ -52,7 +52,12 @@ if errorlevel 1 goto :fail
 
 rem ---- 2. the mod --------------------------------------------------------------------------
 echo [build] mod sources...
-cl /nologo /c /O2 /MD /W4 /WX /EHsc /std:c++17 /GR- /DNDEBUG ^
+rem /d2FH4- keeps the compiler on the FH3 exception tables. FH4 is MSVC 2019+'s compressed
+rem format; it costs an import of VCRUNTIME140_1.dll (__CxxFrameHandler4 alone), which is the
+rem youngest and least exercised corner of the runtime surface Wine reimplements. Every catch and
+rem every destructor unwind in this DLL goes through it. Windows behaviour is unchanged - only the
+rem table encoding differs - and the binary keeps /MD, so the heap is still the game's.
+cl /nologo /c /O2 /MD /W4 /WX /EHsc /std:c++17 /GR- /d2FH4- /DNDEBUG ^
    /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
    /I"%MINHOOK%\include" /I"%ROOT%src" /Fo"%OBJ%\\" ^
    "%ROOT%src\dllmain.cpp" "%ROOT%src\ut_log.cpp" "%ROOT%src\ut_paths.cpp" ^
@@ -64,7 +69,7 @@ cl /nologo /c /O2 /MD /W4 /WX /EHsc /std:c++17 /GR- /DNDEBUG ^
    "%ROOT%src\model\catalogue.cpp" "%ROOT%src\model\collection.cpp" ^
    "%ROOT%src\model\layout.cpp" ^
    "%ROOT%src\gen\arz_reader.cpp" "%ROOT%src\gen\arc_reader.cpp" ^
-   "%ROOT%src\gen\catalogue_gen.cpp" "%ROOT%src\gen\pages_gen.cpp" "%ROOT%src\gen\generate.cpp"
+   "%ROOT%src\gen\catalogue_gen.cpp" "%ROOT%src\gen\pages_gen.cpp" "%ROOT%src\gen\arz_writer.cpp" "%ROOT%src\gen\ui_geometry.cpp" "%ROOT%src\gen\plate_gen.cpp" "%ROOT%src\gen\generate.cpp" "%ROOT%src\gen\heap_meter.cpp"
 if errorlevel 1 goto :fail
 
 rem ---- 3. link -------------------------------------------------------------------------------

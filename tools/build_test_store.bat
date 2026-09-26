@@ -96,6 +96,16 @@ mkdir "%SMODE%"
 set "UNIQUETAB_OUT=%SMODE%"
 "%OUT%\test_store.exe" --modes
 if errorlevel 1 set RC=1
+
+rem ---- pass 9: one collection per custom game ---------------------------------------------------
+rem A custom game's journal set lives under views\custom-<name>\ beside the start-up one, keyed by
+rem the custom mod's name. Rows on both sides of a switch made mid-process; both files read back.
+set "SVIEW=%OUT%\store-views"
+if exist "%SVIEW%" rd /s /q "%SVIEW%"
+mkdir "%SVIEW%"
+set "UNIQUETAB_OUT=%SVIEW%"
+"%OUT%\test_store.exe" --views
+if errorlevel 1 set RC=1
 set "UNIQUETAB_OUT=%SOUT%"
 
 rem ---- the guard must still refuse to uninstall over a table that holds something --------------

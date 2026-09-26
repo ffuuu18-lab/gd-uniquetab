@@ -7,12 +7,56 @@
 // that matches costs one stat per input archive and one debug line; a first launch or a game
 // update rebuilds the files (a few seconds, one info line each way); a failure is one ERROR
 // line and the folder keeps the files it already had.
+//
+// THE VIEW. Which database the outputs describe is decided twice: once at start-up, from
+// /basemods on the command line, and again every time the engine loads a database - a custom
+// game is chosen from the main menu, long after start-up, and moves the caravan with its own
+// records. The start-up view's outputs keep the mod folder itself, so an installed copy sees no
+// change until it enters a custom game; a custom view's go to <mod folder>\views\<name>, so
+// entering one and leaving it again never rewrites what the start-up view reads. Everything that
+// reads a generated file resolves it through utViewFile().
 #pragma once
 
 #include <windows.h>
 
+#include <stddef.h>
+
 namespace ut {
 
+// The start-up view, into the mod folder. Worker thread, once.
 void generateEnsure(HMODULE selfModule);
+
+// The active view's name ("vanilla", "basemods", "custom-<name>", "basemods+custom-<name>") and
+// the tag a non-vanilla plate file name carries (empty for the start-up view).
+const char* viewName();
+const char* viewTag();
+// True while a custom game's view is the active one.
+bool viewIsCustom();
+
+// "<the active view's folder>\<leaf>", false when the file is not there. The start-up view
+// answers exactly what utModFile() answers.
+bool utViewFile(HMODULE selfModule, const char* leaf, char* out, size_t cap);
+
+// The mod folder of a custom game's archive, from the path Engine::LoadDatabase was handed - the
+// engine names it relative to its working directory with forward slashes
+// ("mods/<name>/database/<name>.arz"). Resolved against the game folder, then against the current
+// directory, and accepted only where that archive exists. False (and `out` empty) for every
+// archive that is not a custom game's.
+bool customGameFolderOf(const char* enginePath, char* out, size_t cap);
+
+// A custom game's database is loading out of <game>\mods\<name>: generate that view's outputs
+// under <mod folder>\views\ and make it the active one. GAME THREAD, from inside the database
+// detour and before the overlay is loaded, because the overlay a custom view needs is that
+// view's own uniq-pages.arz. True when the active view CHANGED.
+bool viewEnterCustom(HMODULE selfModule, const char* modFolder);
+
+// True while a view is being generated on the game thread. The frame counter cannot advance
+// during those few seconds, and the stall check must not read that as a crashed game.
+bool generateBusy();
+
+// Back to the view the process started in: Engine::LoadMainDatabase rebuilds the base database,
+// so whatever custom layer was above it is gone. Its outputs are already there - nothing is
+// generated. True when the active view changed.
+bool viewEnterStartup();
 
 }  // namespace ut

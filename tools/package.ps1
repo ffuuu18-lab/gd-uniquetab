@@ -1,8 +1,10 @@
 # package.ps1 - builds the release zip from a built tree.
-#   powershell -ExecutionPolicy Bypass -File tools\package.ps1 [-Version 1.0.0] [-Out out\]
-# Stages exactly what a player installs and zips it.
-# Nothing generated ships: the plugin builds catalogue.bin and the uniq-*.txt files itself on
-# the first launch and writes its own ini.
+#   powershell -ExecutionPolicy Bypass -File tools\package.ps1 [-Version 1.1.0] [-Out out\]
+# Stages exactly what a player installs and zips it: x64\uniquetab.asi and the three documents.
+# Nothing generated or derived from the game ships. The plugin creates x64\uniquetab\ itself and
+# on the first launch generates catalogue.bin, the uniq-*.txt lists and the uniq-pages.arz
+# overlay there, paints the cover plates into <game>\settings\ui\caravan\ and writes its own ini.
+# data\oracle\ is the test harness's fixtures and never enters the zip.
 param(
     [string]$Version = "",
     [string]$Out = ""
@@ -20,16 +22,19 @@ if (-not (Test-Path $asi)) { throw "bin\uniquetab.asi is missing - run build.bat
 $name = "UniqueCollectionTab-$Version"
 $stage = Join-Path $Out $name
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-New-Item -ItemType Directory -Force "$stage\x64\uniquetab" | Out-Null
-New-Item -ItemType Directory -Force "$stage\settings\ui\caravan" | Out-Null
+New-Item -ItemType Directory -Force "$stage\x64" | Out-Null
 
 Copy-Item $asi "$stage\x64\uniquetab.asi"
-Copy-Item (Join-Path $root "data\uniq\uniq-pages.arz")   "$stage\x64\uniquetab\"
-Copy-Item (Join-Path $root "data\plates\uniq_plate_*.tex") "$stage\settings\ui\caravan\"
 foreach ($doc in "README.md", "LICENSE", "THIRD_PARTY.md") {
     $p = Join-Path $root $doc
     if (Test-Path $p) { Copy-Item $p "$stage\$doc" } else { Write-Warning "$doc is missing from the tree" }
 }
+
+# What must never be in the zip: a generated output, a plate, the overlay, a fixture.
+$bad = Get-ChildItem $stage -Recurse -File | Where-Object {
+    $_.Extension -in ".tex", ".arz", ".arc", ".bin", ".txt", ".jsonl", ".gds", ".ini", ".stamp"
+}
+if ($bad) { throw ("derived files staged: " + (($bad | ForEach-Object { $_.Name }) -join ", ")) }
 
 $zip = Join-Path $Out "$name.zip"
 if (Test-Path $zip) { Remove-Item -Force $zip }

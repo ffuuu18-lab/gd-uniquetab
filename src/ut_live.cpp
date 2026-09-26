@@ -9,6 +9,7 @@
 // relayout leaks another; the group, the row and the owned-only latch are mod-owned (g_cfg is
 // replaced from the ini once a second) and reach the ini through one debounced path.
 
+#include "ut_generate.h"
 #include "ut_live.h"
 
 #include <math.h>   // floorf: the engine's own position rounding
@@ -107,6 +108,11 @@ std::vector<Group>* g_groups = nullptr;
 std::string* g_frame = nullptr;
 int g_nmax = 0;
 int g_x0 = 105, g_y0 = 76, g_rowGap = 2;
+// The P line. The defaults are the vanilla derivation, so a group file written before the
+// line existed behaves exactly as it did.
+int g_usableW = 333, g_usableH = 552, g_plateW = 438, g_plateH = 627;
+bool g_geoDerived = false;
+std::string* g_plateName = nullptr;
 
 std::vector<void*>* g_boxes = nullptr;             // the live box widgets, in creation order
 std::unordered_map<std::string, unsigned int>* g_protoCache = nullptr;  // record -> object id
@@ -765,6 +771,7 @@ void trimEol(char* s) {
 
 // uniq-groups.txt, written by src\gen\pages_gen.cpp (tools\build_uniq_db.py is the reference):
 //   F <frame record> <nmax> <vanillaCount> <x0> <y0> <rowGap>
+//   P <x0> <y0> <usableW> <usableH> <plateW> <plateH> <plate bitmapName>
 //   V <vanilla box record>                     (vanillaCount of them, in order)
 //   G <n> <label> <cols> <rows> <cellW> <cellH> <count>
 //   E <box record>                             (count of them, in order)
@@ -796,6 +803,34 @@ bool loadGroups(const char* path) {
             if (f[3]) g_x0 = atoi(f[3]);
             if (f[4]) g_y0 = atoi(f[4]);
             if (f[5]) g_rowGap = atoi(f[5]);
+        } else if (!strcmp(line, "P")) {
+            char* f[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+            char* p = rest;
+            for (int i = 0; i < 7; ++i) {
+                f[i] = p;
+                char* t = strchr(p, '\t');
+                if (!t) break;
+                *t = 0;
+                p = t + 1;
+            }
+            // All seven or none: a half-read line would put the grid somewhere no record
+            // describes, and the vanilla defaults are a better answer than that.
+            if (f[6] && f[6][0]) {
+                const int v[6] = {atoi(f[0]), atoi(f[1]), atoi(f[2]), atoi(f[3]),
+                                  atoi(f[4]), atoi(f[5])};
+                bool ok = v[2] >= 32 && v[3] >= 32 && v[4] >= 32 && v[5] >= 32;
+                for (int i = 0; i < 6 && ok; ++i) ok = v[i] > -4000 && v[i] < 20000;
+                if (ok) {
+                    g_x0 = v[0];
+                    g_y0 = v[1];
+                    g_usableW = v[2];
+                    g_usableH = v[3];
+                    g_plateW = v[4];
+                    g_plateH = v[5];
+                    if (g_plateName) *g_plateName = f[6];
+                    g_geoDerived = true;
+                }
+            }
         } else if (!strcmp(line, "V")) {
             g_vanBoxes->push_back(rest);
         } else if (!strcmp(line, "G")) {
@@ -846,6 +881,10 @@ bool loadGroups(const char* path) {
          "groups=%zu entries=%zu itemRecords=%zu origin=(%d,%d) rowGap=%d",
          path, g_frame->c_str(), g_nmax, g_vanBoxes->size(), g_groups->size(), entries, withItem,
          g_x0, g_y0, g_rowGap);
+    logD("live: geometry %s: origin (%d,%d) usable %dx%d plate %dx%d \"%s\"",
+         g_geoDerived ? "derived from the merged database" : "vanilla defaults (no P line)",
+         g_x0, g_y0, g_usableW, g_usableH, g_plateW, g_plateH,
+         g_plateName ? g_plateName->c_str() : "");
     if (withItem != entries) {
         logW("live: %zu of %zu entries carry no item record - the owned counters read UNKNOWN; "
              "delete catalogue.stamp to regenerate it",
@@ -910,6 +949,7 @@ bool liveInit(HMODULE selfModule) {
     g_groups = new std::vector<Group>();
     g_vanBoxes = new std::vector<std::string>();
     g_frame = new std::string();
+    g_plateName = new std::string("ui/caravan/caravan_transfercomponent1_bg.tex");
     g_boxes = new std::vector<void*>();
     g_vanPos = new std::vector<float>();
     g_protoCache = new std::unordered_map<std::string, unsigned int>();
@@ -917,7 +957,7 @@ bool liveInit(HMODULE selfModule) {
     plateInit(selfModule);   // its own signature, its own late scan, its own log
 
     char path[MAX_PATH];
-    if (!utModFile(selfModule, "uniq-groups.txt", path, sizeof(path)) || !loadGroups(path)) {
+    if (!utViewFile(selfModule, "uniq-groups.txt", path, sizeof(path)) || !loadGroups(path)) {
         g_why = "uniq-groups.txt is missing or unreadable";
         logE("live: %s - the tab cannot page; the group hotkeys still work", g_why);
         return false;
@@ -953,6 +993,43 @@ bool liveInit(HMODULE selfModule) {
     InterlockedExchange(&g_codeOk, 1);
     g_why = "armed";
     logI("live: the tab is armed - restored group=%d row=%d", g_wantGroup, g_wantRow);
+    return true;
+}
+
+bool liveReloadView(HMODULE selfModule) {
+    if (!g_groups) return false;   // nothing has loaded yet: liveInit will read the right one
+    char path[MAX_PATH];
+    if (!utViewFile(selfModule, "uniq-groups.txt", path, sizeof(path))) {
+        logW("live: the %s view has no uniq-groups.txt - the group table stays as it was",
+             viewName());
+        return false;
+    }
+    // The old table is not freed. A view change happens at most a few times in a session and the
+    // table is tens of kilobytes; the draw path reads it without a lock, so the one thing that
+    // must never happen is memory going away under it.
+    std::vector<Group>* oldGroups = g_groups;
+    std::vector<std::string>* oldVan = g_vanBoxes;
+    std::string* oldFrame = g_frame;
+    std::string* oldPlate = g_plateName;
+    g_groups = new std::vector<Group>();
+    g_vanBoxes = new std::vector<std::string>();
+    g_frame = new std::string();
+    g_plateName = new std::string("ui/caravan/caravan_transfercomponent1_bg.tex");
+    g_geoDerived = false;
+    if (!loadGroups(path)) {
+        g_groups = oldGroups;   // the reader failed: keep what was working
+        g_vanBoxes = oldVan;
+        g_frame = oldFrame;
+        g_plateName = oldPlate;
+        logW("live: the %s view's uniq-groups.txt could not be read - the group table stays as "
+             "it was", viewName());
+        return false;
+    }
+    InterlockedExchange(&g_dataOk, 1);
+    if (g_wantGroup >= (int)g_groups->size()) g_wantGroup = -1;
+    plateOnViewChanged();   // the plate names carry the view: probe them again
+    logI("live: the group table is the %s view's - origin (%d,%d) usable %dx%d plate %dx%d",
+         viewName(), g_x0, g_y0, g_usableW, g_usableH, g_plateW, g_plateH);
     return true;
 }
 
@@ -1520,6 +1597,18 @@ int liveCapturedBoxes(void** out, int cap) {
         for (int i = 0; i < m; ++i) out[i] = (*g_boxes)[i];
     }
     return n;
+}
+
+void liveGeometry(LiveGeometry* out) {
+    if (!out) return;
+    out->x0 = g_x0;
+    out->y0 = g_y0;
+    out->usableW = g_usableW;
+    out->usableH = g_usableH;
+    out->plateW = g_plateW;
+    out->plateH = g_plateH;
+    out->plate = g_plateName ? g_plateName->c_str() : "";
+    out->derived = g_geoDerived;
 }
 
 int liveCellSizes(int* w, int* h, int cap) {

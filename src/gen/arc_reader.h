@@ -12,9 +12,15 @@
 //   a part is an LZ4 block; a part whose csize == dsize is stored raw; numParts == 0 means
 //   the whole entry is stored raw at fileOffset.
 //
+// load() keeps the part table, the string table and the entry table - the index - and holds
+// the file open; read() fetches and decompresses one entry body at a time. The archive
+// itself is never resident: Items.arc alone is a gigabyte.
+//
 // Bounds-checked like arz_reader; a corrupt archive fails to load, nothing throws.
 // tools/arc.py is the Python reference this mirrors.
 #pragma once
+
+#include "gen/arz_reader.h"          // FileHandle, and normKey this delegates to
 
 #include <cstddef>
 #include <cstdint>
@@ -40,13 +46,18 @@ public:
     std::size_t size() const { return m_entries.size(); }
     const std::vector<ArcEntry>& entries() const { return m_entries; }
     const ArcEntry* entry(const std::string& name) const;
-    bool read(const ArcEntry& e, std::vector<std::uint8_t>& out) const;
+    // The entry body. limit > 0 stops after the first part that reaches it, so a caller
+    // that wants a header does not pay for the rest: out then holds at least limit bytes,
+    // or the whole entry when it is shorter.
+    bool read(const ArcEntry& e, std::vector<std::uint8_t>& out, std::size_t limit = 0) const;
     static std::string normKey(const std::string& name);
 
 private:
     struct Part { std::uint32_t offset, csize, dsize; };
     std::string m_path, m_tag;
-    std::vector<std::uint8_t> m_blob;
+    FileHandle m_file;
+    std::uint64_t m_fileSize = 0;
+    mutable std::vector<std::uint8_t> m_scratch;   // one compressed part
     std::vector<Part> m_parts;
     std::vector<ArcEntry> m_entries;
     std::unordered_map<std::string, std::size_t> m_index;
@@ -61,7 +72,8 @@ public:
     bool contains(const std::string& name) const;
     // Tag of the winning archive, "" when absent.
     std::string sourceOf(const std::string& name) const;
-    bool read(const std::string& name, std::vector<std::uint8_t>& out) const;
+    bool read(const std::string& name, std::vector<std::uint8_t>& out,
+              std::size_t limit = 0) const;
 
 private:
     std::vector<ArcArchive> m_archives;

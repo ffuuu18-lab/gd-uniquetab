@@ -6,8 +6,9 @@
 # DELETES them at the next character load, and the pruned reagents.gst goes to Steam Cloud.
 #
 # This script exits 1 (refuse) when either is true:
-#   * either collection journal (softcore uniq-items.jsonl, hardcore uniq-items-hc.jsonl) says
-#     the mod still holds at least one item, or
+#   * any collection journal (softcore uniq-items.jsonl, hardcore uniq-items-hc.jsonl, and the
+#     same pair of every custom game under views\custom-<name>\) says the mod still holds at
+#     least one item, or
 #   * rescue-report.txt is missing or OLDER than the journal (i.e. the last rescue run does
 #     not cover what the journal now contains).
 # Exit 0 = safe to uninstall.  It reads files and writes nothing.
@@ -206,7 +207,7 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
         if (Test-Path -LiteralPath $journal -PathType Leaf) {
             $j = Read-TextJournal $journal
         }
-        elseif (Test-Path -LiteralPath $legacy -PathType Leaf) {
+        elseif ($legacy -and (Test-Path -LiteralPath $legacy -PathType Leaf)) {
             $j = Read-BinaryJournal $legacy
             Write-Host "[guard] NOTE: only the OLD binary journal is here. The new build converts it to"
             Write-Host "[guard]       uniq-items.jsonl the first time it runs; until then this is the record."
@@ -243,7 +244,7 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
 
     if ($Dump) {
         if (-not $j) {
-            Write-Host ("[guard] no {0} journal in {1}" -f $mode, $JournalDir)
+            Write-Host ("[guard] no {0} journal in {1}" -f $mode, (Split-Path -Parent $journal))
             return 0
         }
         Write-Host ("[guard] {0}: {1}, {2} entries ({3} stored, {4} not stored, {5} never checked)" -f `
@@ -261,8 +262,9 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
     if (-not $j) {
         # Say WHERE it looked. "There is no journal in the folder I chose" and
         # "there is nothing stored" are different statements, and only the first one is provable here.
-        Write-Host ("[guard] no {0} journal file in {1} (looked for {2} and {3})." -f $mode, $JournalDir,
-            (Split-Path -Leaf $journal), (Split-Path -Leaf $legacy))
+        Write-Host ("[guard] no {0} journal file in {1} (looked for {2}{3})." -f $mode,
+            (Split-Path -Parent $journal), (Split-Path -Leaf $journal),
+            $(if ($legacy) { " and " + (Split-Path -Leaf $legacy) } else { "" }))
         if ($haveIni) {
             Write-Host ("[guard] {0} IS there, so this is the folder the mod uses - that collection is empty." -f $ini)
         } else {
@@ -333,7 +335,7 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
         }
         Write-Host ("[guard] rescue-report.txt is OLDER than the journal ({0:u} < {1:u})." -f $rTime, $jTime)
     } else {
-        Write-Host ("[guard] there is no rescue-report.txt in {0} at all." -f $OutDir)
+        Write-Host ("[guard] there is no rescue-report.txt in {0} at all." -f (Split-Path -Parent $report))
     }
 
     Write-Host ""
@@ -361,7 +363,7 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
     Write-Host "[guard] Get them back first: start the game, open the caravan window, then EITHER"
     Write-Host "[guard]   a) create an empty file  $OutDir\RESCUE-NOW   (the mod deletes it and runs), or"
     Write-Host "[guard]   b) set rescue=1 in $OutDir\uniquetab.ini"
-    Write-Host "[guard] and wait for $OutDir\rescue-report.txt. Then run undeploy again."
+    Write-Host "[guard] and wait for $report. Then run undeploy again."
     Write-Host "[guard] (An entry can remain after the item was taken back out - the mod keeps it until the identity"
     Write-Host "[guard]  is restored - so this can fire for an EMPTY page; the rescue then restores nothing but still writes the report.)"
     Write-Host "[guard] Override (you accept the loss):  undeploy.bat --force"
@@ -369,14 +371,27 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
 
 }
 
-# ---- both collections -------------------------------------------------------------------------
-# softcore first, then hardcore. Both run even when the first refuses, so one call lists
-# everything at risk; the verdict is the worst of the two.
+# ---- every collection -------------------------------------------------------------------------
+# softcore first, then hardcore, for the start-up files and then for every custom game's own set
+# under views\custom-<name>\ (ut_rescue.h), each with the rescue report of its own folder. All of
+# them run even when one refuses, so one call lists everything at risk; the verdict is the worst.
 $verdict = 0
-foreach ($m in @(
-        @{ Mode = "softcore"; Journal = "uniq-items.jsonl"; Legacy = "uniq-items.bin" },
-        @{ Mode = "hardcore"; Journal = "uniq-items-hc.jsonl"; Legacy = "uniq-items-hc.bin" })) {
-    $rc = Invoke-GuardOne $m.Mode (Join-Path $JournalDir $m.Journal) (Join-Path $JournalDir $m.Legacy)
-    if ($rc -ne 0) { $verdict = 1 }
+$sets = @(@{ Label = ""; Dir = $JournalDir; Report = $report; Legacy = $true })
+$viewsDir = Join-Path $JournalDir "views"
+if (Test-Path -LiteralPath $viewsDir -PathType Container) {
+    Get-ChildItem -LiteralPath $viewsDir -Directory -Filter "custom-*" | Sort-Object Name | ForEach-Object {
+        $sets += @{ Label = " ($($_.Name))"; Dir = $_.FullName; Report = (Join-Path $_.FullName "rescue-report.txt"); Legacy = $false }
+    }
+}
+foreach ($s in $sets) {
+    $report = $s.Report
+    foreach ($m in @(
+            @{ Mode = "softcore"; Journal = "uniq-items.jsonl"; Legacy = "uniq-items.bin" },
+            @{ Mode = "hardcore"; Journal = "uniq-items-hc.jsonl"; Legacy = "uniq-items-hc.bin" })) {
+        # a custom game's folder never held the old binary journal
+        $legacy = if ($s.Legacy) { Join-Path $s.Dir $m.Legacy } else { "" }
+        $rc = Invoke-GuardOne ($m.Mode + $s.Label) (Join-Path $s.Dir $m.Journal) $legacy
+        if ($rc -ne 0) { $verdict = 1 }
+    }
 }
 exit $verdict

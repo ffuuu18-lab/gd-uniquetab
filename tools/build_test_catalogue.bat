@@ -5,8 +5,10 @@ rem
 rem pass 1: the archive readers against the Python reference (tools\dump_gen_sample.py):
 rem         counts and a deterministic sample of 200 decoded records + 200 text tags, diffed.
 rem pass 2: catalogue.bin generated from the game folder, byte for byte against data\oracle\catalogue.bin.
-rem pass 3: the three uniq txt files against data\oracle, and the capacity check on uniq-pages.arz.
-rem pass 4: the DLL's start-up path (stamp, temporary names, rename, the error paths) against a
+rem pass 3: the three uniq txt files against data\oracle, and the generated overlay read back.
+rem pass 3b: that overlay against the oracle data\oracle\uniq-pages.arz, record for record.
+rem pass 4: the DLL's start-up path (a fresh install, the stamp, temporary names, rename, the
+rem         error paths) against a
 rem         scratch mod folder under build\test\gen-mod.
 setlocal
 set "ROOT=%~dp0.."
@@ -32,8 +34,8 @@ call "%VCVARS%" >nul
 cl /nologo /W4 /WX /EHsc /O2 /std:c++17 /GR- /MD /DNDEBUG /D_CRT_SECURE_NO_WARNINGS ^
    /I"%ROOT%\src" /Fo"%OUT%\\" /Fe"%OUT%\test_catalogue.exe" ^
    "%ROOT%\tools\test_catalogue.cpp" "%ROOT%\src\gen\arz_reader.cpp" "%ROOT%\src\gen\arc_reader.cpp" ^
-   "%ROOT%\src\gen\catalogue_gen.cpp" "%ROOT%\src\gen\pages_gen.cpp" "%ROOT%\src\gen\generate.cpp" ^
-   "%ROOT%\src\model\catalogue.cpp"
+   "%ROOT%\src\gen\catalogue_gen.cpp" "%ROOT%\src\gen\pages_gen.cpp" "%ROOT%\src\gen\arz_writer.cpp" "%ROOT%\src\gen\ui_geometry.cpp" "%ROOT%\src\gen\plate_gen.cpp" "%ROOT%\src\gen\generate.cpp" "%ROOT%\src\gen\heap_meter.cpp" ^
+   "%ROOT%\src\model\catalogue.cpp" psapi.lib
 if errorlevel 1 (echo [test] BUILD FAILED & exit /b 1)
 
 set RC=0
@@ -57,9 +59,27 @@ rem ---- pass 2: catalogue.bin vs the oracle file ------------------------------
 "%OUT%\test_catalogue.exe" --catalogue "%ROOT%\data\oracle\catalogue.bin" "%OUT%\gen-catalogue.bin"
 if errorlevel 1 set RC=1
 
-rem ---- pass 3: the three uniq txt files vs the oracle ones, capacity vs the shipped arz -------
+rem ---- pass 2b: the derived geometry ---------------------------------------------------------
+"%OUT%\test_catalogue.exe" --geometry
+if errorlevel 1 set RC=1
+
+rem ---- pass 2c: the painted cover plates ------------------------------------------------------
+if not exist "%OUT%\gen-plates" mkdir "%OUT%\gen-plates"
+"%OUT%\test_catalogue.exe" --plates "%ROOT%\data" "%OUT%\gen-plates"
+if errorlevel 1 set RC=1
+
+rem ---- pass 3: the three uniq txt files vs the oracle ones, and the overlay read back --------
 if not exist "%OUT%\gen-uniq" mkdir "%OUT%\gen-uniq"
 "%OUT%\test_catalogue.exe" --pages "%ROOT%\data" "%OUT%\gen-uniq"
+if errorlevel 1 set RC=1
+
+rem ---- pass 3b: the generated overlay vs the oracle uniq-pages.arz, record for record --------
+"%OUT%\test_catalogue.exe" --overlay "%ROOT%\data" "%OUT%\gen-uniq"
+if errorlevel 1 set RC=1
+
+rem ---- pass 3c: a custom game's own view ------------------------------------------------------
+if not exist "%OUT%\gen-view" mkdir "%OUT%\gen-view"
+"%OUT%\test_catalogue.exe" --view "%OUT%\gen-view"
 if errorlevel 1 set RC=1
 
 rem ---- pass 4: the DLL's start-up path against a scratch mod folder ---------------------------

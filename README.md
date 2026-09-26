@@ -12,10 +12,30 @@ the mod. Nothing the mod does is written into `player.gdc` or into any `.gst` st
 future patch, a broken mod or a plain uninstall cannot make the game prune what you stored. If
 you remove the mod, your collection file stays on disk exactly as it was.
 
+## New in 1.1.0
+
+- **Works with stash-UI mods.** X-Mod, Falendar's UI Overhaul, Loot Ascension's Baul UI and mods
+  like them that redraw the caravan: the collection pages are laid out for the window the mod
+  draws, on a plain background that sits inside its frame, with no profile to pick.
+- **Works in custom games, each with its own collection.** A custom game that brings its own
+  caravan gets its pages built for it the first time you enter it, and keeps a collection of its
+  own beside them, so what you store there stays there. The main campaign's collection is never
+  touched while you play one.
+- **Ready for the 1.3.1 update.** The mod passes its own checks on the 1.3.1 beta unchanged, and
+  the items the update adds are picked up by themselves on the first launch after it.
+- **Easier on memory.** Building the catalogue now takes about 100 MB and never holds a whole game
+  archive, which matters on a Steam Deck.
+- **Nothing to copy but the plugin.** The page database and the page backgrounds are now made by
+  the mod on your machine, out of your own game files, so the package is the `.asi` and nothing
+  else. Leftovers from an older version are replaced on the first launch.
+- **`plate_ground`** in the ini sets the colour a stash-UI mod's collection background is filled
+  with (see *Settings*).
+
 ## What you need
 
-- Grim Dawn 1.3.0.8, 64-bit. The mod checks the game's shape, not its version number, and turns
-  itself off if it does not recognise what it finds (see *When something goes wrong*).
+- Grim Dawn 1.3.0.8, 64-bit, or the 1.3.1 beta. The mod checks the game's shape, not its version
+  number, and turns itself off if it does not recognise what it finds (see *When something goes
+  wrong*).
 - [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader), the **x64** build.
   This mod is an ASI plugin: it does nothing until a loader loads it. The loader is not included
   here - download it once and it serves every ASI mod you use.
@@ -28,20 +48,35 @@ Everything goes in the game's `x64` folder - the one that holds `Grim Dawn.exe`.
 1. Take `dinput8.dll` from the x64 build of Ultimate ASI Loader and put it in `x64\`, beside
    `Grim Dawn.exe`. The loader's `winmm.dll` variant works too. Use exactly one of them: two
    loaders in one folder would load every plugin twice.
-2. Copy `uniquetab.asi` into that same `x64\` folder.
-3. Copy the `uniquetab` folder into that same `x64\` folder, so you have `x64\uniquetab\`.
-4. Copy the `settings` folder into the **game's root folder** - the one that holds `x64\`, not
-   into `x64\` itself. You should end up with `settings\ui\caravan\uniq_plate_*.tex`. These are
-   the page backgrounds. The engine reads them by resource name, so this is the one place they
-   can go; without them the pages fall back to the vanilla background.
+2. Copy `uniquetab.asi` from the package's `x64` folder into that same `x64\` folder.
 
-Then start the game and sit at the main menu for a few seconds.
+That is all. Start the game and sit at the main menu for a few seconds.
 
-**The first launch builds the catalogue.** The mod reads your own installation - your archives,
-your language, your DLCs - and writes the item catalogue into `x64\uniquetab\`. It takes a few
-seconds, once. It happens again after a game update, and never otherwise. The settings file
-`x64\uniquetab\uniquetab.ini` is written at the same time, with every option and a line of
-explanation for each.
+**The first launch builds everything else.** The mod creates its folder, `x64\uniquetab\`, reads
+your own installation - your archives, your language, your DLCs - and writes three things from
+it: the item catalogue and the collection's page database, into `x64\uniquetab\`, and the page
+backgrounds, into `settings\ui\caravan\` in the game's root folder (the one that holds `x64\`).
+It takes a few seconds, once. It happens again after a game update, and never otherwise. The mod
+writes only files named `uniq_plate_*.tex` in `settings\ui\caravan\`, and only those, because that
+folder is the one place the engine looks up a texture by resource name. They are painted on the
+background a normal stash tab shows, so a stash-UI mod that changes the caravan gets backgrounds
+that match it. If that folder cannot be written - a read-only install - the pages keep the plain
+vanilla background and the log says so. The settings file `x64\uniquetab\uniquetab.ini` is
+written at the same time, with every option and a line of explanation for each.
+
+**Upgrading from 1.0.x** is the same two steps: replace `uniquetab.asi` and start the game. Your
+collection, your ini and your exports stay where they are. The page database and backgrounds the
+older version installed are rebuilt from your game files on the first launch, which the log calls
+a mod update.
+
+**A custom game gets its own build.** A custom game - anything you pick from *Custom Game* in the
+main menu, the Crucible included - loads its own database on top of the main one, and a stash-UI
+mod bundled with it (Loot Ascension bundles Baul's) moves the caravan. The mod follows: the first
+time you enter that game it builds the collection once more for that database, about three
+seconds on the loading screen, and from then on it is instant. Those files go in
+`x64\uniquetab\views\<name>\`, so the main campaign's own build is never touched and leaving the
+custom game costs nothing. The page backgrounds for it go into `settings\ui\caravan\` like the
+others, under names that carry the game's own name so two mods cannot collide.
 
 Everything the mod reads and writes lives in that `uniquetab` folder beside the `.asi`. If you
 put the `.asi` in `x64\scripts\` instead, its folder becomes `x64\scripts\uniquetab\`. If the game
@@ -59,9 +94,10 @@ WINEDLLOVERRIDES="dinput8=n,b" %command%
 (or `winmm=n,b` if you took the `winmm.dll` variant of the loader), so Wine loads the loader
 sitting in the folder instead of its own built-in DLL.
 
-The files themselves go in the same places as on Windows - inside the game's own `x64\` and
-`settings\` folders, **not** in the Proton prefix. The prefix under
-`steamapps/compatdata/219990/pfx` holds only the fake Windows drive and nothing of this mod.
+The plugin goes in the same place as on Windows - the game's own `x64\` folder - and the mod
+writes its own files into `x64\uniquetab\` and the game's `settings\` folder there, **not** into
+the Proton prefix. The prefix under `steamapps/compatdata/219990/pfx` holds only the fake Windows
+drive and nothing of this mod.
 
 ## Using it
 
@@ -115,6 +151,15 @@ They work. A custom game loads a database of its own, and the mod loads its page
 as well. If a game mode ever loads a database the mod cannot join, that mode simply shows the
 plain vanilla Crafting Materials page and says so in the log; nothing is lost and the campaign is
 unaffected.
+
+A custom game that brings its own caravan window (Loot Ascension's Baul UI, for example) gets a
+page laid out for that window - generated once, a few seconds on the loading screen the first
+time you enter it - and **a collection of its own**: its journal, its GD Stash export and its
+rescue report live in `views\custom-<name>\` beside that page, and the main campaign's
+`uniq-items.jsonl` is never read or written while you play it. The same mod with or without
+`/basemods` is the same collection. The only file the two share is `uniquetab.ini`. A custom game
+that leaves the caravan alone (the Crucible, most loot and class mods) uses the main campaign's
+page and collection.
 
 ## Settings
 
@@ -177,6 +222,12 @@ to the ini. The mod sees it, deletes it and runs the rescue.
 the two lines the tooltip adds. Leave it alone unless a line in the file tells you exactly what it
 is for; every value is clamped to the range printed beside it.
 
+One of them is a matter of taste: **`plate_ground`**, six hex digits `RRGGBB`. Under a stash-UI
+mod the collection pages are painted on one flat colour, because the mod's own background carries
+a grid of its own that ours would not line up with. Empty (the default) takes the tone of the
+vanilla stash background, a near-black `060606`. Changing it repaints those backgrounds once, at
+the next launch; the vanilla pages never use it.
+
 ## Multiplayer
 
 The collection works in multiplayer, **as the host and as a client**, with `mp_collect=1` (the
@@ -198,9 +249,12 @@ Everything lives in `x64\uniquetab\`:
 | `uniq-export.gds`, `uniq-export-hc.gds` | a stash file GD Stash can import |
 | `uniquetab.ini` | your settings |
 | `uniquetab.log` (+ three older copies) | what happened last session |
-| `catalogue.bin`, `catalogue.stamp`, `uniq-*.txt` | generated from your game; delete them and they come back |
+| `catalogue.bin`, `catalogue.stamp`, `uniq-*.txt`, `uniq-pages.arz` | generated from your game; delete them and they come back |
+| `views\<name>\` | the generated set again for a custom game you have entered; delete those generated files and they come back |
+| `views\custom-<name>\uniq-items*.jsonl` | **that custom game's collection** - back it up like the main one; never deleted by the mod |
 
-**Back up `uniq-items*.jsonl`.** That file *is* the collection: every stored item, with its full
+**Back up `uniq-items*.jsonl`** (and `views\custom-*\uniq-items*.jsonl` if you play a custom game
+with its own collection). That file *is* the collection: every stored item, with its full
 identity, one item per line. It is plain text - you can open it, search it, and delete a line to
 forget an item. Copy it somewhere safe as often as you would back up a save.
 
@@ -215,14 +269,18 @@ explain itself. If you report a problem anywhere, send that file.
 - **The tab is not there at all.** The mod is not loaded. Check that the loader's `dinput8.dll`
   and `uniquetab.asi` are both in `x64\`, beside `Grim Dawn.exe`. If there is no log file at all,
   the loader never loaded the plugin.
+- **The tab is not there and the log says `uniq-pages.arz NOT FOUND`.** The first launch could not
+  build the page database; the `catalogue:` lines above it say why. Your usual Crafting Materials
+  page is untouched and nothing is lost. Fix what the log names and start the game again.
 - **The log says the mod is OFF.** That is the mod refusing to run on a game it does not
   recognise, and it is deliberate. It checks every single thing it needs to know about the game's
   memory before it installs anything at all, and if one of them cannot be found or no longer looks
   like itself, the whole mod stands down rather than running half-connected. The log names the one
   that failed. Usually this means the game has been patched and the mod needs an update; nothing
   is lost and your collection file is untouched.
-- **The pages have the wrong background.** The plate textures are not in
-  `settings\ui\caravan\` in the game's root folder. See step 4 of the install.
+- **The pages have the plain background.** The mod could not write its page backgrounds into
+  `settings\ui\caravan\` in the game's root folder; the log says which plates were painted and
+  where they went, or why they could not be.
 - **The tab is empty and the log mentions the catalogue.** Delete `catalogue.bin` and
   `catalogue.stamp` from `x64\uniquetab\` and start the game again; they are rebuilt from your
   installation.
@@ -240,9 +298,17 @@ page is back to normal.
 The loader (`dinput8.dll`) is shared with any other ASI mod you use, so delete it only if this
 was the only one.
 
-You can delete `x64\uniquetab\` and `settings\ui\caravan\uniq_plate_*.tex` as well - but take
+You can delete `x64\uniquetab\` and `settings\ui\caravan\uniq_plate_*.tex` as well (every page
+background the mod painted, a custom game's included, matches that name) - but take
 `uniq-items*.jsonl` out of the folder first if there is anything in your collection you would
 like to keep, or hand the items back with `rescue=1` before you remove anything.
+
+A custom game with a collection of its own keeps it in `views\custom-<name>\`: take that
+folder's `uniq-items*.jsonl` out as well, or hand its items back with `rescue=1` while you play
+that custom game - a rescue returns the collection of the game you are in, and writes its
+`rescue-report.txt` in the same folder. `undeploy.bat` checks every one of these collections
+before it removes anything, and neither it nor the mod ever deletes the `views\` folder: it
+holds your data now, so it stays until you remove it yourself.
 
 ## Licence
 

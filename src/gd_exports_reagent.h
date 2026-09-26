@@ -156,6 +156,9 @@
 // Engine.dll : verification: how many entries the record's reagentBoxes array has
 #define GD_LOADTABLEBINARY_GETNUMELEMENTSFORFIELD "?GetNumElementsForField@LoadTableBinary@GAME@@UEBAIPEBD@Z"
 
+// Engine.dll : verification: an int field of the record the engine serves (the frame's WindowLocationX/Y)
+#define GD_LOADTABLEBINARY_GETINT "?GetInt@LoadTableBinary@GAME@@UEBAHPEBDH@Z"
+
 // Game.dll : rescue: step 1 of the exe take - who receives the item
 #define GD_GAMEENGINE_GETMAINPLAYER "?GetMainPlayer@GameEngine@GAME@@QEBAPEAVPlayer@2@XZ"
 

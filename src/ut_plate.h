@@ -48,8 +48,8 @@ struct GdTexture;   // GAME::GraphicsTexture (gd_runtime.h)
 
 namespace ut {
 
-// Resolves the ReagentWindow::Load signature and reads data/plates/PLATES.txt (optional; the
-// built-in name pattern is used when it is absent). Safe to call twice.
+// Resolves the ReagentWindow::Load signature; the plate names follow the built-in pattern.
+// Safe to call twice.
 bool plateInit(HMODULE selfModule);
 
 // Installs the ReagentWindow::Load detour. Adds its target to *total when it really installs.
@@ -64,6 +64,10 @@ void plateApply(int group, const char* label, int cellW, int cellH);
 // Forget the captured window (its HUD is gone) and release every texture the mod loaded, so the
 // next world re-loads them instead of re-using a `GraphicsTexture*` the engine already unloaded.
 void plateOnWorldTeardown();
+
+// The active view changed: the plate names carry the view, so the cached set is dropped and the
+// next probe asks for this view's files. GAME THREAD.
+void plateOnViewChanged();
 
 // ---- PAGE VISIBILITY ----------------------------------------------------------------------------
 // `caravan+0x1728` is the visible page index (0 transfer, 1 private stash, 2 Components,

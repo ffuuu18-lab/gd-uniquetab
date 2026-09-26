@@ -1,7 +1,8 @@
-"""Reference implementation; the DLL generates the three txt files itself now (src/gen/pages_gen),
-uniq-pages.arz stays the shipped file this tool writes.
+"""Reference implementation; the DLL generates the three txt files and uniq-pages.arz itself
+(src/gen/pages_gen, src/gen/arz_writer). What this tool writes is the oracle the catalogue
+harness compares the DLL's output against; none of it ships.
 
-Build the mod's page databases into data/uniq/ (archives) and data/oracle/ (lists).
+Build the mod's page database and its lists into data/oracle/.
 
 THE MECHANISM.  The exe builds a reagent sub-window by calling
 `ObjectManager::LoadTableFile` / `GetLoadTable` - two Engine.dll exports - with the record
@@ -14,7 +15,7 @@ page is a NEW record of its own:
     records/ui/caravan/reagents/uniq/pNN/box_MM.dbr     40 boxes per page
 
 What is emitted
-  data/uniq/uniq-pages.arz     ALL pages and their boxes in one archive.  One archive, not
+  data/oracle/uniq-pages.arz   ALL pages and their boxes in one archive.  One archive, not
       one per page: with the path substitution above a page is selected by NAME, so separate
       archives would buy nothing and cost ~80 memory-mapped files and 80 LoadDatabase calls.
   data/oracle/uniq-pages.json  the manifest: per page the record path, the slot group, the
@@ -60,11 +61,12 @@ import gdpath                                                       # noqa: E402
 from arc import ArcSet                                              # noqa: E402
 from arz import ArzArchive, ArzDatabase, FT_INT, FT_STRING          # noqa: E402
 from arzw import ArzWriter, dbr_text, read_typed                    # noqa: E402
+import ui_geometry                                                  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-ARZ_DIR = os.path.join(ROOT, "data", "uniq")       # shipped: the two archives
-ORACLE = os.path.join(ROOT, "data", "oracle")     # fixtures: the txt lists, the manifest, sample dbr
+ORACLE = os.path.join(ROOT, "data", "oracle")     # fixtures: the archive, the txt lists, the manifest, sample dbr
+ARZ_DIR = ORACLE
 SRC_DIR = os.path.join(ORACLE, "src")
 GAME = gdpath.find_game_dir() or ""
 
@@ -94,13 +96,20 @@ HIDE_XY = -4000      # record pixels; multiplied by the UI scale, so always off-
 # NATURAL size (there is no box-size field and no scaling), so the cell only has to be as big as
 # the LARGEST icon in that slot group: rings / amulets / medals / relics are 32x32 and fit
 # 10 x 16 = 160 to a page, while the 1,076 records with a taller icon (chests, off-hands,
-# two-handers - 96 and 128 px) get pages of their own with a bigger cell.  The margins:
-#   x from 105 (the transfer-tab column ends at 100) to the caravan window's width, 438 -> 333 px
-#   y from  76 (the vanilla materials page's first row) to 715-88 = 627                 -> 551 px
-COL_X0, ROW_Y0 = 105, 76
-USABLE_W, USABLE_H = 438 - COL_X0, 627 - ROW_Y0
+# two-handers - 96 and 128 px) get pages of their own with a bigger cell.
+#
+# The rectangle is NOT a constant: ui_geometry.derive() reads it out of the merged database and
+# out of the cover texture, so a stash-UI mod that moves or enlarges the caravan is followed.
+# geometry() assigns these four in main() before anything reads them; the vanilla derivation is
+# the value here so --annotate-groups needs no game access.
+COL_X0, ROW_Y0 = ui_geometry.VANILLA[0], ui_geometry.VANILLA[1]
+USABLE_W, USABLE_H = ui_geometry.VANILLA[2], ui_geometry.VANILLA[3]
 ROW_GAP = 2          # the vanilla 64 px rows sit on a 66 px pitch
 MAX_PER_PAGE = 160   # the vanilla components page carries 108 boxes; stay in that order
+
+# The height the shipped layout was built with, before the cover's one-pixel
+# offset joined the derivation. Only used by geometry()'s assert.
+SHIPPED_USABLE_H = 551
 
 # The order the pages are laid out in: armour, then jewellery, then off-hands, then weapons.
 SLOT_ORDER = ["head", "shoulders", "chest", "hands", "waist", "legs", "feet",
@@ -272,17 +281,46 @@ def annotate_groups() -> int:
     return 0
 
 
+def geometry(args):
+    """Derive the grid rectangle and the plate, and install the four module globals.
+
+    The vanilla derivation must not move the shipped layout. It is one pixel taller than the
+    constants this tool used to hold (the cover sits at y=1, and the usable rectangle is
+    measured from the cover, not from the window - see ui_geometry.py), so the assert below
+    proves that every cell height in play still yields the same number of rows.
+    """
+    global COL_X0, ROW_Y0, USABLE_W, USABLE_H
+    geo = ui_geometry.derive(GAME, args.basemods, args.custom)
+    if not args.basemods and not args.custom:
+        assert geo.tuple() == ui_geometry.VANILLA, (
+            "the vanilla derivation moved: %r, expected %r" % (geo.tuple(), ui_geometry.VANILLA))
+        for ch in (32, 64, 96, 128):
+            assert (SHIPPED_USABLE_H // (ch + ROW_GAP)) == (geo.usableH // (ch + ROW_GAP)), (
+                "a %d px cell would change the row count" % ch)
+    COL_X0, ROW_Y0 = geo.x0, geo.y0
+    USABLE_W, USABLE_H = geo.usableW, geo.usableH
+    print("geometry: %s" % geo)
+    for note in geo.notes:
+        print("  %s" % note)
+    return geo
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--annotate-groups", action="store_true",
                     help="only add the item record to uniq-groups.txt (no game access, "
                          "nothing else is rewritten)")
     ap.add_argument("--limit-pages", type=int, default=0, help="stop after N pages (debug)")
+    ap.add_argument("--basemods", action="store_true",
+                    help="derive the geometry from the view the /basemods command line builds")
+    ap.add_argument("--custom", help="derive the geometry from a custom game (a name under "
+                                     "<game>" + chr(92) + "mods, or a full path to one)")
     args = ap.parse_args()
     if args.annotate_groups:
         return annotate_groups()
 
     os.makedirs(SRC_DIR, exist_ok=True)
+    geo = geometry(args)
     db = ArzDatabase.load_game(GAME)
     src_tag = db.source_of(MATERIAL_WINDOW)
     arc = db.archives[db._index[MATERIAL_WINDOW]]
@@ -423,6 +461,7 @@ def main() -> int:
     with open(os.path.join(ORACLE, "uniq-groups.txt"), "w", encoding="latin-1", newline="\r\n") as fh:
         fh.write("F\t%s\t%d\t%d\t%d\t%d\t%d\n"
                  % (FRAME_REC, N_MAX, len(van_boxes), COL_X0, ROW_Y0, ROW_GAP))
+        fh.write(geo.line() + "\n")
         for r in van_boxes:
             fh.write("V\t%s\n" % r)
         for n, g in enumerate(groups):
@@ -479,6 +518,8 @@ def main() -> int:
         "grid": "per slot group: the cell is the largest icon in the group",
         "x0": COL_X0, "y0": ROW_Y0, "usableW": USABLE_W, "usableH": USABLE_H,
         "rowGap": ROW_GAP, "maxPerPage": MAX_PER_PAGE,
+        "plate": geo.plate, "plateW": geo.plateW, "plateH": geo.plateH,
+        "geometryView": geo.view,
         "transferPlate": PLAIN_PLATE, "transferPlateWas": van_plate,
         "pageCount": len(pages), "itemCount": len(all_records), "skipped": dropped,
         "pages": manifest_pages,

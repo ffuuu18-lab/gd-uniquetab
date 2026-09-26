@@ -17,20 +17,32 @@ std::uint64_t rd64(const std::uint8_t* p) {
     return std::uint64_t(rd32(p)) | (std::uint64_t(rd32(p + 4)) << 32);
 }
 
-bool readFile(const std::string& path, std::vector<std::uint8_t>& out) {
-    FILE* f = std::fopen(path.c_str(), "rb");
-    if (!f) return false;
-    std::fseek(f, 0, SEEK_END);
-    long n = std::ftell(f);
-    if (n < 0) { std::fclose(f); return false; }
-    std::fseek(f, 0, SEEK_SET);
-    out.resize(std::size_t(n));
-    std::size_t got = n ? std::fread(out.data(), 1, out.size(), f) : 0;
-    std::fclose(f);
-    return got == out.size();
+} // namespace
+
+// ---------------------------------------------------------------- FileHandle
+bool FileHandle::open(const std::string& path) {
+    close();
+    m_f = std::fopen(path.c_str(), "rb");
+    return m_f != nullptr;
 }
 
-} // namespace
+void FileHandle::close() {
+    if (m_f) { std::fclose(m_f); m_f = nullptr; }
+}
+
+std::uint64_t FileHandle::size() const {
+    if (!m_f) return 0;
+    if (_fseeki64(m_f, 0, SEEK_END) != 0) return 0;
+    long long n = _ftelli64(m_f);
+    return n < 0 ? 0 : std::uint64_t(n);
+}
+
+bool FileHandle::readAt(std::uint64_t off, std::size_t n, std::uint8_t* out) const {
+    if (!m_f) return false;
+    if (n == 0) return true;
+    if (_fseeki64(m_f, (long long)off, SEEK_SET) != 0) return false;
+    return std::fread(out, 1, n, m_f) == n;
+}
 
 bool lz4BlockDecode(const std::uint8_t* src, std::size_t srcLen,
                     std::uint8_t* dst, std::size_t dstLen) {
@@ -146,23 +158,32 @@ bool ArzArchive::load(const std::string& path, std::string* error) {
         std::size_t d = base.find_last_of('.');
         m_tag = d == std::string::npos ? base : base.substr(0, d);
     }
-    if (!readFile(path, m_blob)) { if (error) *error = "cannot read " + path; return false; }
-    const std::uint8_t* b = m_blob.data();
-    const std::size_t n = m_blob.size();
-    if (n < 24) { if (error) *error = path + ": too short"; return false; }
-    std::uint16_t version = rd16(b + 2);
-    std::uint32_t recStart = rd32(b + 4), recSize = rd32(b + 8), recCount = rd32(b + 12);
-    std::uint32_t strStart = rd32(b + 16), strSize = rd32(b + 20);
+    if (!m_file.open(path)) { if (error) *error = "cannot read " + path; return false; }
+    m_fileSize = m_file.size();
+    const std::uint64_t n = m_fileSize;
+    std::uint8_t hdr[24];
+    if (n < 24 || !m_file.readAt(0, 24, hdr)) { if (error) *error = path + ": too short"; return false; }
+    std::uint16_t version = rd16(hdr + 2);
+    std::uint32_t recStart = rd32(hdr + 4), recSize = rd32(hdr + 8), recCount = rd32(hdr + 12);
+    std::uint32_t strStart = rd32(hdr + 16), strSize = rd32(hdr + 20);
     if (version != 3) { if (error) *error = path + ": ARZ version is not 3"; return false; }
     if (std::uint64_t(recStart) + recSize > n || std::uint64_t(strStart) + strSize > n
         || strSize < 4) {
         if (error) *error = path + ": table offsets outside the file";
         return false;
     }
+    // the two tables are the index and stay; they are read one at a time, not both at once
+    std::vector<std::uint8_t> table;
     // string table
     {
-        std::size_t p = strStart, end = std::size_t(strStart) + strSize;
-        std::uint32_t count = rd32(b + p);
+        table.resize(strSize);
+        if (!m_file.readAt(strStart, strSize, table.data())) {
+            if (error) *error = path + ": cannot read the string table";
+            return false;
+        }
+        const std::uint8_t* b = table.data();
+        std::size_t p = 0, end = strSize;
+        std::uint32_t count = rd32(b);
         p += 4;
         m_strings.reserve(count);
         for (std::uint32_t i = 0; i < count; ++i) {
@@ -176,7 +197,15 @@ bool ArzArchive::load(const std::string& path, std::string* error) {
     }
     // record table
     {
-        std::size_t p = recStart, end = std::size_t(recStart) + recSize;
+        table.clear();
+        table.shrink_to_fit();
+        table.resize(recSize);
+        if (!m_file.readAt(recStart, recSize, table.data())) {
+            if (error) *error = path + ": cannot read the record table";
+            return false;
+        }
+        const std::uint8_t* b = table.data();
+        std::size_t p = 0, end = recSize;
         m_entries.reserve(recCount);
         for (std::uint32_t i = 0; i < recCount; ++i) {
             if (p + 8 > end) { if (error) *error = path + ": record table truncated"; return false; }
@@ -216,9 +245,11 @@ const ArzEntry* ArzArchive::entry(const std::string& name) const {
 
 bool ArzArchive::decode(const ArzEntry& e, ArzRecord& out) const {
     out.fields.clear();
-    if (std::uint64_t(24) + e.offset + e.csize > m_blob.size()) return false;
+    if (std::uint64_t(24) + e.offset + e.csize > m_fileSize) return false;
+    m_scratch.resize(e.csize);
+    if (!m_file.readAt(std::uint64_t(24) + e.offset, e.csize, m_scratch.data())) return false;
     std::vector<std::uint8_t> raw(e.dsize);
-    if (!lz4BlockDecode(m_blob.data() + 24 + e.offset, e.csize, raw.data(), e.dsize)) return false;
+    if (!lz4BlockDecode(m_scratch.data(), e.csize, raw.data(), e.dsize)) return false;
     std::size_t p = 0, n = raw.size();
     while (p + 8 <= n) {
         ArzField f;

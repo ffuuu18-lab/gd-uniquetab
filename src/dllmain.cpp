@@ -59,15 +59,19 @@ LONG CALLBACK utVectoredHandler(EXCEPTION_POINTERS* ep) {
     if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
     const DWORD code = ep->ExceptionRecord->ExceptionCode;
     if (code != (DWORD)EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    // Nothing below is on a hot path, but a log level of warn or error means the reader asked for
+    // less than this: the fault line and the repeat counter are both debug.
+    // FIRST, before the probe depth: the level is a plain global, the probe depth is thread-local
+    // storage in a DLL the loader mapped late. Both tests must pass to log, so the order does not
+    // change what is logged - it keeps the default log level from touching this DLL's TLS block on
+    // every first-chance exception in the process, on threads that existed before it was loaded.
+    if (!ut::logWants(ut::UT_LOG_DEBUG)) return EXCEPTION_CONTINUE_SEARCH;
     // The mod's own DELIBERATE, SEH-handled probes fault by design (the replica slot scan
     // dereferences 8-aligned windows, the reagent map walk follows whatever a node holds), and the
     // probe counts each one. A vectored handler runs before the __except that owns them, so
     // without this test every one of them printed a fault line and buried the real ones. Tested
     // BEFORE the counter is touched, and again inside the fault logger.
     if (ut::reagentProbeDepth() > 0) return EXCEPTION_CONTINUE_SEARCH;
-    // Nothing below is on a hot path, but a log level of warn or error means the reader asked for
-    // less than this: the fault line and the repeat counter are both debug.
-    if (!ut::logWants(ut::UT_LOG_DEBUG)) return EXCEPTION_CONTINUE_SEARCH;
     // The ENGINE raises and handles first-chance access violations of its own as a matter of
     // course (30 x Engine.dll+0x3A740 reading [0+0x2C] in 40 ms while a world loads). They are
     // not the mod's business and would drown the 32-line budget. Log a fault only when this DLL
@@ -251,6 +255,11 @@ DWORD WINAPI workerMain(LPVOID) {
                     ut::logI("stall over: frames are advancing again (frames=%llu)", frames);
                     stallReported = false;
                 }
+            } else if (ut::generateBusy()) {
+                // A custom game's view is being generated on the game thread, inside the
+                // database detour: no frame can advance until it returns, and that is not a
+                // crashed game.
+                lastFrameMove = now;
             } else if (!stallReported && now - lastFrameMove >= 5000) {
                 stallReported = true;
                 HANDLE ev = OpenEventW(SYNCHRONIZE, FALSE, L"CRASHREPORT");

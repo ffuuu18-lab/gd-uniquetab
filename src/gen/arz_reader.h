@@ -10,17 +10,47 @@
 //                type u16, count u16, nameIdx u32, count x u32
 //                type 0 int32, 1 float32, 2 string-table index, 3 bool (int32)
 //
+// load() keeps the string table and the record table - the index - and holds the file open;
+// decode() reads and decompresses one record body at a time. The file itself is never
+// resident.
+//
 // Every read is bounds-checked: a corrupt file makes load() return false with a message,
 // nothing here throws. tools/arz.py is the Python reference this mirrors.
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace gen {
+
+// An open archive file. Movable, not copyable; closes itself. The readers keep the header
+// and the tables in memory and come back here for record bodies, so nothing the size of an
+// archive is ever resident. One handle is used by one thread at a time (readAt seeks).
+class FileHandle {
+public:
+    FileHandle() = default;
+    ~FileHandle() { close(); }
+    FileHandle(FileHandle&& o) noexcept : m_f(o.m_f) { o.m_f = nullptr; }
+    FileHandle& operator=(FileHandle&& o) noexcept {
+        if (this != &o) { close(); m_f = o.m_f; o.m_f = nullptr; }
+        return *this;
+    }
+    FileHandle(const FileHandle&) = delete;
+    FileHandle& operator=(const FileHandle&) = delete;
+    bool open(const std::string& path);
+    void close();
+    bool valid() const { return m_f != nullptr; }
+    std::uint64_t size() const;                   // 0 when the handle is closed
+    // n bytes at off into out; false on a seek error or a short read.
+    bool readAt(std::uint64_t off, std::size_t n, std::uint8_t* out) const;
+
+private:
+    std::FILE* m_f = nullptr;
+};
 
 // Decodes one raw LZ4 block into exactly dstLen bytes. False on any malformed input.
 bool lz4BlockDecode(const std::uint8_t* src, std::size_t srcLen,
@@ -71,7 +101,9 @@ public:
 
 private:
     std::string m_path, m_tag;
-    std::vector<std::uint8_t> m_blob;
+    FileHandle m_file;
+    std::uint64_t m_fileSize = 0;
+    mutable std::vector<std::uint8_t> m_scratch;   // one compressed record body
     std::vector<std::string> m_strings;
     std::vector<ArzEntry> m_entries;
     std::unordered_map<std::string, std::size_t> m_index;

@@ -43,6 +43,8 @@
 #include "gd_exports_reagent.h"
 #include "ut_config.h"
 #include "ut_depositgate.h"  // the table-or-refusal decision, as pure logic
+#include "ut_generate.h"
+#include "gen/arz_reader.h"  // the written frame record, read back for the position check
 #include "ut_live.h"
 #include "ut_pagegate.h"  // substitute-or-vanilla, as pure logic
 #include "ut_plate.h"  // plateCaravanState() / plateOnWorldTeardown()
@@ -114,10 +116,12 @@ typedef void*(__cdecl* PfnObjectManagerGet)(void);
 typedef const void*(__cdecl* PfnOM_LoadTableFile)(void*, const void* stdString);
 typedef const void*(__cdecl* PfnOM_GetLoadTable)(const void*, const void* stdString);
 typedef unsigned int(__cdecl* PfnLTB_GetNumElementsForField)(const void*, const char*);
+typedef int(__cdecl* PfnLTB_GetInt)(const void*, const char*, int);
 
 PfnObjectManagerGet p_ObjectManagerGet = nullptr;
 PfnOM_LoadTableFile p_LoadTableFile = nullptr;
 PfnLTB_GetNumElementsForField p_GetNumElementsForField = nullptr;
+PfnLTB_GetInt p_LtbGetInt = nullptr;
 const void* p_LoadTableBinaryVft = nullptr;
 volatile LONG g_verifyDone = 0;
 int g_verifyBoxes = -1;
@@ -188,6 +192,7 @@ volatile LONG g_frameUnavailSaid = 0;  // the one info line the user gets for it
 int g_verifyPageBoxes = -1;        // reagentBoxes on our page record, read back from the database
 char g_pageLabel[96] = "vanilla materials";
 volatile LONG g_depositDepth = 0;   // > 0 while an auto-deposit is on the stack
+HMODULE g_selfMod = nullptr;        // this DLL, for the per-view file paths
 volatile LONG g_dbLoaded = 0;       // 1 once uniq.arz went in
 volatile LONG g_dbTried = 0;
 volatile LONG g_dbMainLoads = 0;    // how often Engine::LoadMainDatabase has run this process
@@ -1617,23 +1622,34 @@ struct SlotDump {
 // one 16-byte pair that passes the size/capacity test while holding garbage would otherwise fault
 // and take the whole scan with it - and the log would then say "0 found", which reads like "the
 // ItemReplicaInfo layout is wrong" and is not.
+// Both faults below are DELIBERATE and handled here, so g_probeDepth is raised around them and
+// the vectored handler stays quiet: without it the scan's own "N faulted candidates" line was
+// preceded by a crash-shaped "***** EXCEPTION ... the mod does NOT handle it" for the same fault.
+// ProbeScope may not live in a function that contains a __try (C2712), so the counter is stepped
+// by hand; the __except returns, so the decrement is always reached.
 bool slotProbe(const unsigned char* blob, unsigned int off, size_t* size, const char** text,
                bool* faulted) {
     *faulted = false;
+    bool ok;
+    ++g_probeDepth;
     __try {
-        return looksLikeString(blob, off, size, text);
+        ok = looksLikeString(blob, off, size, text);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         *faulted = true;
-        return false;
+        ok = false;
     }
+    --g_probeDepth;
+    return ok;
 }
 
 void slotCopyText(char* dst, const char* text, size_t size) {
+    ++g_probeDepth;
     __try {
         _snprintf_s(dst, 64, _TRUNCATE, "%.60s", size ? text : "");
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         dst[0] = 0;
     }
+    --g_probeDepth;
 }
 
 void dumpReplicaSlots(const GdItem* item, SlotDump* out) {
@@ -3815,6 +3831,8 @@ void dbForgetLoad(const char* why) {
          InterlockedIncrement(&g_dbReloads), why);
 }
 
+void readWrittenFrame();
+
 bool loadOurArchive(GdEngine* engine, const char* route) {
     if (InterlockedCompareExchange(&g_dbLoaded, 0, 0)) return true;
     if (InterlockedExchange(&g_dbTried, 1)) return false;
@@ -3842,6 +3860,7 @@ bool loadOurArchive(GdEngine* engine, const char* route) {
          ok ? "OK" : "FAILED");
     if (ok) {
         InterlockedExchange(&g_dbLoaded, 1);
+        readWrittenFrame();  // off the disk only; the engine's copy is never asked for here
         // The page records are in the database again, so a world that had fallen back to the
         // vanilla page may substitute once more.
         InterlockedExchange(&g_frameUnavail, 0);
@@ -4109,18 +4128,190 @@ void dbPathText(const void* str, char* out, size_t cap) {
     }
 }
 
+// ---- where the page is meant to be ------------------------------------------------------------
+// The frame record as the active view's page archive WROTE it - the file the engine loads, not
+// the generation report. WindowLocationX/Y is where ReagentWindow::Load puts the page (window
+// units; it writes window+0x40/+0x44 = WindowLocation * UI scale) and the box count is the size of
+// the box vector it builds. Read once per archive path; ut_plate's position check compares the
+// live window with it.
+struct WrittenFrame {
+    char arz[MAX_PATH];
+    char record[160];
+    int x, y, boxes;
+    bool ok;
+};
+WrittenFrame g_written = {};
+
+void readWrittenFrame() {
+    const char* frame = liveFramePath();
+    if (!frame || !frame[0] || !g_arzPath[0]) {
+        g_written.ok = false;
+        return;
+    }
+    if (!_stricmp(g_written.arz, g_arzPath) && !_stricmp(g_written.record, frame)) return;
+    _snprintf_s(g_written.arz, _TRUNCATE, "%s", g_arzPath);
+    _snprintf_s(g_written.record, _TRUNCATE, "%s", frame);
+    g_written.ok = false;
+    std::string err;
+    try {
+        gen::ArzArchive a;
+        gen::ArzRecord r;
+        const gen::ArzEntry* e = nullptr;
+        if (a.load(g_arzPath, &err) && (e = a.entry(frame)) != nullptr && a.decode(*e, r)) {
+            const gen::ArzField* b = r.find("reagentBoxes");
+            g_written.x = r.i32("WindowLocationX");
+            g_written.y = r.i32("WindowLocationY");
+            g_written.boxes = b ? (int)b->strs.size() : 0;
+            g_written.ok = true;
+        } else if (err.empty()) {
+            err = "no such record in it";
+        }
+    } catch (...) {
+        err = "out of memory";
+    }
+    if (g_written.ok) {
+        logD("reagent db: the %s view's frame record \"%s\" is written with %d boxes at %d,%d "
+             "(WindowLocationX/Y, in \"%s\")", viewName(), frame, g_written.boxes, g_written.x,
+             g_written.y, g_arzPath);
+    } else {
+        logW("reagent db: the frame record \"%s\" could not be read back out of \"%s\" (%s) - "
+             "the page's position cannot be checked", frame, g_arzPath, err.c_str());
+    }
+}
+
+// The frame as the ENGINE serves it right now, through the trampoline so the substitution never
+// sees the request. -1 in a field it could not read.
+void servedFrame(const char* frame, int* boxes, int* x, int* y) {
+    *boxes = *x = *y = -1;
+    if (!frame || !p_ObjectManagerGet || !o_LoadTableFile) return;
+    __try {
+        MsvcString path;
+        char storage[MAX_PATH];
+        _snprintf_s(storage, _TRUNCATE, "%s", frame);
+        makeStringInto(&path, storage);
+        void* om = p_ObjectManagerGet();
+        const void* table = om ? o_LoadTableFile(om, &path) : nullptr;
+        if (!table) return;
+        const void* vft = *(const void* const*)table;
+        if (p_LoadTableBinaryVft && vft != p_LoadTableBinaryVft) return;
+        *boxes = tableBoxCount(table);
+        if (p_LtbGetInt) {
+            *x = p_LtbGetInt(table, "WindowLocationX", -1);
+            *y = p_LtbGetInt(table, "WindowLocationY", -1);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *boxes = *x = *y = -1;
+    }
+}
+
+// ObjectManager::LoadTableFile keeps every record it hands out until the next
+// Engine::LoadMainDatabase empties its cache, and a later Engine::LoadDatabase replaces the
+// archive's entry but not the cached copy. So once a view's overlay is in, the frame the engine
+// serves must be the one that view wrote; a copy read before the overlay went in would build the
+// page at the other view's location with the other view's box list. Called ONLY after a custom
+// view's overlay has gone in: a read after a LoadMainDatabase reload would itself pin the
+// start-up copy ahead of a custom game's archives.
+void checkServedFrame() {
+    readWrittenFrame();
+    if (!g_written.ok) return;
+    int boxes = -1, x = -1, y = -1;
+    servedFrame(g_written.record, &boxes, &x, &y);
+    if (boxes < 0) {
+        logD("reagent db: the frame the engine serves could not be read back - not checked");
+        return;
+    }
+    const bool same = boxes == g_written.boxes &&
+                      (!p_LtbGetInt || (x == g_written.x && y == g_written.y));
+    if (same) {
+        logI("reagent db: the frame the engine serves is the one the %s view wrote - %d boxes at "
+             "%d,%d", viewName(), boxes, x, y);
+    } else {
+        logW("reagent db: the engine serves \"%s\" with %d boxes at %d,%d, but the %s view wrote "
+             "%d boxes at %d,%d - a copy read before this view's overlay went in is cached, and "
+             "the page will be built from it", g_written.record, boxes, x, y, viewName(),
+             g_written.boxes, g_written.x, g_written.y);
+    }
+}
+
+// ---- the view switch ---------------------------------------------------------------------------
+// A custom game's archive is "<game>\mods\<name>\database\<x>.arz", and the engine names it
+// relative to the game folder with forward slashes: "mods/<name>/database/<name>.arz". The mod
+// folder is resolved from it in ut_generate (gen::customGameFolder); empty when the path is not one
+// of those - the main database's own archives, the Crucible's DLC parts and mods\database.arz.
+bool loadRecordList(const char* path);
+bool loadPageList(const char* path);
+
+std::string customModFolder(const char* path) {
+    char folder[MAX_PATH] = {0};
+    return ut::customGameFolderOf(path, folder, sizeof(folder)) ? std::string(folder)
+                                                                : std::string();
+}
+
+// The active view has changed, so every generated file the tab reads is a different file. GAME
+// THREAD, from inside the database detour: no world is built at that moment (the engine is
+// between worlds - it is loading the database one is about to be built from), so nothing is
+// walking the lists or the group table while they are replaced.
+void applyViewChange(GdEngine* engine, const char* why) {
+    if (!g_selfMod) return;
+    char recPath[MAX_PATH] = {0};
+    // Replaced, not added to: the gate must arm this view's records and no other's. The set is
+    // read from the game thread only (the deposit gate, the open-edge sweep, the census), which
+    // is the thread this runs on.
+    if (g_pageRecords) g_pageRecords->clear();
+    if (g_pages) g_pages->clear();
+    if (utViewFile(g_selfMod, "uniq-records.txt", recPath, sizeof(recPath)) &&
+        loadRecordList(recPath)) {
+        logD("reagent: %zu page records re-read for the %s view", g_pageRecords->size(),
+             viewName());
+    }
+    char pagesPath[MAX_PATH] = {0};
+    if (utViewFile(g_selfMod, "uniq-pages.txt", pagesPath, sizeof(pagesPath))) loadPageList(pagesPath);
+    char arz[MAX_PATH] = {0};
+    if (utViewFile(g_selfMod, "uniq-pages.arz", arz, sizeof(arz))) {
+        _snprintf_s(g_arzPath, _TRUNCATE, "%s", arz);
+        logI("reagent db: the %s view's page archive is \"%s\" (%s)", viewName(), g_arzPath, why);
+    } else {
+        logE("reagent db: the %s view has no uniq-pages.arz - the collection page cannot be shown "
+             "in this world", viewName());
+        g_arzPath[0] = 0;
+    }
+    // The page the ini asks for is an index into a list that has just been replaced; wantedPage()
+    // clamps against the new size on every call, and the label follows it here.
+    const int page = wantedPage();
+    _snprintf_s(g_pageLabel, _TRUNCATE, "%s",
+                page >= 0 ? (*g_pages)[page].label.c_str() : "vanilla materials");
+    liveReloadView(g_selfMod);   // the P line, the group grids and the plate names
+    // The overlay in the database is the other view's: take it out of the guards and put this
+    // view's in, in the same detour, before anything can ask for a page record.
+    dbForgetLoad(why);
+    loadOurArchive(engine, "the view changed");
+}
+
 bool __cdecl hk_LoadDatabase(GdEngine* self, const void* str) {
     DbBusy busy;
     const bool ok = o_LoadDatabase ? o_LoadDatabase(self, str) : false;
     if (InterlockedCompareExchange(&g_ourLoadDepth, 0, 0)) return ok;  // our own load
     if (!g_cfg.dbLoad) return ok;
+    char path[MAX_PATH];
+    dbPathText(str, path, sizeof(path));
+    // The view first, and BEFORE anything reads one of our records: a custom game brings its own
+    // caravan records, so the geometry, the pages and the plates all have to be that game's
+    // before the overlay goes back in - and a record read now would be the start-up view's copy,
+    // which ObjectManager::LoadTableFile then keeps serving over the view's (checkServedFrame).
+    const std::string modFolder = customModFolder(path);
+    if (!modFolder.empty() && ut::viewEnterCustom(g_selfMod, modFolder.c_str())) {
+        logD("reagent db: Engine::LoadDatabase(\"%s\") by the game -> %s; a custom game's view "
+             "follows, so no record of ours is read before its overlay is in",
+             path, ok ? "OK" : "FAILED");
+        applyViewChange(self, "a custom game's database is in");
+        checkServedFrame();
+        return ok;
+    }
     // One line per foreign archive, with the verdict, so a log says when a custom game's
     // <game>\mods\<mod>\database\*.arz goes in relative to LoadMainDatabase and the HUD build,
     // and whether it took the overlay with it.
     const bool had = InterlockedCompareExchange(&g_dbLoaded, 0, 0) != 0;
     const bool readable = had ? overlayRecordReadable() : false;
-    char path[MAX_PATH];
-    dbPathText(str, path, sizeof(path));
     logD("reagent db: Engine::LoadDatabase(\"%s\") by the game -> %s; our pages %s", path,
          ok ? "OK" : "FAILED",
          !had ? "are not in the database yet"
@@ -4143,13 +4334,22 @@ void __cdecl hk_LoadMainDatabase(GdEngine* self) {
     if (again) {
         dbForgetLoad("Engine::LoadMainDatabase is loading a database over the overlay");
     }
+    // Engine::LoadMainDatabase rebuilds the base database - the base game, the expansions and,
+    // when /basemods is on the command line, <game>\mods\database.arz - so whatever custom layer
+    // was above it is gone and the start-up view is the right one again. A custom game that is
+    // being entered loads its own archives afterwards, through Engine::LoadDatabase.
+    const bool backToStartup = ut::viewEnterStartup();
     if (o_LoadMainDatabase) o_LoadMainDatabase(self);
     logD("reagent db: Engine::LoadMainDatabase returned (engine=%p, load #%ld)", (void*)self, n);
     // Probe (b) is the VANILLA value: LoadMainDatabase has written Engine+0xBA8 at its +0x1F7 and
     // our Engine::LoadDatabase has NOT run yet, so whatever this prints is the game's own checksum
     // on this installation.
     dbChecksumProbe("b: LoadMainDatabase returned, BEFORE our load");
-    loadOurArchive(self, again ? "LoadMainDatabase detour (reload)" : "LoadMainDatabase detour");
+    if (backToStartup) {
+        applyViewChange(self, "the main database is loading");
+    } else {
+        loadOurArchive(self, again ? "LoadMainDatabase detour (reload)" : "LoadMainDatabase detour");
+    }
     dbChecksumProbe("c: after our Engine::LoadDatabase");
 }
 
@@ -6521,6 +6721,7 @@ bool reagentInit(HMODULE selfModule) {
     p_GetNumElementsForField =
         (PfnLTB_GetNumElementsForField)proc(eng, GD_LOADTABLEBINARY_GETNUMELEMENTSFORFIELD,
                                             "LoadTableBinary::GetNumElementsForField");
+    p_LtbGetInt = (PfnLTB_GetInt)proc(eng, GD_LOADTABLEBINARY_GETINT, "LoadTableBinary::GetInt");
     p_LoadTableBinaryVft = proc(eng, GD_LOADTABLEBINARY_VFTABLE, "LoadTableBinary vftable");
     p_IsSoulbound = (PfnItem_IsReagentCompatible)proc(game, GD_ITEM_ISSOULBOUND,
                                                       "Item::IsSoulbound");
@@ -6853,8 +7054,9 @@ bool reagentInit(HMODULE selfModule) {
          "deliberately never called.",
          g_takeMirrorOk ? "ARMED" : "DISABLED", g_takeMirrorWhy, p_AddItemToTransfer);
 
+    g_selfMod = selfModule;
     char recPath[MAX_PATH] = {0};
-    if (utModFile(selfModule, "uniq-records.txt", recPath, sizeof(recPath)) &&
+    if (utViewFile(selfModule, "uniq-records.txt", recPath, sizeof(recPath)) &&
         loadRecordList(recPath)) {
         logD("reagent: %zu page records read from \"%s\"", g_pageRecords->size(), recPath);
     } else {
@@ -6862,7 +7064,7 @@ bool reagentInit(HMODULE selfModule) {
     }
 
     char pagesPath[MAX_PATH] = {0};
-    if (utModFile(selfModule, "uniq-pages.txt", pagesPath, sizeof(pagesPath)) &&
+    if (utViewFile(selfModule, "uniq-pages.txt", pagesPath, sizeof(pagesPath)) &&
         loadPageList(pagesPath)) {
         logD("reagent page: %zu pages read from \"%s\"", g_pages->size(), pagesPath);
     } else {
@@ -6882,7 +7084,7 @@ bool reagentInit(HMODULE selfModule) {
              g_cfg.uniqPage);
     }
 
-    if (utModFile(selfModule, "uniq-pages.arz", g_arzPath, sizeof(g_arzPath))) {
+    if (utViewFile(selfModule, "uniq-pages.arz", g_arzPath, sizeof(g_arzPath))) {
         logD("reagent db: page archive = \"%s\"", g_arzPath);
     } else {
         logE("reagent db: uniq-pages.arz NOT FOUND (\"%s\") - no collection page can be shown",
@@ -7687,6 +7889,8 @@ const char* reagentIdentityState(char* out, size_t cap) {
     return identityStateText(out, cap);
 }
 
+static volatile LONG g_viewKeyWarned = 0;
+
 static void sayVariant(int v) {
     // THE LINE A MODE MIX-UP IS DIAGNOSED FROM, and it must not be a logD: below the info
     // threshold a whole hardcore session can go by on the softcore collection with nothing in the
@@ -7740,15 +7944,29 @@ static void followSaveVariant() {
         }
         return;
     }
+    // The view is the journal's second key: a custom game with a view of its own keeps its own
+    // collection (ut_rescue.h). The view changed at the database load, before this world
+    // existed; the files follow here, on the world's first tick, where the mode does - after the
+    // previous world's teardown, so nothing of that world can land in the new file.
+    char viewKey[64] = {0};
+    if (!journalViewKeyFor(viewName(), viewKey, sizeof(viewKey))) {
+        if (!InterlockedExchange(&g_viewKeyWarned, 1))
+            logW("collection: the view \"%s\" names no usable journal folder - the collection "
+                 "stays on \"%s\"", viewName(), journalPath());
+        _snprintf_s(viewKey, sizeof(viewKey), _TRUNCATE, "%s", journalViewKey());
+    }
+    const bool sameView = _stricmp(viewKey, journalViewKey()) == 0;
     const bool wasKnown = journalModeKnown();
-    if (wasKnown && journalMode() == v) {  // the usual case, every tick
+    if (wasKnown && journalMode() == v && sameView) {  // the usual case, every tick
         sayVariant(v);
         return;
     }
     if (journalMode() != v) {
         reagentOnWorldTeardown("the shared stash variant changed (hardcore/softcore)");
+    } else if (!sameView) {
+        reagentOnWorldTeardown("the view's collection is another journal");
     }
-    const bool moved = journalFollowMode(v);
+    const bool moved = journalFollow(v, viewKey);
     // `moved` is false when the mode was UNKNOWN and it agrees with the file that happens to be
     // open (the ordinary softcore start-up: mode 0, no file to move). That is NOT a no-op: the
     // paint gate hides the whole collection until this instant - the counters read `?` and not
@@ -7921,6 +8139,14 @@ void utLiveRelayoutVisibleFallback() {
 // a caller sees here is what the deposit path, the take watch and the rescue command see.
 
 bool reagentIsCollectionRecord(const char* record) { return isOurRecordSafe(record); }
+
+bool reagentWrittenFrame(int* x, int* y, int* boxes) {
+    if (!g_written.ok) return false;
+    if (x) *x = g_written.x;
+    if (y) *y = g_written.y;
+    if (boxes) *boxes = g_written.boxes;
+    return true;
+}
 
 bool reagentItemIsLive(GdItem* item, unsigned int id) { return itemIsLive(item, id); }
 

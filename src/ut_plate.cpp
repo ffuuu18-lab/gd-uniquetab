@@ -9,6 +9,7 @@
 // one UnloadTexture at world teardown; a detour never installs a hook from inside an engine
 // detour body; and every session kill switch is mod-owned, never a g_cfg field.
 
+#include "ut_generate.h"
 #include "ut_plate.h"
 
 #include <intrin.h>   // _AddressOfReturnAddress for the CaravanWindow scan
@@ -172,6 +173,21 @@ float g_lastDrawOy = 0.0f;
 // is refused, and the plain transfer cover image is used instead.
 const int kPlateW = 438;
 const int kPlateH = 627;
+
+// ...unless the generator derived another one. The P line of uniq-groups.txt carries the cover
+// the MERGED database names and that texture's real pixel size, so a stash-UI mod that enlarges
+// the caravan is followed; a group file without the line answers with the two constants above,
+// which is exactly what such a file described.
+int platePlateW() {
+    ut::LiveGeometry g;
+    liveGeometry(&g);
+    return g.plateW > 0 ? g.plateW : kPlateW;
+}
+int platePlateH() {
+    ut::LiveGeometry g;
+    liveGeometry(&g);
+    return g.plateH > 0 ? g.plateH : kPlateH;
+}
 
 struct PlateTex {
     int cellW = 0;
@@ -461,6 +477,14 @@ bool checkWindowShape(void* window) {
     }
     logD("plate: struct check window=%p widget-vtable=%p boxvec=%d captured=%d firstBoxInVec=%s",
          window, s.widgetVt, s.vecCount, captured, s.member ? "yes" : "no");
+    // The box vector is built from the frame record's reagentBoxes list, so its size is that
+    // list's length - unless the engine was handed another copy of the record.
+    int wroteBoxes = 0;
+    if (s.vecCount >= 0 && reagentWrittenFrame(nullptr, nullptr, &wroteBoxes) &&
+        s.vecCount != wroteBoxes)
+        logW("plate: the window holds %d boxes but the frame record the %s view wrote lists %d - "
+             "the engine built the page from another copy of that record",
+             s.vecCount, viewName(), wroteBoxes);
     if (!s.ok) {
         logD("plate: STRUCT MISMATCH - window+0x480 is not the inline BitmapSingle or "
              "window+0x380 is not a box vector");
@@ -554,6 +578,24 @@ bool readPageIndex(const void* caravan, int* out) {
         return false;
     }
 }
+
+// window+0x40/+0x44: ReagentWindow::Load writes WindowLocationX/Y * UI scale there (exe
+// 0x132184..0x1321B5), i.e. the page's place inside the caravan window, in pixels.
+const size_t kWindowLocationOff = 0x40;
+
+bool readWindowLocation(void* window, float* out) {
+    __try {
+        const float* p = (const float*)((const unsigned char*)window + kWindowLocationOff);
+        out[0] = p[0];
+        out[1] = p[1];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_faults);
+        return false;
+    }
+}
+
+int roundUnits(float v) { return (int)(v >= 0.0f ? v + 0.5f : v - 0.5f); }
 
 // The window's live rect in screen pixels. `box0` (any captured box) carries the parent origin
 // the engine itself adds to every box's local position, which is the one
@@ -713,6 +755,46 @@ const GdTexture* fallbackPlate() {
     return g_fallback;
 }
 
+// The two candidate names of one plate, from its cell size and the LIVE view. Rebuilt in
+// place on a view change: the draw path may hold a pointer into g_plates, so the vector
+// itself must not be reallocated.
+void plateNames(PlateTex& p) {
+    // THE NAME. A plate painted for a 438x627 cover keeps the vanilla name, so the set that
+    // ships today goes on being found; any other cover gets the plate size in the name, because
+    // the same cell size on a bigger caravan is a different picture.
+    const int pw = platePlateW(), ph = platePlateH();
+    const bool vanillaPlate = pw == kPlateW && ph == kPlateH;
+    // A custom game's view adds its tag: the cover size alone collides when two mods share one,
+    // and every view's plates live in the same override folder. src\gen\plate_gen.cpp builds the
+    // same name from the same two pieces.
+    const char* tag = viewTag();
+    char buf[192];
+    if (vanillaPlate)
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d.tex", p.cellW, p.cellH);
+    else if (!tag[0])
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d_%dx%d.tex",
+                    p.cellW, p.cellH, pw, ph);
+    else
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d_%dx%d_%s.tex",
+                    p.cellW, p.cellH, pw, ph, tag);
+    p.path = buf;
+    // The mod-folder candidate. utModFile is the ONE resolver (it knows about the Documents
+    // fallback and about %UNIQUETAB_OUT%), and it answers whether the file is actually there - so
+    // a missing plates folder costs no LoadTexture call at all.
+    char leaf[192];
+    char full[MAX_PATH];
+    if (vanillaPlate)
+        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d.tex", p.cellW, p.cellH);
+    else if (!tag[0])
+        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d_%dx%d.tex",
+                    p.cellW, p.cellH, pw, ph);
+    else
+        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d_%dx%d_%s.tex",
+                    p.cellW, p.cellH, pw, ph, tag);
+    p.modPath.clear();
+    if (utModFile(g_self, leaf, full, sizeof(full))) p.modPath = full;
+}
+
 PlateTex* plateFor(int cellW, int cellH) {
     if (!g_plates) return nullptr;
     for (size_t i = 0; i < g_plates->size(); ++i) {
@@ -721,16 +803,7 @@ PlateTex* plateFor(int cellW, int cellH) {
     PlateTex p;
     p.cellW = cellW;
     p.cellH = cellH;
-    char buf[128];
-    _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d.tex", cellW, cellH);
-    p.path = buf;
-    // The mod-folder candidate. utModFile is the ONE resolver (it knows about the Documents
-    // fallback and about %UNIQUETAB_OUT%), and it answers whether the file is actually there - so
-    // a missing plates folder costs no LoadTexture call at all.
-    char leaf[128];
-    char full[MAX_PATH];
-    _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d.tex", cellW, cellH);
-    if (utModFile(g_self, leaf, full, sizeof(full))) p.modPath = full;
+    plateNames(p);
     try {
         g_plates->push_back(p);
     } catch (...) {
@@ -783,6 +856,13 @@ bool ensurePlate(PlateTex* p, int wantW, int wantH) {
 
 volatile LONG g_probed = 0;
 
+// ORDERING. The plates are written by the generation, which runs once on the start-up worker
+// (dllmain, before panelInit and before any hook exists). This probe cannot run before it:
+// it needs graphics() and the cell sizes out of uniq-groups.txt, both of which only exist
+// during a HUD build on the game thread, long after the worker is done. Nothing regenerates
+// later in the process, so no LoadTexture of ours can hand back a plate from before a
+// regeneration; a world teardown clears g_probed and the cached textures, so the next world
+// re-probes the files that are on disk now.
 void probeAllPlates() {
     if (InterlockedCompareExchange(&g_probed, 0, 0)) return;
     if (!graphics()) return;
@@ -794,7 +874,7 @@ void probeAllPlates() {
     const int nn = n < 16 ? n : 16;
     for (int i = 0; i < nn; ++i) {
         PlateTex* p = plateFor(cw[i], chh[i]);
-        if (ensurePlate(p, kPlateW, kPlateH)) ++ok;
+        if (ensurePlate(p, platePlateW(), platePlateH())) ++ok;
     }
     int fromMod = 0;
     for (int i = 0; i < nn; ++i) {
@@ -828,9 +908,17 @@ void plateAssertPlate() {
     // reads "page index at +0x1728 = 0", so "Materials is the visible page" is only ever true
     // after this game-thread poll has SEEN the index become 3.  Nothing arms on the initial
     // state, and every page change is on the record.
-    if (g_caravan) {
+    // Only while the engine says the caravan is OPEN. A page edge can happen at no other time,
+    // and the engine frees the CaravanWindow before GameEngine::ExitPlayingMode reaches the
+    // teardown that forgets it - so an unconditional read probes a freed window on the last
+    // tick or two of every quit. The read stays inside the mod's probe scope, where an expected
+    // fault is counted and not printed as a crash.
+    if (open && g_caravan) {
         int idx = -1;
-        if (readPageIndex(g_caravan, &idx)) {
+        reagentProbeEnter();
+        const bool read = readPageIndex(g_caravan, &idx);
+        reagentProbeLeave();
+        if (read) {
             if (idx != g_lastPage) {
                 const int prev = g_lastPage;
                 g_lastPage = idx;
@@ -2708,9 +2796,63 @@ void plateTick(bool gameThread) {
     }
 }
 
+// ---- the verifier -----------------------------------------------------------------------
+// The generated geometry is an offline DERIVATION; the window in front of the player is the
+// truth. One line per world puts the two side by side, so every player's log reports its own
+// compatibility without anyone having to ask. This measures and complains, it lays nothing out:
+// a disagreement is information, not a reason to guess at run time.
+//
+// The window's frozen draw rectangle at +0x4C0 is the cover's pixel size times the UI scale, so
+// the comparison is made in record pixels, after dividing the scale out.
+volatile LONG g_geoVerified = 0;
+
+void plateVerifyGeometry() {
+    if (InterlockedExchange(&g_geoVerified, 1)) return;
+    ut::LiveGeometry g;
+    liveGeometry(&g);
+    float rx = 0, ry = 0, rw = 0, rh = 0;
+    if (!plateWindowRect(&rx, &ry, &rw, &rh)) {
+        InterlockedExchange(&g_geoVerified, 0);   // no rect yet; try again next swap
+        return;
+    }
+    const float sc = liveUiScale() > 0.05f ? liveUiScale() : 1.0f;
+    const int liveW = (int)(rw / sc + 0.5f), liveH = (int)(rh / sc + 0.5f);
+    const int dw = liveW - g.plateW, dh = liveH - g.plateH;
+    logD("plate: geometry check - generated %dx%d (%s, \"%s\"), live %dx%d at UI scale %.4f "
+         "(window %.1fx%.1f), delta %+d%+d",
+         g.plateW, g.plateH, g.derived ? "derived" : "vanilla defaults", g.plate,
+         liveW, liveH, sc, rw, rh, dw, dh);
+    // A few pixels is rounding in the scale; anything more means the generated assumption and
+    // the window the engine built are describing different caravans.
+    if (dw < -4 || dw > 4 || dh < -4 || dh > 4)
+        logW("plate: the live caravan cover is %dx%d but the generation assumed %dx%d - the "
+             "collection grid and its plate are sized for a different window. Delete "
+             "catalogue.stamp to regenerate against the database this session loaded.",
+             liveW, liveH, g.plateW, g.plateH);
+    // And WHERE, in the same units: the page's location over the UI scale against the
+    // WindowLocationX/Y of the frame record the active view wrote.
+    int wx = 0, wy = 0;
+    float loc[2] = {0.0f, 0.0f};
+    if (!reagentWrittenFrame(&wx, &wy, nullptr)) {
+        logD("plate: position check - the written frame record is not known, not checked");
+        return;
+    }
+    if (!readWindowLocation(g_window, loc)) return;
+    const int lx = roundUnits(loc[0] / sc), ly = roundUnits(loc[1] / sc);
+    const int dx = lx - wx, dy = ly - wy;
+    logD("plate: position check - the page is at %d,%d (window %.1f,%.1f at UI scale %.4f), the "
+         "frame record the %s view wrote says %d,%d, delta %+d%+d",
+         lx, ly, loc[0], loc[1], sc, viewName(), wx, wy, dx, dy);
+    if (dx < -4 || dx > 4 || dy < -4 || dy > 4)
+        logW("plate: the page is drawn at %d,%d but the frame record the %s view wrote puts it at "
+             "%d,%d - the engine built the page from another copy of that record",
+             lx, ly, viewName(), wx, wy);
+}
+
 void plateApply(int group, const char* label, int cellW, int cellH) {
     if (InterlockedCompareExchange(&g_disabled, 0, 0)) return;
     if (!g_window || !g_origPlate) return;
+    plateVerifyGeometry();
 
     const void* want = g_origPlate;
     const char* what = "vanilla materials plate";
@@ -2719,8 +2861,8 @@ void plateApply(int group, const char* label, int cellW, int cellH) {
         PlateTex* p = plateFor(cellW, cellH);
         // Compare against the VANILLA PLATE TEXTURE's own size
         // (438x627), never against window+0x4C0, which is that size times the UI scale.
-        const int wantW = g_origTexW > 0 ? g_origTexW : kPlateW;
-        const int wantH = g_origTexH > 0 ? g_origTexH : kPlateH;
+        const int wantW = g_origTexW > 0 ? g_origTexW : platePlateW();
+        const int wantH = g_origTexH > 0 ? g_origTexH : platePlateH();
         if (p) {
             ensurePlate(p, wantW, wantH);
             _snprintf_s(path, sizeof(path), _TRUNCATE, "%s", p->path.c_str());
@@ -2745,9 +2887,25 @@ void plateApply(int group, const char* label, int cellW, int cellH) {
     plateAssertPlate();   // performs the write, and only while the caravan is open
 }
 
+void plateOnViewChanged() {
+    InterlockedExchange(&g_probed, 0);
+    if (!g_plates) return;
+    // The names carry the view and the plate size, so every entry is renamed and re-probed.
+    // The textures already loaded are left to the engine, exactly as a world teardown that
+    // cannot unload one does.
+    for (PlateTex& pt : *g_plates) {
+        plateNames(pt);
+        pt.tex = nullptr;
+        pt.tried = false;
+        pt.ok = false;
+        pt.w = pt.h = pt.wantW = pt.wantH = 0;
+    }
+}
+
 void plateOnWorldTeardown() {
     // A disable taken for the shape of ONE world's window goes with that world. Only
     // disableThisWorld() sets the flag, so a failed detour install stays off for the session.
+    InterlockedExchange(&g_geoVerified, 0);   // the next world says its own numbers
     if (InterlockedExchange(&g_disabledWorld, 0)) {
         InterlockedExchange(&g_disabled, 0);
         g_why = "armed";
@@ -2863,9 +3021,14 @@ void plateOnWorldTeardown() {
 
 // ---- the visible caravan page ---------------------------------------------------------------
 int plateCaravanState() {
-    if (!g_caravan) return 0;
+    // The same liveness rule plateAssertPlate() reads the index under: a closed caravan is an
+    // UNKNOWN page, never a read of a window the engine may already have freed.
+    if (!g_caravan || !InterlockedCompareExchange(&g_stashOpen, 0, 0)) return 0;
     int idx = -1;
-    if (!readPageIndex(g_caravan, &idx)) return 0;
+    reagentProbeEnter();
+    const bool read = readPageIndex(g_caravan, &idx);
+    reagentProbeLeave();
+    if (!read) return 0;
     return idx == kMaterialPage ? 2 : 1;
 }
 

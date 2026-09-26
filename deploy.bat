@@ -1,7 +1,8 @@
 @echo off
 rem deploy.bat - copy the built mod into the game folder. Exactly two things are added to the
-rem installation: x64\uniquetab.asi, and the x64\uniquetab\ folder holding everything else the mod
-rem reads and writes. undeploy.bat removes both again.
+rem installation: x64\uniquetab.asi, and the x64\uniquetab\ folder the mod reads and writes. Nothing
+rem else is copied: on its first launch the mod generates its catalogue, its page overlay and its
+rem cover plates from the game's own files. undeploy.bat removes what it installed and generated.
 rem
 rem The .asi is loaded by Ultimate ASI Loader, which is NOT part of this mod and is never
 rem installed, replaced or removed by these scripts. It has to be in x64\ already; this script
@@ -141,12 +142,11 @@ if exist "%GAMEDIR%\winmm.dll" (
 )
 
 rem ---- the mod folder ---------------------------------------------------------------------------
-rem Everything else the mod ships goes into x64\uniquetab\, which is also where the .asi creates
-rem the ini, the log, the collection and the exports. One folder to back up, one folder to delete.
-rem   uniq-pages.arz   the database overlay: the tab's own pages and boxes (never overrides a
-rem                    vanilla record; it is handed to Engine::LoadDatabase by path, it is not a
-rem                    /basemods mod and it is not installed into the game's database folder)
-rem   plates\*.tex     the generated cover plates
+rem x64\uniquetab\ is where the .asi writes the ini, the log, the collection, the exports and the
+rem files it generates on the first launch: catalogue.bin, the three uniq-*.txt lists and the
+rem uniq-pages.arz overlay (the tab's own pages and boxes, handed to Engine::LoadDatabase by path;
+rem never a vanilla record, never the game's database folder). The cover plates are painted into
+rem <game>\settings\ui\caravan\ at the same time. One folder to back up, one folder to delete.
 if not exist "%MODDIR%" mkdir "%MODDIR%"
 if not exist "%MODDIR%" (
     echo [deploy] ERROR: could not create "%MODDIR%"
@@ -161,32 +161,15 @@ for %%N in (catalogue.bin uniq.arz uniq-pages.arz uniq-vanilla.arz uniq-records.
     )
 )
 
-rem catalogue.bin and the three uniq txt files are NOT copied: the mod generates them into
-rem "%MODDIR%" itself on the first launch, from the game's own database.
-set "FAILED="
-for %%N in (uniq-pages.arz) do (
-    if exist "%ROOT%data\uniq\%%N" (
-        copy /y "%ROOT%data\uniq\%%N" "%MODDIR%\%%N" >nul || set "FAILED=%%N"
-        echo [deploy] OK -^> "%MODDIR%\%%N"
-    ) else (
-        echo [deploy] WARNING: data\uniq\%%N missing - run tools\build_uniq_db.py
-    )
+rem An older deploy copied a set of plates into x64\uniquetab\plates\. Nothing reads them - the
+rem engine resolves a plate by resource name under <game>\settings\ui\caravan\, where the mod
+rem paints its own - so only those uniq_plate_*.tex files and the emptied folder are removed.
+if exist "%MODDIR%\plates\uniq_plate_*.tex" (
+    del /q "%MODDIR%\plates\uniq_plate_*.tex" 2>nul
+    rd "%MODDIR%\plates" 2>nul
+    echo [deploy] removed the plates an older build copied into "%MODDIR%\plates"
 )
-if not exist "%MODDIR%\plates" mkdir "%MODDIR%\plates"
-copy /y "%ROOT%data\plates\*.tex" "%MODDIR%\plates\" >nul 2>&1
-if errorlevel 1 (echo [deploy] WARNING: data\plates\*.tex missing - run tools\make_plates.py) else (echo [deploy] OK -^> "%MODDIR%\plates\")
 
-rem The engine loads textures by resource name through its override roots, and the game folder's
-rem own settings\ tree is one of them. The plates go there too, under the name the mod asks for
-rem (ui/caravan/uniq_plate_WxH.tex); only files of that name are ever written or removed.
-set "PLATEDIR=%GAME%\settings\ui\caravan"
-if not exist "%PLATEDIR%" mkdir "%PLATEDIR%"
-copy /y "%ROOT%data\plates\uniq_plate_*.tex" "%PLATEDIR%\" >nul 2>&1
-if errorlevel 1 (echo [deploy] WARNING: could not copy the plates into "%PLATEDIR%") else (echo [deploy] OK -^> "%PLATEDIR%\uniq_plate_*.tex")
-
-if defined FAILED (
-    echo [deploy] ERROR: could not copy %FAILED% into "%MODDIR%"
-    exit /b 1
-)
-echo [deploy] done. Everything this mod reads or writes is in "%MODDIR%".
+echo [deploy] done. The first launch generates the catalogue, the page overlay and the plates;
+echo [deploy] everything this mod reads or writes is in "%MODDIR%".
 exit /b 0

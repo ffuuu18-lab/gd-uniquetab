@@ -1732,6 +1732,86 @@ static int caseMain(const char* mode, const char* arg) {
     // (no uniq-items.jsonl is created), and an empty collection really is the 8-byte header on
     // its own - version 3, count 0 - which is a file GD Stash reads as "no items", not a
     // truncated one.
+    // ==== ONE JOURNAL SET PER CUSTOM GAME ========================================================
+    // A custom game's collection lives under <journal dir>\views\custom-<name>\. Everything that
+    // writes a file on the collection's behalf - the journal, the .gds and .csv exports, the
+    // journal_prune copy and the rescue report - must stay inside the ACTIVE view's folder, and
+    // the start-up view's files must come out of a custom game byte for byte as they went in.
+    if (!strcmp(mode, "--case-views")) {
+        if (!ut::journalInit(nullptr)) {
+            printf("  [FAIL] journalInit\n");
+            return 1;
+        }
+        static const char* const kMain = "records/items/gearhead/a01_head.dbr";
+        static const char* const kKeep = "records/items/gearweapons/b02_sword.dbr";
+        static const char* const kGone = "records/items/gearhands/c03_gloves.dbr";
+        const std::string base = ut::journalBaseDir();
+        const std::string viewDir = base + "\\views\\custom-lootascension";
+        check(!ut::journalFollow(0, ""), "the start-up view opens the start-up files");
+        ut::UtReplicaCapture c;
+        fill(&c, kMain, 1, 1);
+        check(ut::journalUpsert(c) && ut::journalFlushNow(), "a start-up entry is written");
+        std::string mainJ, mainG;
+        check(slurp(ut::journalPath(), &mainJ) && slurp(ut::journalGdsPath(), &mainG),
+              "the start-up journal and its .gds are on the disk");
+        const std::string mainPath = ut::journalPath(), mainGds = ut::journalGdsPath();
+
+        check(ut::journalFollow(0, "basemods+custom-lootascension"),
+              "the view's full name is accepted and keyed by the custom mod");
+        check(!strcmp(ut::journalViewKey(), "custom-lootascension"), "the key is custom-lootascension");
+        check(std::string(ut::journalPath()) == viewDir + "\\uniq-items.jsonl",
+              "the journal is views\\custom-lootascension\\uniq-items.jsonl");
+        check(std::string(ut::journalGdsPath()) == viewDir + "\\uniq-export.gds" &&
+                  std::string(ut::journalCsvPath()) == viewDir + "\\uniq-export.csv",
+              "the exports are beside it");
+        fill(&c, kKeep, 1, 1);
+        check(ut::journalUpsert(c), "a custom-game entry");
+        fill(&c, kGone, 1, 1);
+        check(ut::journalUpsert(c), "and a second one");
+        check(ut::journalMarkStored(kKeep, true) && ut::journalMarkStored(kGone, false),
+              "the reconcile marks one stored and one not");
+        check(ut::journalFlushNow(), "the custom game's journal is written");
+        std::string vj, vg;
+        check(slurp(ut::journalPath(), &vj) && slurp(ut::journalGdsPath(), &vg),
+              "its journal and its .gds are in the view folder");
+
+        char dropped[4][256];
+        char why[256];
+        const int n = ut::journalPruneNotStored(dropped, 4, why, sizeof why);
+        check(n == 1 && !strcmp(dropped[0], kGone), "journal_prune drops the one NOT-stored entry");
+        WIN32_FIND_DATAA fd;
+        int asideView = 0, asideBase = 0;
+        HANDLE h = FindFirstFileA((viewDir + "\\uniq-items.jsonl.pruned-*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) { do { ++asideView; } while (FindNextFileA(h, &fd)); FindClose(h); }
+        h = FindFirstFileA((base + "\\uniq-items.jsonl.pruned-*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) { do { ++asideBase; } while (FindNextFileA(h, &fd)); FindClose(h); }
+        check(asideView == 1 && asideBase == 0,
+              "its pre-image copy is in the view folder, and none in the start-up folder");
+        check(ut::rescueReportWrite("report\r\n", 8) &&
+                  std::string(ut::rescueReportPath()) == viewDir + "\\rescue-report.txt",
+              "the rescue report of a custom game is written in its view folder");
+        check(GetFileAttributesA((base + "\\rescue-report.txt").c_str()) == INVALID_FILE_ATTRIBUTES,
+              "and not in the start-up folder");
+
+        check(ut::journalFollow(0, ""), "back to the start-up view");
+        std::string mainJ2, mainG2;
+        check(slurp(mainPath.c_str(), &mainJ2) && slurp(mainGds.c_str(), &mainG2) &&
+                  mainJ2 == mainJ && mainG2 == mainG,
+              "the start-up journal and its .gds are byte-identical to what they were");
+        check(ut::journalHas(kMain) && !ut::journalHas(kKeep) && !ut::journalHas(kGone),
+              "the start-up collection holds its own entry only");
+        check(ut::journalFollow(0, "custom-lootascension") && ut::journalHas(kKeep) &&
+                  !ut::journalHas(kGone) && !ut::journalHas(kMain),
+              "and the custom game's, re-read off its file, holds what the prune left");
+        Sleep(20);   // the report and the next journal write must not share a timestamp
+        check(ut::journalMarkStored(kKeep, true) && ut::journalFlushNow(),
+              "a later write leaves the custom journal newer than its report (the guard case)");
+        ut::logFlush();
+        printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail,
+               g_fail == 1 ? "" : "s");
+        return g_fail ? 1 : 0;
+    }
+
     if (!strcmp(mode, "--case-gdsempty")) {
         if (!ut::journalInit(nullptr)) {
             printf("  [FAIL] journalInit\n");
@@ -2312,6 +2392,7 @@ int main(int argc, char** argv) {
          !strcmp(argv[1], "--case-csvmode") || !strcmp(argv[1], "--case-csvempty") ||
          !strcmp(argv[1], "--dump-csv") || !strcmp(argv[1], "--case-gds") ||
          !strcmp(argv[1], "--case-gdsempty") || !strcmp(argv[1], "--dump-gds") ||
+         !strcmp(argv[1], "--case-views") ||
          !strcmp(argv[1], "--store-row") ||
          // (m): the format-3 file the user has on disk right now
          !strcmp(argv[1], "--case-v3upgrade"))) {

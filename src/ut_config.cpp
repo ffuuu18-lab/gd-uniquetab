@@ -110,6 +110,8 @@ const UtCfgKey kUtCfgKeys[] = {
            "height of the label text, in page pixels (8..32)"),
     UT_BOOL("advanced", "plate_swap", plateSwap, 1,
             "1 = the background picture follows the group, 0 = always the vanilla one"),
+    UT_STR("advanced", "plate_ground", plateGround, "", nullptr,
+           "a modded page's flat background, hex RRGGBB. Empty = the vanilla tone"),
     UT_STR("advanced", "tooltip_text_yes", tooltipTextYes, "", nullptr,
            "the tooltip line for an item you have. Empty = the built-in wording"),
     UT_STR("advanced", "tooltip_text_no", tooltipTextNo, "", nullptr,

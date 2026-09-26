@@ -195,8 +195,8 @@ bool utModFile(HMODULE self, const char* leaf, char* out, size_t cap) {
     DWORD a = GetFileAttributesA(out);
     if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY)) return true;
 
-    // The mod folder is the Documents fallback (or %UNIQUETAB_OUT%) and the shipped file is still
-    // beside the .asi, where deploy put it. Same resolver, second of its two candidates.
+    // The mod folder is the Documents fallback (or %UNIQUETAB_OUT%) and the file is still in the
+    // folder beside the .asi. Same resolver, second of its two candidates.
     if (!g_beside[0] || lstrcmpiW(g_beside, g_dir) == 0) return false;
     char besideA[MAX_PATH] = {0};
     toAnsi(g_beside, besideA, sizeof(besideA));

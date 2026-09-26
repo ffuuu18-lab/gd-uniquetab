@@ -1,4 +1,4 @@
-"""Generate a native-looking cover plate per collection cell size.
+r"""Generate a native-looking cover plate per collection cell size.
 
 The Crafting Materials page paints its background from ONE texture, named by the
 `TransferPlate` record of `records/ui/caravan/caravan_materialwindow.dbr`:
@@ -21,7 +21,7 @@ widget froze its destination rectangle from THAT texture's size at HUD build (se
 
 What this script builds, for each distinct cell size used by data/oracle/uniq-groups.txt:
 
-  1. the cover image with its lattice erased and one row of padding -> a clean 438x627 ground,
+  1. the stash cover with its lattice erased and one row of padding -> a clean 438x627 ground,
   2. new frames drawn on the collection grid (origin 105,76, rowGap 2 - the same numbers
      ut_live.cpp lays the boxes out with) by ALPHA-STAMPING a 9-slice cut from one real
      vanilla frame of the materials plate: only the gold line pixels are transferred, so no
@@ -30,11 +30,52 @@ What this script builds, for each distinct cell size used by data/oracle/uniq-gr
      so a frame that would run under the bottom border is clipped by it exactly as a
      vanilla frame would be.
 
-Output: data/plates/uniq_plate_<W>x<H>.tex  (+ a _view.png preview of each).
-deploy.bat installs them: into the mod folder, and under the game's own
-settings\ui\caravan\, one of the engine's texture override roots.
+Output: data/oracle/plates/uniq_plate_<W>x<H>.tex  (+ a _view.png preview of each).
+Nothing ships from here: the DLL paints the same set at run time (src/gen/plate_gen) into the
+game's own settings\ui\caravan\, one of the engine's texture override roots, and the
+catalogue harness compares its vanilla plates with these byte for byte.
+
+THE GROUND RULE, in one sentence: the ground is what a NORMAL STASH TAB shows under the same
+screen rectangle.  That is the stash cover - the TransferPlate of caravan_window's TransferWindow
+(`caravan_transfercoverimage.dbr`, the record our own frame already uses as its plate) - read
+through the merged view, never the materials cover, whose art is the 24 hand-placed frames on
+vanilla and a whole baked reagent cluster under X-Mod.  Which pixels of it:
+
+  * the two covers cover the same rectangle (same width, same absolute left edge): the WHOLE
+    stash texture, padded by repeating its last row (or cropped) to the materials cover's
+    height, because the widget froze its destination rectangle from THAT size.  Vanilla
+    (438x626 -> 438x627) and X-Mod (975x968, both at absolute 0,62) take this branch;
+  * otherwise the stash cover's pixels UNDER the materials cover's rectangle, translated
+    through the two windows' WindowLocationX/Y and the two covers' bitmapPositionX/Y:
+        off = (matWindow + matBitmapPos) - (stashWindow + stashBitmapPos)
+    Baul takes this branch - a 346x625 crop of the 952x1007 whole-window art at 605,71;
+  * and when that rectangle is not inside the stash cover, the materials cover itself, with a
+    line in the log saying so.
+
+The lattice erasure and the ornament pass below are MEASURED ON THE VANILLA TEXTURE and run
+only when the ground IS that texture.
+
+A MODDED GROUND IS A FLAT FILL.  Whenever the rule above does not land on the vanilla stash
+texture, not one pixel of the mod's art is copied: the plate is filled with a single opaque
+colour and the frames are stamped on that.  A mod's cover carries its own baked box lattice
+(X-Mod's is 32 px) that our frames are not aligned to and cannot be, so the two grids interleave;
+the mod's own window frame surrounds the page anyway.  The colour is the vanilla ground's own
+tone, sampled from ui/caravan/caravan_transfercoverimage.tex (the VANILLA copy out of UI.arc,
+never a mod's) at GROUND_SAMPLE = (312, 180) - the centre of a lattice cell, 16 px from every
+line and the calmest such point on the texture: RGB 06 06 06, which is also the median of the
+whole non-gold interior.  --plate-ground RRGGBB (uniquetab.ini's `plate_ground` key) replaces it;
+it changes only this fill and never a vanilla plate.
+
+The name a plate is written under carries the cover size when it is not the vanilla 438x627, and
+the VIEW's tag as well when one is given: every view's plates live in the same override folder,
+and the cover size alone collides when two mods share it.  --plate-tag <name> is that tag; the
+DLL passes the custom game's mod folder leaf and nothing on the start-up view, which is why the
+shipped names are unchanged.
 
     python tools/make_plates.py [--png-only]
+    python tools/make_plates.py --custom <mod dir> --out <dir>      one mod's set, offline
+    python tools/make_plates.py --custom <mod dir> --plate-ground 001133 --out <dir>
+    python tools/make_plates.py --custom <mod dir> --plate-tag lootascension --out <dir>
 """
 
 from __future__ import annotations
@@ -52,12 +93,24 @@ import gdpath  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 GAME = gdpath.find_game_dir() or ""
-OUT = os.path.join(ROOT, "data", "plates")
+OUT = os.path.join(ROOT, "data", "oracle", "plates")
 SRC = os.path.join(OUT, "src")
 GROUPS = os.path.join(ROOT, "data", "oracle", "uniq-groups.txt")
 
 VANILLA_TEX = "caravan/caravan_transfercomponent1_bg.tex"
 PLAIN_TEX = "caravan/caravan_transfercoverimage.tex"
+
+CARAVAN = "records/ui/caravan/"
+WINDOW_REC = CARAVAN + "caravan_window.dbr"
+MATERIAL_REC = CARAVAN + "caravan_materialwindow.dbr"
+TRANSFERWIN_REC = CARAVAN + "caravan_transferwindow.dbr"
+
+# Where a MODDED plate's flat ground takes its colour from, on the VANILLA stash cover: the
+# centre of the lattice cell bounded by x = 296/328 and y = 164/196 - 16 px from every line and
+# the calmest cell centre on the texture. It reads (6, 6, 6), the median of the non-gold
+# interior. GROUND_FALLBACK is that value, used only if UI.arc's copy cannot be read.
+GROUND_SAMPLE = (312, 180)
+GROUND_FALLBACK = (6, 6, 6)
 
 # The plate is drawn at the window's (bitmapPositionX, bitmapPositionY) = (0, 1).
 PLATE_DX, PLATE_DY = 0, 1
@@ -76,19 +129,25 @@ def tex_decode(blob: bytes):
     if hsize != 124:
         raise ValueError("unexpected DDS header size %d" % hsize)
     pf = struct.unpack_from("<8I", payload, 4 + 72)
-    if pf[2] != 0 or pf[3] != 32:
-        raise ValueError("only uncompressed 32-bit surfaces are handled (fourCC=%r bpp=%d)"
-                         % (pf[2], pf[3]))
+    bpp = pf[3]
+    if pf[2] != 0 or bpp not in (24, 32):
+        raise ValueError("only uncompressed 24/32-bit surfaces are handled (fourCC=%r bpp=%d)"
+                         % (pf[2], bpp))
     if mips not in (0, 1):
         raise ValueError("mipmapped source (%d) - not handled" % mips)
     off = 4 + hsize
-    need = w * h * 4
+    n = bpp // 8
+    need = w * h * n
     raw = payload[off:off + need]
     if len(raw) != need:
         raise ValueError("short surface: %d of %d bytes" % (len(raw), need))
-    bgra = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
-    rgba = bgra[..., [2, 1, 0, 3]].copy()
-    return w, h, rgba
+    px = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, n)
+    if n == 3:                                   # BGR, opaque (Baul's whole-window art)
+        rgba = np.empty((h, w, 4), dtype=np.uint8)
+        rgba[..., 0:3] = px[..., [2, 1, 0]]
+        rgba[..., 3] = 255
+        return w, h, rgba
+    return w, h, px[..., [2, 1, 0, 3]].copy()
 
 
 def tex_encode(rgba: np.ndarray) -> bytes:
@@ -105,6 +164,135 @@ def tex_encode(rgba: np.ndarray) -> bytes:
 
 
 # ---------------------------------------------------------------------------- sources
+def read_cover(view, bitmap):
+    """(w, h, RGBA) of a bitmapName, from a mod .arc first and then from UI.arc."""
+    leaf = bitmap.split("/", 1)[1] if "/" in bitmap else bitmap
+    blob = None
+    for a in view.arcs:
+        for key in (leaf, bitmap, os.path.basename(bitmap)):
+            if key in a:
+                blob = a.read(key)
+                break
+        if blob:
+            break
+    if blob is None:
+        key = bitmap[len("ui/"):] if bitmap.startswith("ui/") else bitmap
+        blob = view.ui.read(key) or view.ui.read(bitmap)
+    if not blob:
+        raise SystemExit("cannot read the cover %s" % bitmap)
+    return tex_decode(blob)
+
+
+def _rec(view, name):
+    r, _src = view.rec(name)
+    return r
+
+
+def stash_cover(geo):
+    """(bitmapName, absX, absY, w, h, RGBA) of the plate a NORMAL TAB draws.
+
+    caravan_window -> TransferWindow -> TransferPlate, through the merged view; its absolute
+    origin is that window's WindowLocation plus the cover's bitmapPosition.
+    """
+    from ui_geometry import _i, _s                                          # noqa: E402
+    win = _rec(geo.src, WINDOW_REC)
+    tw = _rec(geo.src, _s(win, "TransferWindow") or TRANSFERWIN_REC)
+    if not tw:
+        raise SystemExit("no transfer window record - cannot find the stash cover")
+    crec = _rec(geo.src, _s(tw, "TransferPlate"))
+    bitmap = _s(crec, "bitmapName")
+    if not bitmap:
+        raise SystemExit("the transfer window's TransferPlate has no bitmapName")
+    try:
+        w, h, rgba = read_cover(geo.src, bitmap)
+    except ValueError as e:
+        # A compressed or mipmapped surface: refused here, and the caller falls back to the
+        # materials cover with the reason in the log.
+        return (bitmap, 0, 0, 0, 0, str(e))
+    return (bitmap,
+            _i(tw, "WindowLocationX") + _i(crec, "bitmapPositionX"),
+            _i(tw, "WindowLocationY") + _i(crec, "bitmapPositionY"),
+            w, h, rgba)
+
+
+def fit(img, w, h):
+    """The plate's own size: extra rows are the last one repeated, extra columns are cut."""
+    if img.shape[0] < h:
+        img = np.concatenate([img, np.repeat(img[-1:], h - img.shape[0], axis=0)], axis=0)
+    return img[:h, :w]
+
+
+def ground_for(geo, dx, dy):
+    """(RGBA, one line for the log, is-it-the-vanilla-texture) - THE GROUND RULE, see the header.
+
+    dx, dy are the materials cover's own bitmapPosition.
+    """
+    from ui_geometry import _i                                              # noqa: E402
+    page = _rec(geo.src, MATERIAL_REC)
+    mat_x = _i(page, "WindowLocationX") + dx
+    mat_y = _i(page, "WindowLocationY") + dy
+    bitmap, sx, sy, sw, sh, rgba = stash_cover(geo)
+    if not sw:
+        w, h, cover = read_cover(geo.src, geo.plate)
+        return cover, ("ground: the materials cover itself - the stash cover %s cannot be "
+                       "decoded (%s)" % (bitmap, rgba)), False
+    # The lattice constants and the ornament pass below are measured on THIS texture.
+    vanilla_ground = bitmap == "ui/" + PLAIN_TEX and (sw, sh) == (438, 626)
+    off_x, off_y = mat_x - sx, mat_y - sy
+    if sw == geo.plateW and off_x == 0:
+        return rgba, ("ground: the whole stash cover %s %dx%d" % (bitmap, sw, sh)), vanilla_ground
+    if 0 <= off_x and off_x + geo.plateW <= sw and 0 <= off_y and off_y + geo.plateH <= sh:
+        cut = rgba[off_y:off_y + geo.plateH, off_x:off_x + geo.plateW].copy()
+        # the lattice is measured on the whole vanilla texture, never on a cut of one
+        return cut, ("ground: the stash cover %s %dx%d cut at %d,%d"
+                     % (bitmap, sw, sh, off_x, off_y)), False
+    w, h, cover = read_cover(geo.src, geo.plate)
+    return cover, ("ground: the materials cover itself - the page's rectangle (%d,%d %dx%d) is "
+                   "not inside the stash cover %s %dx%d"
+                   % (off_x, off_y, geo.plateW, geo.plateH, bitmap, sw, sh)), False
+
+
+def parse_hex_rgb(text):
+    """(r, g, b) from six hex digits with an optional # or 0x, else None."""
+    t = (text or "").strip()
+    if t.startswith("#"):
+        t = t[1:]
+    elif t[:2].lower() == "0x":
+        t = t[2:]
+    if len(t) != 6:
+        return None
+    try:
+        v = int(t, 16)
+    except ValueError:
+        return None
+    return ((v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF)
+
+
+def flat_ground(w, h, override):
+    """(RGBA plate filled with one colour, the info line) - see the header."""
+    rgb = parse_hex_rgb(override)
+    if rgb is not None:
+        note = ("plate ground: a flat %02X%02X%02X, from plate_ground - no pixel of the mod's "
+                "own cover is copied" % rgb)
+    else:
+        try:
+            extract_sources()
+            with open(os.path.join(SRC, os.path.basename(PLAIN_TEX)), "rb") as fh:
+                _w, _h, van = tex_decode(fh.read())
+            x, y = GROUND_SAMPLE
+            rgb = tuple(int(v) for v in van[y, x, 0:3])
+            note = ("plate ground: a flat %02X%02X%02X, sampled from the vanilla ui/"
+                    % rgb) + PLAIN_TEX + (" at %d,%d - no pixel of the mod's own cover is copied"
+                                          % GROUND_SAMPLE)
+        except (OSError, ValueError, SystemExit):
+            rgb = GROUND_FALLBACK
+            note = ("plate ground: a flat %02X%02X%02X - the vanilla stash cover could not be "
+                    "sampled, so the built-in tone is used" % rgb)
+    img = np.empty((h, w, 4), dtype=np.uint8)
+    img[..., 0], img[..., 1], img[..., 2], img[..., 3] = rgb[0], rgb[1], rgb[2], 255
+    return img, note
+
+
 def extract_sources() -> None:
     sys.path.insert(0, HERE)
     import arc  # noqa: E402  (tools/ is not a package)
@@ -123,8 +311,32 @@ def extract_sources() -> None:
         print("extracted %s (%d bytes)" % (dst, len(data)))
 
 
+# src/gen/pages_gen.cpp: the frame's box count, and the cap the row count is walked back to.
+FRAME_BOX_CAP = 160
+
+
+def regrid(geo, cells, gap):
+    """The cell grid a DERIVED rectangle gives, the way pages_gen.cpp's grid() computes it.
+
+    The oracle's cols/rows belong to the vanilla 333x552; a mod's page is a different size, so
+    a set painted with the vanilla counts leaves most of it empty.
+    """
+    out = []
+    for (cw, ch, _cols, _rows, labels) in cells:
+        cols = max(1, geo.usableW // cw)
+        rows = max(1, geo.usableH // (ch + gap))
+        while cols * rows > FRAME_BOX_CAP and rows > 1:
+            rows -= 1
+        out.append((cw, ch, cols, rows, labels))
+    return out
+
+
 def read_groups():
-    """-> (x0, y0, rowGap, [(cellW, cellH, cols, rows, [labels...])])"""
+    """-> (x0, y0, rowGap, [(cellW, cellH, cols, rows, [labels...])])
+
+    The F line still carries the origin the DLL lays boxes out with; the P line beside it
+    carries the plate, and main() reads that through ui_geometry instead.
+    """
     x0, y0, gap = 105, 76, 2
     cells = {}
     with open(GROUPS, "r", encoding="utf-8", errors="replace") as fh:
@@ -291,42 +503,70 @@ def draw_frame(dst: np.ndarray, sl, x: int, y: int, w: int, h: int) -> None:
 # ---------------------------------------------------------------------------- main
 def main() -> int:
     png_only = "--png-only" in sys.argv
-    os.makedirs(OUT, exist_ok=True)
-    extract_sources()
+    args = sys.argv[1:]
+    custom = args[args.index("--custom") + 1] if "--custom" in args else None
+    basemods = "--basemods" in args
+    out_dir = args[args.index("--out") + 1] if "--out" in args else OUT
+    # uniquetab.ini's plate_ground: the flat colour a MODDED plate is filled with.
+    plate_ground = args[args.index("--plate-ground") + 1] if "--plate-ground" in args else ""
+    # The view tag a custom game's plates carry, so two mods with one cover size cannot
+    # collide. Empty for the start-up view, which keeps the shipped names exactly.
+    plate_tag = args[args.index("--plate-tag") + 1] if "--plate-tag" in args else ""
+    os.makedirs(out_dir, exist_ok=True)
 
     sys.path.insert(0, HERE)
     from arz import ArzDatabase  # noqa: E402
+    import ui_geometry  # noqa: E402
 
-    with open(os.path.join(SRC, os.path.basename(VANILLA_TEX)), "rb") as fh:
-        w, h, van = tex_decode(fh.read())
-    print("materials plate (frame donor + target size) %dx%d" % (w, h))
-    with open(os.path.join(SRC, os.path.basename(PLAIN_TEX)), "rb") as fh:
-        cw_, ch_, cov = tex_decode(fh.read())
-    print("cover image (ground)                       %dx%d" % (cw_, ch_))
-    if cw_ != w:
-        raise SystemExit("the two plates disagree on width (%d vs %d)" % (cw_, w))
+    geo = ui_geometry.derive(GAME, basemods, custom)
+    vanilla_cover = geo.tuple() == ui_geometry.VANILLA
+    print("cover: %s %dx%d (%s)" % (geo.plate, geo.plateW, geo.plateH, geo.view))
 
-    lm = lattice_mask(cov, halo=1)
-    ground = erase_lines(cov, lm)
-    ornament = gold_mask(cov) & ~lattice_mask(cov)
-    if ch_ < h:                                   # 626 -> 627: repeat the last row
-        pad = np.repeat(ground[-1:], h - ch_, axis=0)
-        ground = np.concatenate([ground, pad], axis=0)
-        ornament = np.concatenate([ornament, np.repeat(ornament[-1:], h - ch_, axis=0)], axis=0)
-        cov = np.concatenate([cov, np.repeat(cov[-1:], h - ch_, axis=0)], axis=0)
-    Image.fromarray(ground).save(os.path.join(SRC, "plate_ground.png"))
-    print("erased %d lattice pixels, kept %d ornament pixels"
-          % (int(lm.sum()), int(ornament.sum())))
+    w, h = geo.plateW, geo.plateH
+    # The cover's own bitmapPosition, back out of the convention ui_geometry.py states:
+    # usableW = plateW - (x0 - bitmapPositionX). Vanilla 0,1; X-Mod 0,-26; Baul 92,1.
+    dx, dy = geo.x0 - (w - geo.usableW), geo.y0 - (h - geo.usableH)
+    src_ground, note, vanilla_ground = ground_for(geo, dx, dy)
+    print(note)
+    if not vanilla_ground:
+        # A MODDED GROUND IS A FLAT FILL - not one pixel of the mod's art. See the header.
+        src_ground, fill_note = flat_ground(w, h, plate_ground)
+        print(fill_note)
+    if vanilla_ground:
+        # The lattice and the ornament are measured on THIS texture, so they run only here.
+        cov = src_ground
+        lm = lattice_mask(cov, halo=1)
+        ground = fit(erase_lines(cov, lm), w, h)
+        ornament = fit(gold_mask(cov) & ~lattice_mask(cov), w, h)
+        cov = fit(cov, w, h)
+        Image.fromarray(ground).save(os.path.join(SRC, "plate_ground.png"))
+        print("erased %d lattice pixels, kept %d ornament pixels"
+              % (int(lm.sum()), int(ornament.sum())))
+    else:
+        # A mod's own plain tab background: it carries the mod's border already, and nothing
+        # was erased from it, so there is no ornament to composite back.
+        ground = fit(src_ground, w, h)
+        cov, ornament = None, None
 
     db = ArzDatabase.load_game(GAME)
     boxes = vanilla_frames(db)
-    # the donor frame: the small square one at box 3 (32x32 cell), the cleanest on the plate
+    # The donor frame: the small square one at box 3 (32x32 cell), the cleanest on the plate.
+    # It is cut from the VANILLA materials plate in every view - the box records that locate it
+    # are vanilla, and a mod's cover has no frame of ours at those coordinates, so cutting from
+    # the mod's own art yields an empty stamp and a plate with no grid on it at all.
+    extract_sources()
+    with open(os.path.join(SRC, os.path.basename(VANILLA_TEX)), "rb") as fh:
+        _dw, _dh, donor_plate = tex_decode(fh.read())
     bx, by = boxes[2]
     donor = (bx - FRAME_OUTSET, by - FRAME_OUTSET, 32 + 2 * FRAME_OUTSET, 32 + 2 * FRAME_OUTSET)
-    sl = frame_slices(van, donor)
+    sl = frame_slices(donor_plate, donor)
 
-    x0, y0, gap, cells = read_groups()
-    print("grid origin (%d,%d) rowGap %d; %d distinct cell sizes" % (x0, y0, gap, len(cells)))
+    _x0, _y0, gap, cells = read_groups()
+    x0, y0 = geo.x0, geo.y0
+    if not vanilla_cover:
+        cells = regrid(geo, cells, gap)
+    print("grid origin (%d,%d) rowGap %d, cover at %d,%d; %d distinct cell sizes"
+          % (x0, y0, gap, dx, dy, len(cells)))
 
     made = []
     for (cw, ch, cols, rows, labels) in cells:
@@ -334,17 +574,29 @@ def main() -> int:
         n = 0
         for rr in range(rows):
             for cc in range(cols):
-                bxx = x0 + cw * cc - PLATE_DX
-                byy = y0 + (ch + gap) * rr - PLATE_DY
+                bxx = x0 + cw * cc - dx
+                byy = y0 + (ch + gap) * rr - dy
+                if bxx + cw + FRAME_OUTSET > w or byy + ch + FRAME_OUTSET > h:
+                    continue
                 draw_frame(img, sl, bxx - FRAME_OUTSET, byy - FRAME_OUTSET,
                            cw + 2 * FRAME_OUTSET, ch + 2 * FRAME_OUTSET)
                 n += 1
-        img[ornament] = cov[ornament]          # the border always wins
-        name = "uniq_plate_%dx%d" % (cw, ch)
-        Image.fromarray(img).save(os.path.join(OUT, name + "_view.png"))
+        if ornament is not None:
+            img[ornament] = cov[ornament]      # the vanilla border always wins
+        # The vanilla cover keeps the plain name, so the set that ships today goes on being
+        # found; any other cover carries its size, the way ut_plate.cpp asks for it.
+        # The name ut_plate.cpp asks for: the shipped set keeps the plain name, any other
+        # cover size carries it, because the same cell on a bigger caravan is a different plate.
+        if geo.is_vanilla_plate():
+            name = "uniq_plate_%dx%d" % (cw, ch)
+        elif not plate_tag:
+            name = "uniq_plate_%dx%d_%dx%d" % (cw, ch, geo.plateW, geo.plateH)
+        else:
+            name = "uniq_plate_%dx%d_%dx%d_%s" % (cw, ch, geo.plateW, geo.plateH, plate_tag)
+        Image.fromarray(img).save(os.path.join(out_dir, name + "_view.png"))
         if not png_only:
             blob = tex_encode(img)
-            with open(os.path.join(OUT, name + ".tex"), "wb") as fh:
+            with open(os.path.join(out_dir, name + ".tex"), "wb") as fh:
                 fh.write(blob)
             made.append((name, len(blob), cols, rows, n, labels))
         print("  %-22s %2dx%-2d = %3d frames   groups: %s"
@@ -354,7 +606,7 @@ def main() -> int:
         # read the headers back the way the engine will
         print("\nread-back:")
         for (name, size, cols, rows, n, _labels) in made:
-            p = os.path.join(OUT, name + ".tex")
+            p = os.path.join(out_dir, name + ".tex")
             with open(p, "rb") as fh:
                 blob = fh.read()
             rw, rh, _px = tex_decode(blob)
@@ -363,7 +615,7 @@ def main() -> int:
                                                    "OK" if ok else "MISMATCH"))
             if not ok:
                 return 1
-        with open(os.path.join(OUT, "PLATES.txt"), "w", encoding="utf-8") as fh:
+        with open(os.path.join(out_dir, "PLATES.txt"), "w", encoding="utf-8") as fh:
             fh.write("# generated cover plates (tools/make_plates.py)\n")
             fh.write("# resource path -> local file\n")
             for (name, _size, cols, rows, n, labels) in made:

@@ -269,6 +269,35 @@ void sayModule(const wchar_t* name) {
          name ? name : L"Grim Dawn.exe", (long long)fsize.QuadPart, image, stamp);
 }
 
+// WHICH WINDOWS THIS IS. ntdll exports wine_get_version only on Wine (Proton, a Steam Deck,
+// CrossOver); on Windows the name is simply absent and this logs nothing. Nothing is gated on it -
+// it exists so a report from a player who runs the game through Wine says so in its first lines,
+// where the runtime differences that matter (the C++ exception tables, the fault dispatch) are
+// otherwise invisible.
+void sayHost() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return;
+    typedef const char*(__cdecl * PfnWineGetVersion)(void);
+    typedef void(__cdecl * PfnWineGetHostVersion)(const char**, const char**);
+    const PfnWineGetVersion getVersion =
+        (PfnWineGetVersion)GetProcAddress(ntdll, "wine_get_version");
+    if (!getVersion) return;
+    const char* version = nullptr;
+    const char* sysname = nullptr;
+    const char* release = nullptr;
+    __try {
+        version = getVersion();
+        const PfnWineGetHostVersion getHost =
+            (PfnWineGetHostVersion)GetProcAddress(ntdll, "wine_get_host_version");
+        if (getHost) getHost(&sysname, &release);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        version = nullptr;
+    }
+    logI("host: WINE %s on %s %s - not Windows (for the record - nothing is gated on it)",
+         version ? version : "(version unreadable)", sysname ? sysname : "?",
+         release ? release : "?");
+}
+
 // `per` counts the confirmed rows per class, `adv` the ADVISORY rows per class (declared, whether
 // or not they held), `advFailed` the advisory rows that did not hold.
 void countClasses(int* per, int* adv, int* advFailed) {
@@ -348,6 +377,7 @@ bool bindingsGate(int resolvedExports, int missingExports) {
     sayModule(nullptr);
     sayModule(L"Game.dll");
     sayModule(L"Engine.dll");
+    sayHost();
 
     const char* failName = nullptr;
     const char* failWhy = nullptr;

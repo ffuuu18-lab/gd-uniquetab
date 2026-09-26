@@ -236,6 +236,30 @@ int journalMode();
 // file, not to the session, and are reset with it.
 bool journalFollowMode(int variant);
 
+// ---- SEPARATE COLLECTIONS FOR CUSTOM GAMES -------------------------------------------------------
+// A custom game (a mod chosen from the main menu, with a view of its own) keeps its own journal
+// set, beside that view's generated files:
+//   start-up view (vanilla, /basemods)   <journal dir>\uniq-items[-hc].jsonl        (never moves)
+//   custom-<name>, basemods+custom-<name> <journal dir>\views\custom-<name>\uniq-items[-hc].jsonl
+// with the .gds/.csv exports, the .pruned-/.bad- copies and rescue-report.txt in the same
+// folder. The key is the custom MOD's name, not the view's, so the same mod with and without
+// /basemods is one collection. <journal dir> is the mod folder, or `journal_dir` when set.
+//
+// journalFollow is journalFollowMode with the view as a second key: when either differs from
+// the open file, that file is FLUSHED and closed, the paths are re-composed (the folder is
+// created) and the other file is read in its place; true only then. `viewKey` is "" for the
+// start-up files or what journalViewKeyFor produced; anything else is refused (false, nothing
+// moves), exactly like an unreadable mode.
+bool journalFollow(int variant, const char* viewKey);
+
+// "custom-<name>" for "custom-<name>" and "basemods+custom-<name>", "" for "vanilla" and
+// "basemods". False for a name whose key would not be a safe folder name ([a-z0-9._-] only).
+bool journalViewKeyFor(const char* viewName, char* out, size_t cap);
+
+// The key of the open journal ("" = the start-up files), and the start-up journal folder.
+const char* journalViewKey();
+const char* journalBaseDir();
+
 // False until a live world has told the journal which stash is loaded. A deposit or a take may
 // not touch a file while it is false: it cannot know which of the two it would be writing to.
 // Neither can happen without the caravan, which needs a world - this is the belt and braces.
