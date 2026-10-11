@@ -283,7 +283,7 @@ WANTED = [
     ("GD_GAMEENGINE_GETAUTOSAVE", "Game",
      "?GetAutoSave@GameEngine@GAME@@QEBA_NXZ",
      "the matching getter, so the step can assert what it did"),
-    # ---- the item rollover (tooltip). ALL FIVE ARE OPTIONAL - a
+    # ---- the item rollover (tooltip). ALL SEVEN ARE OPTIONAL - a
     # miss turns `tooltip_mark` off for the session and can never fail start-up.
     ("GD_ITEM_GETUIDISPLAYTEXT", "Game",
      "?GetUIDisplayText@Item@GAME@@UEBAXPEBVCharacter@2@AEAV?$vector@UGameTextLine@GAME@@@mem@@_N@Z",
@@ -301,6 +301,11 @@ WANTED = [
     ("GD_ITEMRELIC_GETUIDISPLAYTEXT", "Game",
      "?GetUIDisplayText@ItemRelic@GAME@@UEBAXPEBVCharacter@2@AEAV?$vector@UGameTextLine@GAME@@@mem@@_N@Z",
      "the other override that does not call the base - cheap, so it is covered too"),
+    ("GD_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT", "Game",
+     "?GetUIDisplayText@ItemArtifactFormula@GAME@@UEBAXPEBVCharacter@2@AEAV?$vector@UGameTextLine@GAME@@@mem@@_N@Z",
+     "a BLUEPRINT (0x3199B0). It calls the CRAFTED item's GetUIDisplayText "
+     "(`call [rax+0x458]` on [this+0x1108] at 0x31A4CF) into the same vector, so the detour "
+     "suppresses that inner latch and latches the blueprint's own record on the way out"),
     ("GD_GAMETEXTLINETOSTRING", "Game",
      "?GameTextLineToString@GAME@@YAXAEBV?$vector@UGameTextLine@GAME@@@mem@@AEAV?$list@UGameTextString@GAME@@@3@@Z",
      "THE layout entry point (0x302A90). Reads the vector at [+0] and [+8] only "

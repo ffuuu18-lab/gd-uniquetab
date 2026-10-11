@@ -86,13 +86,23 @@ bool ModView::loadBasemods(const std::string& gameDir, std::string* error) {
         if (!a.load(p, error)) return false;
         m_arz.push_back(std::move(a));
     }
-    for (const std::string& p : arcs) {
-        ArcArchive a;
-        if (!a.load(p, error)) return false;
-        m_arc.push_back(std::move(a));
-    }
+    for (const std::string& p : arcs) addArc(p);
     m_label = "/basemods";
     return true;
+}
+
+// An .arc that cannot be read is skipped and remembered, never fatal: a mod can ship a broken
+// resource archive (DeathGrimDawn's text_ko.arc has a zeroed header) and the engine goes on with
+// the rest, so the view does too, in the same sorted order.
+void ModView::addArc(const std::string& path) {
+    ArcArchive a;
+    std::string why;
+    if (!a.load(path, &why)) {
+        // the reader's message already names the file when it starts with the path
+        m_skipped.push_back(why.compare(0, path.size(), path) == 0 ? why : path + ": " + why);
+        return;
+    }
+    m_arc.push_back(std::move(a));
 }
 
 bool ModView::loadCustom(const std::string& modDir, std::string* error) {
@@ -109,11 +119,7 @@ bool ModView::loadCustom(const std::string& modDir, std::string* error) {
         if (!a.load(p, error)) return false;
         m_arz.push_back(std::move(a));
     }
-    for (const std::string& p : arcs) {
-        ArcArchive a;
-        if (!a.load(p, error)) return false;
-        m_arc.push_back(std::move(a));
-    }
+    for (const std::string& p : arcs) addArc(p);
     // Appended, never replaced: a custom game loaded over a /basemods install is both layers.
     m_label = m_label.empty() ? modDir : m_label + " + " + modDir;
     return true;
@@ -296,6 +302,27 @@ std::string UiGeometry::line() const {
     std::snprintf(buf, sizeof buf, "P\t%d\t%d\t%d\t%d\t%d\t%d\t", x0, y0, usableW, usableH,
                   plateW, plateH);
     return std::string(buf) + plate;
+}
+
+bool materialBoxPositions(const GameData& g, const ModView& mods,
+                          std::vector<std::pair<int, int> >& out, std::string* error) {
+    out.clear();
+    if (!g.db) { if (error) *error = "game data not loaded"; return false; }
+    auto recs = [&](const std::string& name, ArzRecord& r) {
+        return mods.get(name, r) || g.db->get(name, r);
+    };
+    ArzRecord page;
+    if (!recs(kMaterialWindow, page)) {
+        if (error) *error = std::string(kMaterialWindow) + " is not in the database";
+        return false;
+    }
+    const ArzField* boxes = page.find("reagentBoxes");
+    if (!boxes) return true;
+    for (const std::string& b : boxes->strs) {
+        ArzRecord box;
+        if (recs(b, box)) out.emplace_back(box.i32("itemBoxX"), box.i32("itemBoxY"));
+    }
+    return true;
 }
 
 bool deriveGeometry(const GameData& g, UiGeometry& out, std::string* error) {

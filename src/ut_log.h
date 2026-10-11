@@ -114,4 +114,18 @@ void logSetFlushEachLine(int on);
 
 void logShutdown();
 
+// THE PER-VIEW LOG. While a custom game's view is active every line is ALSO written to that view's
+// own uniquetab.log (<mod folder>\mods\<leaf>[\basemods]\uniquetab.log); the main log keeps every line as
+// before. The view's file rotates like the main one - the previous session's copy archived beside
+// it, three archives kept, 4 MB per session - and a second entry into the same view in one
+// session appends to the file the first one started. Lines written while no view is active go to
+// the main log only.
+// Opens (or switches) the tee; `view` names it in the file's own first line. A path that cannot
+// be opened leaves no tee and returns false. Any thread; the file work runs outside the lock.
+bool logTeeOpen(const wchar_t* path, const char* view);
+// Ends the tee: its own last line, flushed, closed. A no-op when none is open.
+void logTeeClose();
+// The open tee's path (empty when none).
+void logTeePath(wchar_t* out, size_t cap);
+
 }  // namespace ut

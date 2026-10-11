@@ -77,13 +77,14 @@
 //     for the human exactly like `flagsText` - so a game patch that moved a field can only make
 //     the NAME wrong, never the reconstruction. A `sOOO` key (format 2) is still accepted.
 //
-//     WHAT EACH SLOT IS. Six are proved by 358 real entries; the four marked
-//     (POSITION ONLY) rest on `ItemReplicaInfo::WriteProperties`' field ORDER alone and have
-//     never been seen filled in real data - they are named so a human can read a file that does
-//     fill them, not because the game has confirmed them. Do not "tidy" these names away:
+//     WHAT EACH SLOT IS. Six are proved by 358 real entries, two more (prefix, suffix) by a
+//     decoded save (below); the two marked (POSITION ONLY) rest on
+//     `ItemReplicaInfo::WriteProperties`' field ORDER alone and have never been seen filled in
+//     real data - they are named so a human can read a file that does fill them, not because the
+//     game has confirmed them. Do not "tidy" these names away:
 //       +0x008 baseRecord       the item's own record. Always equals "record" (357/358 real ones)
-//       +0x028 prefix           affix                              (POSITION ONLY, never seen set)
-//       +0x048 suffix           affix                              (POSITION ONLY, never seen set)
+//       +0x028 prefix           affix          (seen set in a decoded save, see ut_miroll.h)
+//       +0x048 suffix           affix          (seen set in a decoded save, see ut_miroll.h)
 //       +0x070 modifier         the extra affix; a CRAFTED item's crafting bonus lives here
 //       +0x090 component        the inserted component/relic ("materia")
 //       +0x0B0 completionBonus  the component's / relic's completion bonus
@@ -98,7 +99,12 @@
 //     layout MEASURED out of a real transfer.gst (5 strings base/prefix/
 //     suffix/modifier/transmute, u32 seed, 5 strings materia/relicCompletionBonus/enchantment/
 //     ascendant/ascendant2H, 7 u32 relicSeed/unknown/enchantmentSeed/materiaCombines/stackCount/
-//     seedRerolls/affixRerolls) the two orders line up field for field. FIVE of the ten are then
+//     seedRerolls/affixRerolls) the two orders line up field for field. The writer
+//     (18 calls, the order above) and a decoded 1.3.0.8 transfer.gst agree: on all six affixed
+//     items in it field 2 (<- +0x28) is a `lootaffixes/prefix/` record and field 3 (<- +0x48) a
+//     `lootaffixes/suffix/` one - among them the monster infrequent b305c_ring (prefix
+//     b_ar007_ar_b, suffix a030b_off_dmg%fire_05_je, seed 2115467035), which test_journal's
+//     affixed round trip reproduces slot for slot. FIVE of the ten are then
 //     confirmed directly by the 358 real entries: +0x08 always repeats "record"; +0x90
 //     holds records/items/materia/compa_* (14 of them); +0xB0 holds
 //     records/items/lootaffixes/completionrelics/* on the two relics; +0xD8 holds
@@ -150,6 +156,7 @@
 #include <vector>
 
 #include "model/catalogue.h"
+#include "ut_folders.h"
 #include "ut_gds.h"
 #include "ut_log.h"
 #include "ut_paths.h"
@@ -196,7 +203,7 @@ char g_reportPath[MAX_PATH] = {0};
 // The resolved journal folder, kept so the three paths can be re-composed when the
 // mode switches, and the mode itself - 0 the softcore names, 1 the `-hc` ones. See ut_rescue.h.
 // g_dir is the ACTIVE folder: the start-up one (g_baseDir) or a custom game's
-// <g_baseDir>\views\<g_viewKey>; the rescue report follows it the same way.
+// <g_baseDir>\mods\<leaf> for the key custom-<leaf>; the rescue report follows it the same way.
 char g_dir[MAX_PATH] = {0};
 char g_baseDir[MAX_PATH] = {0};
 char g_baseReport[MAX_PATH] = {0};
@@ -439,6 +446,10 @@ void leafName(const char* record, char* out, size_t cap) {
 // First caller loads, every other caller returns at once.
 gdut::Catalogue* volatile g_cat = nullptr;
 volatile LONG g_catTried = 0;
+volatile LONG g_catReloaded = 0;   // journalCatalogueReload put a view's catalogue in
+// Armed by a KIND question that may not load on its own thread (the tooltip); journalService
+// consumes it on the worker. See journalRecordIsMi.
+volatile LONG g_catWarmArm = 0;
 
 void catalogueEnsure() {
     if (InterlockedExchange(&g_catTried, 1)) return;
@@ -450,6 +461,7 @@ void catalogueEnsure() {
                        (LPCSTR)&catalogueEnsure, &self);
     char path[MAX_PATH] = {0};
     if (utModFile(self, "catalogue.bin", path, sizeof(path))) {
+        if (InterlockedCompareExchange(&g_catReloaded, 0, 0)) return;   // a view's is already in
         try {
             gdut::Catalogue* c = new gdut::Catalogue();
             std::string err;
@@ -736,7 +748,7 @@ void writeMsvcString(unsigned char* blob, unsigned int off, char* storage);  // 
 // plausibility bound the rest of this file uses for a std::string window (16 <= capacity <=
 // 0x4000 and size <= capacity) refuses EXACTLY ONE of the 28 - the relic, at +0x070 with
 // size 15 and capacity 63, which is the window that actually crashed the game - and accepts all
-// 27 others plus a post-FIX-1 relic capture. A capacity of 78 billion is not a struct member the
+// 27 others plus a correctly captured relic. A capacity of 78 billion is not a struct member the
 // engine ever reads; 63 is.
 unsigned int nullStringWindowAt(const unsigned char* blob, unsigned int len,
                                 const unsigned int* slotOff, int slotCount, unsigned int* sizeOut,
@@ -1853,10 +1865,10 @@ void journalSetCsvExport(int mode) {
     // CSV-only pass in journalService takes the same lock and uses the same csvWrite; nothing
     // here writes anything itself.
     //
-    // No "is the journal empty" guard any more: that guard existed only because g_dirty would
-    // have created an empty uniq-items.jsonl on a machine that has never deposited anything.
-    // A CSV-only pass writes the CSV and nothing else, so an empty collection now honestly
-    // produces the header line on its own - which is what the USER-GUIDE promises.
+    // No "is the journal empty" guard: such a guard would only be needed if g_dirty could
+    // create an empty uniq-items.jsonl on a machine that has never deposited anything.
+    // A CSV-only pass writes the CSV and nothing else, so an empty collection honestly
+    // produces the header line on its own - a spreadsheet with its columns and no rows.
     InterlockedExchange(&g_csvArm, 1);
     if (g_event) SetEvent(g_event);
 }
@@ -2186,6 +2198,9 @@ void gdsWrite() {
 
 void journalService() {
     if (!g_entries || !g_csReady) return;
+    // The tooltip asked for a record's KIND before anything loaded the catalogue (the
+    // lazy load runs on the first write) - load it here, on the worker, with no lock held.
+    if (InterlockedExchange(&g_catWarmArm, 0)) catalogueEnsure();
     if (!InterlockedCompareExchange(&g_dirty, 0, 0)) {
         // The CSV-ONLY pass. `export_csv` changed to a mode that
         // writes, so the export is stale - but nothing about the JOURNAL changed, and rewriting
@@ -2431,6 +2446,57 @@ int journalCollectStored(char (*out)[256], unsigned int* counts, int cap) {
     return n;
 }
 
+int journalRescuePlan(int (*inDb)(const char* record), std::vector<UtRescueRow>* restore,
+                      std::vector<UtRescueRow>* kept) {
+    if (restore) restore->clear();
+    if (kept) kept->clear();
+    if (!g_entries || !g_csReady) return 0;
+    std::vector<UtRescueRow> rows;
+    EnterCriticalSection(&g_cs);
+    try {
+        for (size_t i = 0; i < g_entries->size(); ++i) {
+            if (!(*g_entries)[i].count) continue;   // TABLE-OWNED rows only
+            rows.push_back(UtRescueRow{(*g_entries)[i].record, (*g_entries)[i].count});
+        }
+    } catch (...) {
+    }
+    LeaveCriticalSection(&g_cs);
+    int n = 0;
+    try {
+        for (const UtRescueRow& r : rows) {
+            const int has = inDb ? inDb(r.record.c_str()) : -1;
+            if (has == 0) {
+                if (kept) kept->push_back(r);
+            } else if (restore) {
+                restore->push_back(r);
+            }
+            ++n;
+        }
+    } catch (...) {
+    }
+    return n;
+}
+
+void journalCatalogueReload(const char* catalogueBin) {
+    if (!catalogueBin || !*catalogueBin) return;
+    InterlockedExchange(&g_catTried, 1);   // the lazy start-up load never runs after this
+    try {
+        gdut::Catalogue* c = new gdut::Catalogue();
+        std::string err;
+        if (c->loadFromFile(catalogueBin, &err)) {
+            g_cat = c;   // the previous one is not freed: a reader may hold it
+            InterlockedExchange(&g_catReloaded, 1);
+            logD("rescue journal: display names from the view's \"%s\" (%zu items)", catalogueBin,
+                 c->itemCount());
+            return;
+        }
+        delete c;
+        logD("rescue journal: the view's catalogue.bin \"%s\" is not usable (%s) - the display "
+             "names stay as they were", catalogueBin, err.c_str());
+    } catch (...) {
+    }
+}
+
 unsigned int journalCollectedTotal(void) {
     unsigned int total = 0;
     if (!g_entries || !g_csReady) return 0;
@@ -2450,7 +2516,7 @@ unsigned int journalCollectedTotal(void) {
 // not merely its identity - there is no engine copy behind it and no refund branch to hand it
 // back. So the deposit path writes the file itself, on its own thread, before it returns.
 //
-// It is journalService's FULL pass factored out, and journalService now calls it: the same
+// It is journalService's FULL pass factored out, and journalService calls it: the same
 // read-only refusal, the same lock, the same writeFile() + csvWrite() + gdsWrite(), the same
 // re-arm of g_dirty on failure. Everything it touches is thread-agnostic - writeWholeFileAtomic
 // is .tmp + MoveFileEx(REPLACE_EXISTING | WRITE_THROUGH) and its own comment says why that is
@@ -2525,6 +2591,17 @@ bool journalDepositCommit(const UtReplicaCapture& cap, unsigned int count, bool*
              "touched");
         logD("the row could never have been written to disk, and an unwritten row is a lost "
              "item, not a lost identity");
+        return false;
+    }
+    // THE MI BELT. An MI record's row holds ONE roll: the upsert below REPLACES the
+    // row's identity, so a second copy would overwrite the first roll and both takes would hand
+    // back the second. collectionAccepts refuses that deposit first, with the stored roll in its
+    // reason; this is the line no other caller can step over. Only a KNOWN MI is refused here -
+    // the gate already turned "kind unknown" into its own refusal where it matters.
+    if (count >= 2 && journalRecordIsMi(cap.record, true) == 1) {
+        logW("deposit REFUSED: %s is a monster infrequent and its row already holds its one roll "
+             "- the item was not touched",
+             cap.record);
         return false;
     }
     // Step 2: the pre-image. A whole Entry copy, taken under the lock, so the restore is exact -
@@ -2708,6 +2785,9 @@ bool journalFollow(int variant, const char* viewKey) {
     if (viewKey && viewKey[0]) {
         if (!journalViewKeyFor(viewKey, key, sizeof(key)) || !key[0]) return false;
     }
+    // The key stays custom-<leaf>; the folder is the game's own, mods\<leaf> (ut_folders.h).
+    const std::string rel = key[0] ? utCustomGameRel(key) : std::string();
+    if (key[0] && rel.empty()) return false;
     const char* name = variant == 1 ? "hardcore" : "softcore";
     const bool sameView = _stricmp(key, g_viewKey) == 0;
     const LONG had = InterlockedExchange(&g_mode, (LONG)variant);
@@ -2725,10 +2805,8 @@ bool journalFollow(int variant, const char* viewKey) {
     // file. The mode was swapped above; the flush writes entries, never the mode.
     char dir[MAX_PATH];
     if (key[0]) {
-        _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\views", g_baseDir);
-        CreateDirectoryA(dir, nullptr);
-        _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\views\\%s", g_baseDir, key);
-        CreateDirectoryA(dir, nullptr);
+        utMakeRelDirs(g_baseDir, rel);
+        _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s\\%s", g_baseDir, rel.c_str());
     } else {
         _snprintf_s(dir, sizeof(dir), _TRUNCATE, "%s", g_baseDir);
     }
@@ -2891,14 +2969,127 @@ bool journalItemName(const char* record, char* out, size_t cap) {
         if (idx < 0) return false;
         const std::string_view name = cat->item((size_t)idx).name;
         if (name.empty()) return false;
-        size_t n = name.size();
-        if (n >= cap) n = cap - 1;
-        memcpy(out, name.data(), n);
-        out[n] = 0;
-        return true;
+        // Without the game's colour codes ({^X} and ^X), the generator's stripColourCodes rule.
+        size_t o = 0;
+        for (size_t i = 0; i < name.size() && o + 1 < cap; ++i) {
+            if (name[i] == '{' && i + 3 < name.size() && name[i + 1] == '^' && name[i + 3] == '}') {
+                i += 3;
+                continue;
+            }
+            if (name[i] == '^' && i + 1 < name.size()) {
+                ++i;
+                continue;
+            }
+            out[o++] = name[i];
+        }
+        out[o] = 0;
+        return o > 0;
     } catch (...) {
         return false;
     }
+}
+
+// ---- monster infrequents: the KIND and the stored ROLL -----------------------------------------
+// The KIND is the catalogue's (ut_miroll.h, the seam): this file already holds the view's
+// catalogue for the display names, so it answers for the deposit gate, the tooltip and the
+// rescue from the same object. `utCatHasKindOf` is a compile-time fact - a catalogue without the
+// accessor makes every answer 0 and costs nothing at run time.
+bool journalKindMarkBuilt() { return utCatHasKindOf<gdut::ItemView>(); }
+
+// TEST ONLY (journalTestSetKind): -2 = no override, the catalogue answers.
+volatile LONG g_kindOverride = -2;
+void journalTestSetKind(int kind) { InterlockedExchange(&g_kindOverride, (LONG)kind); }
+
+int journalRecordIsMi(const char* record, bool mayLoad) {
+    const LONG forced = InterlockedCompareExchange(&g_kindOverride, 0, 0);
+    if (forced != -2) return (int)forced;
+    if (!utCatHasKindOf<gdut::ItemView>()) return 0;
+    if (!record || !*record) return -1;
+    if (mayLoad) catalogueEnsure();
+    gdut::Catalogue* cat = g_cat;
+    if (!cat) {
+        // The game thread may not pay for the load (the tooltip): the worker does it, once, and
+        // the next question (the tooltip's memo expires in 250 ms) has the answer.
+        if (!mayLoad && !InterlockedCompareExchange(&g_catTried, 0, 0) &&
+            !InterlockedExchange(&g_catWarmArm, 1) && g_event) {
+            SetEvent(g_event);
+        }
+        return -1;
+    }
+    try {
+        const int idx = cat->indexOfRecord(std::string_view(record));
+        if (idx < 0) return -1;
+        return utCatIsMiOf(cat->item((size_t)idx)) ? 1 : 0;
+    } catch (...) {
+        return -1;
+    }
+}
+
+bool journalRollOf(const char* record, UtRollKey* out) {
+    if (!out) return false;
+    utRollClear(out);
+    if (!g_entries || !g_csReady || !record || !*record) return false;
+    bool ok = false;
+    // The slots are copied out under the lock and the rule runs on the copy: ut_miroll.h's
+    // utRollFromSlots is the ONE definition of a roll, shared with the tests.
+    unsigned int offs[24];
+    char (*texts)[160] = nullptr;
+    int n = 0;
+    std::vector<unsigned char> blob;
+    try {
+        texts = new char[24][160];
+    } catch (...) {
+        return false;
+    }
+    EnterCriticalSection(&g_cs);
+    try {
+        const int at = findEntry(record);
+        if (at >= 0) {
+            const Entry& e = (*g_entries)[at];
+            for (size_t i = 0; i < e.slots.size() && n < 24; ++i) {
+                offs[n] = e.slots[i].off;
+                _snprintf_s(texts[n], 160, _TRUNCATE, "%s", e.slots[i].text.c_str());
+                ++n;
+            }
+            blob = e.replica;
+            ok = true;
+        }
+    } catch (...) {
+        ok = false;
+    }
+    LeaveCriticalSection(&g_cs);
+    if (ok) {
+        ok = utRollFromSlots(offs, texts, n, blob.empty() ? nullptr : &blob[0],
+                             (unsigned int)blob.size(), out);
+    }
+    delete[] texts;
+    return ok;
+}
+
+bool journalRollText(const char* record, char* out, size_t cap) {
+    if (!out || !cap) return false;
+    out[0] = 0;
+    UtRollKey k;
+    if (!journalRollOf(record, &k)) {
+        _snprintf_s(out, cap, _TRUNCATE, "no stored row for %s", record ? record : "?");
+        return false;
+    }
+    catalogueEnsure();
+    char name[192];
+    name[0] = 0;
+    journalItemName(record, name, sizeof(name));
+    int level = 0;
+    gdut::Catalogue* cat = g_cat;
+    if (cat) {
+        try {
+            const int idx = cat->indexOfRecord(std::string_view(record));
+            if (idx >= 0) level = (int)cat->item((size_t)idx).levelRequirement;
+        } catch (...) {
+            level = 0;
+        }
+    }
+    utRollDescribe(k, name, level, out, cap);
+    return true;
 }
 
 const char* journalPath() {
@@ -3207,7 +3398,7 @@ bool identityBuild(const UtReplicaCapture& entry, const unsigned char* incoming,
     // +0xD8 the single 8-aligned window at +0xD0 read size from +0xE0 (the zeroed half of the
     // rebuilt SSO union) and capacity from +0xE8 (the LENGTH field of the rebuilt string) - so
     // "capacity 39" was the length of a 39-character component/relic path and the entry was
-    // refused precisely BECAUSE the item carried an identity. The test is now an OVERLAP test.
+    // refused precisely BECAUSE the item carried an identity. So the test is an OVERLAP test.
     // It cannot make anything less safe: bytes inside a slot the mod itself rewrote are the
     // mod's own (writeMsvcString memsets the whole 0x20), never a stale heap pointer.
     for (unsigned int off = 0; off + 0x20 <= len; off += 8) {

@@ -30,7 +30,7 @@
 //                                              SURVIVES journalPruneNotStored
 //   10 format 4 round trip                  -> the counts survive a write and a re-read
 //   11 a format-3 file                      -> every row at count 0, nothing invented
-//   12 THE REHEARSAL                        -> a COPY of the user's own live journal
+//   12 THE REHEARSAL                        -> a COPY of a real collection journal
 //   14 THE PAINT GATE (ut_paintgate.h)      -> a count-1 row paints from a writable journal and
 //                                              NOT from a read-only one
 //   15 THE DEPOSIT GATE (ut_depositgate.h)  -> a deposit of one of our records goes into
@@ -38,12 +38,17 @@
 //                                              answer. All 768 fact combinations
 //                                              are decided; exactly 5 of them may touch the
 //                                              journal, so every refusal leaves it untouched
+//   19 ONE ROLL PER MI RECORD (ut_miroll.h) -> the KIND seam (catIsMi by ADL, stubbed so
+//                                              no catalogue is needed), the cap against an
+//                                              independent oracle, the roll and its words, a second roll
+//                                              refused with the first named, the commit's belt
 //   16 THE PAGE GATE (ut_pagegate.h)       -> the material record is substituted only while the
 //                                              active database can serve the page it is
 //                                              substituted for; a world that cannot keeps the
 //                                              vanilla page for the rest of its life
 //
 // Build + run:  tools\build_test_store.bat   (everything happens under build\test)
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
@@ -210,7 +215,7 @@ static int passMain() {
     fill(&legacy, kLegacy, 1);
 
     // --- the LEGACY deposit first: journalUpsert is the map-owned path and must leave the table
-    // empty. This is the one that keeps the user's 537 existing rows out of the table.
+    // empty. This is the one that keeps an existing journal's rows out of the table.
     printf("\n0. the legacy (map-owned) deposit puts NOTHING in the table\n");
     check(ut::journalUpsert(legacy), "journalUpsert accepts an ordinary deposit");
     check(countOf(kLegacy) == 0, "and the row's count is 0 - the engine's map holds that item");
@@ -429,11 +434,11 @@ static int passReread() {
 // ---- pass 3: a format-3 file, and the contradiction repair -----------------------------------
 static int passLegacyFile(const char* what) {
     // A hand-written format-3 journal: no counts anywhere, one stored row, one not-stored row,
-    // one nobody has reconciled. It is what the user's own file looks like.
+    // one nobody has reconciled. It is what a real file looks like.
     char path[MAX_PATH];
     _snprintf_s(path, sizeof(path), _TRUNCATE, "%s", what);
     std::string t;
-    t.append("{\"journal\":\"grim dawn uniquetab\",\"format\":3,\"written\":\"2026-09-11T00:00:00Z\""
+    t.append("{\"journal\":\"grim dawn uniquetab\",\"format\":3,\"written\":\"2000-01-01T00:00:00Z\""
              ",\"entries\":3,\"stored\":1,\"notStored\":1,\"unknown\":1}\n");
     t.append("{\"record\":\"records/items/legacy/one.dbr\",\"stored\":true,\"stack\":1,\"flags\":0,"
              "\"len\":400,\"baseRecord@008\":\"records/items/legacy/one.dbr\","
@@ -476,7 +481,7 @@ static int passLegacyFile(const char* what) {
     return g_fail ? 1 : 0;
 }
 
-// ---- pass 4: THE REHEARSAL - a COPY of the user's own live journal ---------------------------
+// ---- pass 4: THE REHEARSAL - a COPY of a real collection journal ---------------------------
 // The strongest offline evidence there is that this build is safe to put in front of the player:
 // their real file, read by the real reader, upgraded by the real writer, checked line for line.
 // The harness copies it in; the original is only ever READ. With no fixture the pass SKIPS
@@ -491,7 +496,7 @@ static int passLive() {
         printf("  ***** SKIPPED - there is no live journal to rehearse against *****\n");
         return 2;
     }
-    printf("\n12. THE REHEARSAL: the user's own journal, %zu entries\n", n);
+    printf("\n12. THE REHEARSAL: a real journal, %zu entries\n", n);
     check(!ut::journalReadOnly(), "the live journal is NOT read-only to this build");
     static char recs[3600][256];
     const int got = ut::journalRecords(recs, 3600);
@@ -989,7 +994,7 @@ static int passModes() {
 
 // ---- pass 9: ONE COLLECTION PER CUSTOM GAME ----------------------------------------------------
 // A custom game with a view of its own keeps its own journal set under
-// <journal dir>\views\custom-<name>\, keyed by the custom mod's name so the same mod with and
+// <journal dir>\mods\<name>\, keyed by the custom mod's name so the same mod with and
 // without /basemods is one collection; the start-up files never move. This pass drives
 // journalFollow() the way the world's first tick does after a view change: rows on both sides
 // of a switch made mid-process, then both files read off the disk.
@@ -1031,12 +1036,12 @@ static int passViews() {
     // the view changed at the database load; the world's first tick moves the files
     check(ut::journalFollow(0, "custom-lootascension"), "a custom game's world switches the collection");
     const std::string viewPath = ut::journalPath();
-    check(endsWith(viewPath.c_str(), "\\views\\custom-lootascension\\uniq-items.jsonl"),
-          "its journal is <journal dir>\\views\\custom-lootascension\\uniq-items.jsonl");
-    check(endsWith(ut::journalGdsPath(), "\\views\\custom-lootascension\\uniq-export.gds") &&
-              endsWith(ut::journalCsvPath(), "\\views\\custom-lootascension\\uniq-export.csv"),
+    check(endsWith(viewPath.c_str(), "\\mods\\lootascension\\uniq-items.jsonl"),
+          "its journal is <journal dir>\\mods\\lootascension\\uniq-items.jsonl");
+    check(endsWith(ut::journalGdsPath(), "\\mods\\lootascension\\uniq-export.gds") &&
+              endsWith(ut::journalCsvPath(), "\\mods\\lootascension\\uniq-export.csv"),
           "... with its own .gds and .csv beside it");
-    check(endsWith(ut::rescueReportPath(), "\\views\\custom-lootascension\\rescue-report.txt"),
+    check(endsWith(ut::rescueReportPath(), "\\mods\\lootascension\\rescue-report.txt"),
           "... and its own rescue-report.txt");
     check(ut::journalCount() == 0 && !ut::journalHas(kMain),
           "it starts empty - the start-up rows did not come with it");
@@ -1058,7 +1063,7 @@ static int passViews() {
 
     // hardcore inside the custom game: the -hc set in the same view folder
     check(ut::journalFollow(1, key), "a hardcore character in the custom game switches the mode");
-    check(endsWith(ut::journalPath(), "\\views\\custom-lootascension\\uniq-items-hc.jsonl"),
+    check(endsWith(ut::journalPath(), "\\mods\\lootascension\\uniq-items-hc.jsonl"),
           "its hardcore journal is the -hc file in the same view folder");
     fill(&h, kCustomHc, 1);
     check(ut::journalUpsertCount(h, 1) && ut::journalFlushNow(), "a hardcore custom deposit is written");
@@ -1074,7 +1079,7 @@ static int passViews() {
     check(std::string(ut::journalPath()) == mainPath && !strcmp(ut::journalViewKey(), ""),
           "the start-up path is composed again exactly");
     check(endsWith(ut::rescueReportPath(), "\\rescue-report.txt") &&
-              !strstr(ut::rescueReportPath(), "\\views\\"),
+              !strstr(ut::rescueReportPath(), "\\mods\\"),
           "and the rescue report is the start-up one again");
     check(ut::journalCount() == 1 && ut::journalHas(kMain) && !ut::journalHas(kCustom),
           "the start-up table holds its own row and nothing of the custom game's");
@@ -1104,6 +1109,242 @@ static int passViews() {
     return g_fail ? 1 : 0;
 }
 
+// The catalogue stand-in: a record under /gone/ is one the active database has no record of.
+static int fakeInDb(const char* record) { return strstr(record, "/gone/") ? 0 : 1; }
+
+static int passDbViews() {
+    static const char* const kMain = "records/items/dbview/main_one.dbr";
+    static const char* const kMainGone = "records/items/gone/main_gone.dbr";
+    static const char* const kRot = "records/0_rot/items/dbview/rot_one.dbr";
+    static const char* const kRotGone = "records/0_rot/items/gone/rot_gone.dbr";
+    if (!ut::journalInit(nullptr)) {
+        printf("  [FAIL] journalInit\n");
+        return 1;
+    }
+    printf("\n18. the database follows the view: rows on both sides, a record it cannot build\n");
+    check(!ut::journalFollow(0, ""), "the start-up world");
+    ut::UtReplicaCapture a, b, c, d;
+    fill(&a, kMain, 1);
+    fill(&b, kMainGone, 1);
+    check(ut::journalUpsertCount(a, 2) && ut::journalUpsertCount(b, 1) && ut::journalFlushNow(),
+          "the start-up table: a base record and one no database of the view has");
+    // The view changes mid-process (a custom game's database came in).
+    check(ut::journalFollow(0, "custom-reignofterror"), "Reign of Terror's world switches the collection");
+    fill(&c, kRot, 1);
+    fill(&d, kRotGone, 1);
+    check(ut::journalUpsertCount(c, 1) && ut::journalUpsertCount(d, 3) && ut::journalFlushNow(),
+          "its table: a mod record, and one a mod update removed (3 copies)");
+    std::vector<ut::UtRescueRow> restore, kept;
+    const int n = ut::journalRescuePlan(&fakeInDb, &restore, &kept);
+    check(n == 2 && restore.size() == 1 && restore[0].record == kRot && kept.size() == 1 &&
+              kept[0].record == kRotGone && kept[0].count == 3,
+          "the rescue's plan: the mod record is handed back, the one the database lacks is SKIPPED");
+    // The rescue hands back what it may (storeOnTake after the player holds the item).
+    for (const ut::UtRescueRow& r : restore) ut::journalSetCount(r.record.c_str(), 0);
+    check(ut::journalFlushNow() && countOf(kRot) == 0 && countOf(kRotGone) == 3,
+          "after the rescue: the restored row is at 0, the skipped row still holds its 3 - never zeroed");
+    check(ut::journalHas(kRotGone) && ut::journalRescuePlan(&fakeInDb, &restore, &kept) == 1 &&
+              restore.empty() && kept.size() == 1,
+          "a second rescue finds nothing else to do and skips it again");
+    fill(&c, kRot, 1);
+    check(ut::journalUpsertCount(c, 1) && ut::journalFlushNow() && countOf(kRotGone) == 3,
+          "a deposit of another record leaves it alone");
+    std::string csv;
+    check(slurp(ut::journalCsvPath(), &csv) && csv.find(kRotGone) != std::string::npos,
+          "the export still lists it");
+    check(ut::journalRescuePlan(nullptr, &restore, &kept) == 2 && restore.size() == 2 && kept.empty(),
+          "with no catalogue to ask (unknown) nothing is skipped - the build decides, as before");
+    // Back to the main campaign: its rows as they were.
+    check(ut::journalFollow(0, ""), "the main campaign's world switches back");
+    check(countOf(kMain) == 2 && countOf(kMainGone) == 1 && !ut::journalHas(kRot) &&
+              !ut::journalHas(kRotGone),
+          "the start-up table holds its own rows, untouched, and nothing of the custom game's");
+    check(ut::journalRescuePlan(&fakeInDb, &restore, &kept) == 2 && restore.size() == 1 &&
+              restore[0].record == kMain && kept.size() == 1 && kept[0].record == kMainGone,
+          "and its plan skips its own unbuildable row the same way");
+    check(ut::journalFollow(0, "custom-reignofterror") && countOf(kRotGone) == 3 && countOf(kRot) == 1,
+          "entering the custom game again reads its file back: the skipped row still 3");
+    check(ut::journalFollow(0, ""), "and leaving it once more");
+    ut::logFlush();
+    printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail, g_fail == 1 ? "" : "s");
+    return g_fail ? 1 : 0;
+}
+
+// ---- 19 MONSTER INFREQUENTS: ONE ROLL PER RECORD (ut_miroll.h) ----------------------------------
+// The KIND seam stubbed the way the catalogue provides it: a catalogue entry type with a free
+// `catIsMi(entry)` in its own namespace is found by argument-dependent lookup; a type without one
+// answers "not an MI" and says so at compile time.
+namespace fakecat {
+struct MarkedEntry {
+    bool mi;
+};
+inline bool catIsMi(const MarkedEntry& e) { return e.mi; }
+struct PlainEntry {
+    int unused;
+};
+}  // namespace fakecat
+
+static const char* const kMiRing = "records/items/gearaccessories/rings/b305c_ring.dbr";
+static const char* const kRollAPrefix = "records/items/lootaffixes/prefix/b_ar007_ar_b.dbr";
+static const char* const kRollASuffix = "records/items/lootaffixes/suffix/a030b_off_dmg%fire_05_je.dbr";
+static const unsigned int kRollASeed = 2115467035u;   // the decoded roll (ut_miroll.h)
+
+// An MI capture in the real layout: base +0x08, prefix +0x28, suffix +0x48, seed +0x68.
+static void fillMi(ut::UtReplicaCapture* c, const char* prefix, const char* suffix,
+                   unsigned int seed) {
+    memset(c, 0, sizeof(*c));
+    _snprintf_s(c->record, sizeof(c->record), _TRUNCATE, "%s", kMiRing);
+    c->stack = 1;
+    c->replicaLen = 0x190;
+    const unsigned int one = 1;
+    memcpy(c->replica + 0x178, &one, 4);
+    memcpy(c->replica + 0x68, &seed, 4);
+    c->slotCount = 3;
+    c->slotOff[0] = 0x008;
+    _snprintf_s(c->slotText[0], sizeof(c->slotText[0]), _TRUNCATE, "%s", kMiRing);
+    c->slotOff[1] = 0x028;
+    _snprintf_s(c->slotText[1], sizeof(c->slotText[1]), _TRUNCATE, "%s", prefix);
+    c->slotOff[2] = 0x048;
+    _snprintf_s(c->slotText[2], sizeof(c->slotText[2]), _TRUNCATE, "%s", suffix);
+}
+
+// An independent statement of the rule, written from the brief, not from ut_miroll.h.
+static int capOracle(int held, int maxPerRecord, int kind) {
+    if (kind == 1) return held >= 1 ? ut::kUtCapRefuseMiRoll : ut::kUtCapAccept;
+    if (maxPerRecord > 0 && held >= maxPerRecord) return ut::kUtCapRefuseMax;
+    if (kind == -1 && held >= 1) return ut::kUtCapRefuseKindUnknown;
+    return ut::kUtCapAccept;
+}
+
+static int passMi() {
+    if (!ut::journalInit(nullptr)) {
+        printf("  [FAIL] journalInit\n");
+        return 1;
+    }
+    ut::journalFollowMode(0);
+    printf("\n19. monster infrequents: one roll per record\n");
+
+    // (a) the seam
+    printf("  this build: catIsMi(entry) is %s (the KIND mark; absent = no MI anywhere)\n",
+           ut::journalKindMarkBuilt() ? "DECLARED" : "not declared yet");
+    const fakecat::MarkedEntry yes = {true}, no = {false};
+    const fakecat::PlainEntry plain = {0};
+    check(ut::utCatHasKindOf<fakecat::MarkedEntry>() && ut::utCatIsMiOf(yes) && !ut::utCatIsMiOf(no),
+          "a catalogue entry with catIsMi(entry) is read through the seam (ADL)");
+    check(!ut::utCatHasKindOf<fakecat::PlainEntry>() && !ut::utCatIsMiOf(plain),
+          "an entry type with no catIsMi is never an MI");
+    check(ut::journalKindMarkBuilt() || ut::journalRecordIsMi(kMiRing, true) == 0,
+          "without the KIND mark journalRecordIsMi answers 0 for every record");
+
+    // (b) the decision, every combination against the independent oracle
+    int combos = 0, agree = 0;
+    for (int held = 0; held <= 4; ++held) {
+        for (int mx = 0; mx <= 4; ++mx) {
+            for (int kind = -1; kind <= 1; ++kind) {
+                ++combos;
+                if (ut::utRecordCapDecide(held, mx, kind) == capOracle(held, mx, kind)) ++agree;
+            }
+        }
+    }
+    char line[256];
+    _snprintf_s(line, sizeof(line), _TRUNCATE, "all %d (held, max_per_record, kind) cases agree "
+                "with the rule as the brief states it (%d)", combos, agree);
+    check(agree == combos, line);
+    check(ut::utRecordCapDecide(1, 1, 1) == ut::kUtCapRefuseMiRoll,
+          "an MI at max_per_record=1 is refused with the ROLL reason, not the max one");
+    check(ut::utRecordCapDecide(1, 2, 1) == ut::kUtCapRefuseMiRoll &&
+              ut::utRecordCapDecide(3, 0, 1) == ut::kUtCapRefuseMiRoll,
+          "an MI is refused at max_per_record=2 and at 0 (unlimited) alike");
+    check(ut::utRecordCapDecide(0, 2, 1) == ut::kUtCapAccept,
+          "an empty MI box takes its first roll");
+    check(ut::utRecordCapDecide(1, 2, 0) == ut::kUtCapAccept &&
+              ut::utRecordCapDecide(2, 2, 0) == ut::kUtCapRefuseMax,
+          "a unique keeps max_per_record exactly as before");
+    check(ut::utRecordCapDecide(1, 2, -1) == ut::kUtCapRefuseKindUnknown &&
+              ut::utRecordCapDecide(1, 1, -1) == ut::kUtCapRefuseMax &&
+              ut::utRecordCapDecide(0, 2, -1) == ut::kUtCapAccept,
+          "an unknown kind refuses only a second copy max_per_record would have allowed");
+
+    // (c) the rolls
+    ut::UtReplicaCapture a, b;
+    fillMi(&a, kRollAPrefix, kRollASuffix, kRollASeed);
+    fillMi(&b, "records/items/lootaffixes/prefix/aa010a_damod_01.dbr",
+           "records/items/lootaffixes/suffix/b_ar044_ar_b.dbr", 1621750206u);
+    ut::UtRollKey ra, rb, ra2;
+    ut::utRollFromSlots(a.slotOff, a.slotText, a.slotCount, a.replica, a.replicaLen, &ra);
+    ut::utRollFromSlots(b.slotOff, b.slotText, b.slotCount, b.replica, b.replicaLen, &rb);
+    ut::UtReplicaCapture a2 = a;
+    for (char* p = a2.slotText[1]; *p; ++p) *p = (char)toupper(*p);
+    ut::utRollFromSlots(a2.slotOff, a2.slotText, a2.slotCount, a2.replica, a2.replicaLen, &ra2);
+    check(ra.known && !strcmp(ra.prefix, kRollAPrefix) && !strcmp(ra.suffix, kRollASuffix) &&
+              ra.seed == kRollASeed,
+          "a roll is {prefix +0x28, suffix +0x48, seed +0x68}");
+    check(!ut::utRollSame(ra, rb) && ut::utRollSame(ra, ra2),
+          "two rolls differ by any of the three; the record case does not matter");
+    ut::UtRollKey seedOnly = ra;
+    seedOnly.seed ^= 1;
+    check(!ut::utRollSame(ra, seedOnly), "the same affixes with another seed are another roll");
+    ut::UtReplicaCapture straddle = a;
+    straddle.slotOff[2] = 0x058;   // a string window over +0x68: not this layout
+    ut::UtRollKey rs;
+    check(!ut::utRollFromSlots(straddle.slotOff, straddle.slotText, straddle.slotCount,
+                               straddle.replica, straddle.replicaLen, &rs) && !rs.known &&
+              !ut::utRollSame(rs, rs),
+          "a blob whose string window covers +0x68 has no known roll (never 'the same')");
+    ut::utRollDescribe(ra, "Chthonian Devourer", 55, line, sizeof(line));
+    printf("      %s\n", line);
+    check(!strcmp(line, "\"Chthonian Devourer\" level 55: prefix b_ar007_ar_b, suffix "
+                        "a030b_off_dmg%fire_05_je, seed 2115467035"),
+          "the roll in words: name, level, prefix, suffix, seed");
+    ut::UtRollKey bare = ra;
+    bare.prefix[0] = 0;
+    bare.suffix[0] = 0;
+    ut::utRollDescribe(bare, "", 0, line, sizeof(line));
+    check(!strcmp(line, "no prefix, no suffix, seed 2115467035"), "an affix-less roll says so");
+
+    // (d) the table: roll A deposited, roll B refused with roll A named, roll A still there
+    check(depositLikeStore(a, kMiRing) && countOf(kMiRing) == 1, "roll A goes into an empty MI box");
+    const int verdict = ut::utRecordCapDecide((int)countOf(kMiRing), 2, 1);
+    check(verdict == ut::kUtCapRefuseMiRoll, "roll B of the same record is refused (max_per_record=2)");
+    char reason[256];
+    check(ut::journalRollText(kMiRing, reason, sizeof(reason)), "journalRollText reads the stored roll");
+    printf("      the refusal names: %s\n", reason);
+    check(strstr(reason, "b_ar007_ar_b") && strstr(reason, "a030b_off_dmg%fire_05_je") &&
+              strstr(reason, "seed 2115467035"),
+          "the refusal reason names roll A: its prefix, suffix and seed");
+    ut::UtRollKey stored;
+    check(ut::journalRollOf(kMiRing, &stored) && ut::utRollSame(stored, ra) && countOf(kMiRing) == 1,
+          "after the refusal the box still holds roll A, one copy");
+
+    // (e) THE BELT: journalDepositCommit itself refuses a second copy of a known MI - nothing
+    // changes in memory or on disk. Without it (the kind unknown to the belt) the second copy
+    // REPLACES roll A: the loss the cap exists for, shown on purpose.
+    std::string before, after;
+    slurp(ut::journalPath(), &before);
+    ut::journalTestSetKind(1);
+    bool rolledBack = true;
+    const bool belt = ut::journalDepositCommit(b, 2, &rolledBack);
+    slurp(ut::journalPath(), &after);
+    check(!belt && !rolledBack, "journalDepositCommit refuses count 2 of an MI before touching anything");
+    check(ut::journalRollOf(kMiRing, &stored) && ut::utRollSame(stored, ra) &&
+              countOf(kMiRing) == 1 && before == after,
+          "roll A, count 1 and the file are all exactly as they were");
+    check(ut::journalSetCount(kMiRing, 0) && ut::journalDepositCommit(b, 1, &rolledBack),
+          "after a take empties the box (count 0), its count-1 commit of roll B is allowed");
+    check(ut::journalRollOf(kMiRing, &stored) && ut::utRollSame(stored, rb) && countOf(kMiRing) == 1,
+          "and the box then holds roll B - roll A went back to the player with the take");
+    check(ut::journalSetCount(kMiRing, 0) && ut::journalDepositCommit(a, 1, &rolledBack),
+          "roll A back in the same way, for the last check");
+    ut::journalTestSetKind(0);
+    check(ut::journalDepositCommit(b, 2, &rolledBack) && countOf(kMiRing) == 2 &&
+              ut::journalRollOf(kMiRing, &stored) && ut::utRollSame(stored, rb),
+          "WITHOUT the cap: count 2 holding roll B only - roll A is gone (why the cap exists)");
+    ut::journalTestSetKind(-2);
+    ut::logFlush();
+    printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail, g_fail == 1 ? "" : "s");
+    return g_fail ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     // An ABSOLUTE path, the way tools\test_journal.cpp does it. A relative `L"test_store.log"`
     // would resolve against the PROCESS's current directory, which is whatever shell called the
@@ -1123,5 +1364,7 @@ int main(int argc, char** argv) {
     if (!strcmp(mode, "--live")) return passLive();
     if (!strcmp(mode, "--modes")) return passModes();
     if (!strcmp(mode, "--views")) return passViews();
+    if (!strcmp(mode, "--dbviews")) return passDbViews();
+    if (!strcmp(mode, "--mi")) return passMi();
     return passMain();
 }

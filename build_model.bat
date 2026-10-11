@@ -31,18 +31,15 @@ rem tools\pack_catalogue.py packs into the 480 KB data\oracle\catalogue.bin the 
 rem against. Only the packed file is tracked - the 4 MB of JSON is regenerated from the game's own database, so
 rem shipping it as well would be 4 MB of derived data nobody reads. Where it is absent there is
 rem nothing to repack and the binary is used exactly as it is.
+rem The json is only ever packed when it is NEWER than the committed bin (--if-newer): a leftover
+rem json from an older run - or a bin a checkout or merge has just replaced - must never be packed
+rem over the committed file. That once turned the 514,936-byte catalogue back into a 4,088-item one.
 if not exist "data\oracle\catalogue.json" goto :compile
-python tools\pack_catalogue.py --check > "build\model\pack_check.txt" 2>&1
+python tools\pack_catalogue.py --if-newer
 if errorlevel 1 (
-    echo       catalogue.bin is stale, repacking
-    python tools\pack_catalogue.py
-    if errorlevel 1 (
-        echo ERROR: pack_catalogue.py failed
-        popd
-        exit /b 1
-    )
-) else (
-    echo       catalogue.bin is up to date and byte-identical
+    echo ERROR: pack_catalogue.py failed
+    popd
+    exit /b 1
 )
 goto :compile
 

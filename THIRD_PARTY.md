@@ -145,7 +145,7 @@ player's `UI.arc`: its lattice erased, the new box frames alpha-stamped from one
 frame, the border and tab strip composited back on top. Under a stash-UI mod they are one flat
 colour with the collection's own frame lines, and nothing of that mod's art is copied.
 
-**The release package ships none of it.** It is `uniquetab.asi` and three documents; the files
+**The release package ships none of it.** It is `uniquetab.asi` and four documents; the files
 above exist only on the machine of a player who owns the game, written from that player's copy.
 
 **The development repository carries one copy of that derived data**, under `data\oracle\`, as

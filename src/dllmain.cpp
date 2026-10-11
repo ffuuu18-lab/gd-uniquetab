@@ -17,6 +17,7 @@
 #include "gd_runtime.h"
 #include "hooks.h"
 #include "ut_config.h"
+#include "ut_folders.h"
 #include "ut_generate.h"
 #include "ut_log.h"
 #include "ut_version.h"
@@ -26,6 +27,7 @@
 #include "ut_plate.h"
 #include "ut_reagent.h"
 #include "ut_rescue.h"
+#include "ut_startorder.h"
 #include "ut_tooltip.h"
 
 namespace {
@@ -170,6 +172,12 @@ DWORD WINAPI workerMain(LPVOID) {
     ut::configReload(kIniPath);
     ut::logI("settings file = \"%S\" (re-read once a second)", kIniPath);
     ut::logD("worker thread started");
+    // The custom games' folders: views\custom-<leaf>\ and views\basemods+custom-<leaf>\ (the layout
+    // older builds wrote) become mods\<leaf>\ and mods\<leaf>\basemods\,
+    // under the mod folder and under journal_dir. Once, here: after the settings (journal_dir) and
+    // before anything below can open a view or journal folder. A rename, never a merge
+    // (ut_folders.h).
+    ut::utFoldersMigrate(ut::utModDir(g_selfModule), ut::g_cfg.journalDir);
 
     if (!ut::waitForGameModules(60000)) {
         ut::logE("the mod is OFF: Engine.dll and Game.dll never loaded");
@@ -221,7 +229,8 @@ DWORD WINAPI workerMain(LPVOID) {
     // The stall check: frames-not-advancing. A "freeze" is usually not a deadlock at all - the
     // game has CRASHED and its own CrashReport.dll is waiting on the named event CRASHREPORT for
     // a dialog nobody can see behind the fullscreen window. That is one OpenEvent away from being
-    // said out loud in the log.
+    // said out loud in the log. Until a second frame is presented the verdict is "no frame
+    // yet" (src\ut_startorder.h): a slow first start is not a crash.
     unsigned long long lastFrames = ut::hookFrameCount();
     DWORD lastFrameMove = GetTickCount();
     bool stallReported = false;
@@ -241,6 +250,7 @@ DWORD WINAPI workerMain(LPVOID) {
             continue;
         }
         ut::configReload(kIniPath);
+        ut::panelTextFileTick();
         ut::reagentLateLoadTick(false);
         ut::logFlush();
 
@@ -267,8 +277,7 @@ DWORD WINAPI workerMain(LPVOID) {
                 char state[512];
                 ut::reagentIdentityState(state, sizeof(state));
                 ut::logW("stall: %lu s with no new frame - %s", (now - lastFrameMove) / 1000,
-                         (ev || crashDll) ? "the game has CRASHED, not deadlocked"
-                                          : "no crash reporter is up: a real stall or a long load");
+                         ut::utStallVerdictText(ut::utStallVerdict(ev != nullptr, crashDll, frames)));
                 ut::logD("stall: frames=%llu updates=%llu, CRASHREPORT event %s, "
                          "CrashReport.dll %s",
                          frames, ut::hookUpdateCount(), ev ? "EXISTS" : "absent",

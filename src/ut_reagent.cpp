@@ -46,6 +46,7 @@
 #include "ut_generate.h"
 #include "gen/arz_reader.h"  // the written frame record, read back for the position check
 #include "ut_live.h"
+#include "ut_panel.h"   // the view's catalogue: reload, "is this record in it"
 #include "ut_pagegate.h"  // substitute-or-vanilla, as pure logic
 #include "ut_plate.h"  // plateCaravanState() / plateOnWorldTeardown()
 #include "ut_rescue.h"
@@ -673,7 +674,7 @@ const char* readNetShape() {
     }
 }
 
-// The three-state query. Polled at most every 500 ms, exactly as the old boolean was; every
+// The three-state query. Polled at most every 500 ms; every
 // state change - and every change of mp_collect - prints one line.
 int mpSessionMode() {
     if (!InterlockedExchange(&g_mpPolicyLogged, 1)) {
@@ -728,7 +729,7 @@ int mpSessionMode() {
 // everything else asks mpBarred().
 bool multiplayerActive() { return mpSessionMode() == UT_MP_MULTI; }
 
-// THE multiplayer conjunct of the gate: the collection is barred only when the user asked for it
+// THE multiplayer conjunct of the gate: the collection is barred only when the player asked for it
 // to be (mp_collect=0) AND this is not provably single player.
 bool mpBarred() {
     const int m = mpSessionMode();  // always poll: the edge line is telemetry, not a gate
@@ -1323,7 +1324,7 @@ void probeItem(GdItem* item, unsigned int wantId, ItemProbe* out) {
 
 unsigned int cursorItemId(void* cursorHandler) {
     // CursorHandlerItemMove + 0x30 is the id of the item on the cursor
-    // (docs/RESEARCH-REAGENT.md a): PrimaryReagentActivate reads it there).
+    // (PrimaryReagentActivate reads it there).
     if (!cursorHandler) return 0;
     __try {
         return *(const unsigned int*)((const char*)cursorHandler + 0x30);
@@ -1615,7 +1616,7 @@ struct SlotDump {
     unsigned int off[16];
     char text[16][64];
     int n;
-    int faults;  // candidate offsets whose read faulted; the scan now continues past them
+    int faults;  // candidate offsets whose read faulted; the scan continues past them
 };
 
 // The SEH is PER CANDIDATE. `looksLikeString` dereferences a pointer it read out of the blob, so
@@ -2218,7 +2219,32 @@ bool collectionAccepts(GdItem* item, const std::string& key, const char* record,
         return false;
     }
 
-    if (g_cfg.maxPerRecord > 0 && held >= g_cfg.maxPerRecord) {
+    // ---- MONSTER INFREQUENTS: ONE ROLL PER RECORD (ut_miroll.h) ------------------------------
+    // The journal row keeps ONE identity per record and a second copy REPLACES it, so a second
+    // roll of an MI would cost the first. An MI record therefore holds one roll whatever
+    // max_per_record says, and the reason names the roll the box already holds. The kind is asked
+    // only when the box already holds something - a first copy never needs it.
+    const int miKind = held >= 1 ? journalRecordIsMi(key.c_str(), true) : 0;
+    const int capVerdict = utRecordCapDecide(held, g_cfg.maxPerRecord, miKind);
+    if (capVerdict == kUtCapRefuseMiRoll) {
+        char roll[256];
+        journalRollText(key.c_str(), roll, sizeof(roll));
+        _snprintf_s(reason, reasonCap, _TRUNCATE,
+                    "a monster infrequent keeps ONE roll per record and this box already holds "
+                    "it - %s. Take that one out first to store this roll (held=%d, "
+                    "max_per_record=%d does not apply to an MI)",
+                    roll, held, g_cfg.maxPerRecord);
+        return false;
+    }
+    if (capVerdict == kUtCapRefuseKindUnknown) {
+        _snprintf_s(reason, reasonCap, _TRUNCATE,
+                    "the box already holds %d and the catalogue cannot say whether this record is "
+                    "a monster infrequent (one roll per record) - a second copy is refused rather "
+                    "than risk the first roll (max_per_record=%d)",
+                    held, g_cfg.maxPerRecord);
+        return false;
+    }
+    if (capVerdict == kUtCapRefuseMax) {
         // The line names which authority holds what. `table=N map=M` with BOTH non-zero on a
         // record deposited exactly once means the same copy is being counted twice: a legacy row
         // must upgrade to count 0 while its copy is still MAP-OWNED, or it reads as 2.
@@ -2383,9 +2409,9 @@ bool callAddOriginal(GdGameEngine* self, unsigned int itemId) {
 // the ControllerPlayer (DepositReagents 0x3E0670 and RemoveItem 0x3DBA0C both read it there).
 //
 // THE ANSWER IS TRI-STATE AND THE MOD FAILS CLOSED: 1 = the id is in one of the bags RemoveItem
-// searches, so its F2 branch cannot be taken; 0 = it is in none of them; -1 = the question could
-// not be put (an export missing, the chain did not validate, a fault). Anything but 1 is a
-// REFUSAL on the quick-move paths - never a fall-through to the engine.
+// searches, so its item-not-found path cannot be taken; 0 = it is in none of them; -1 = the
+// question could not be put (an export missing, the chain did not validate, a fault). Anything but
+// 1 is a REFUSAL on the quick-move paths - never a fall-through to the engine.
 //
 // THE EXACT STRENGTH OF THE CLAIM. A 1 proves the removal cannot miss its SEARCH, and that is
 // what this proof is for. `RemoveItem` can still bail AFTER the match, and the bytes say exactly
@@ -3753,6 +3779,11 @@ void exitDisarmSeh() {
 void exitPlateSeh() {
     __try {
         plateOnWorldTeardown();
+        // The boxes live is holding belong to the HUD this teardown destroys - the same moment
+        // the plate forgets its window. Left in the list, a view change in the menu could have
+        // a relayout re-point them, and the fault that follows would turn live paging off for
+        // the rest of the session (ut_hudlife.h).
+        liveOnHudGone("GameEngine::ExitPlayingMode - the HUD is destroyed");
         liveOnWorldTeardown();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
@@ -4059,9 +4090,15 @@ void verifyOverride() {
             const unsigned int n = p_GetNumElementsForField(table, "reagentBoxes");
             if (i == 0) {
                 g_verifyBoxes = (int)n;
-                logD("reagent db: VERIFY vanilla %s has %u reagentBoxes (%s)", kMaterialRecord, n,
-                     n == 24 ? "UNTOUCHED - the user's Crafting Materials page is intact"
-                             : "UNEXPECTED - it should be 24");
+                // The view's own count (the F line's V lines): 24 on the game's page, 116 under
+                // Reign of Terror's own materials window.
+                const int want = liveVanillaBoxCount() > 0 ? liveVanillaBoxCount() : 24;
+                logD("reagent db: VERIFY vanilla %s has %u reagentBoxes (%s %d)", kMaterialRecord,
+                     n,
+                     (int)n == want ? "UNTOUCHED - the user's Crafting Materials page is intact; the "
+                                      "view says"
+                                    : "UNEXPECTED - the view says",
+                     want);
             } else {
                 g_verifyPageBoxes = (int)n;
                 logD("reagent db: VERIFY page %d %s (%s) has %u reagentBoxes", page,
@@ -4281,6 +4318,12 @@ void applyViewChange(GdEngine* engine, const char* why) {
     _snprintf_s(g_pageLabel, _TRUNCATE, "%s",
                 page >= 0 ? (*g_pages)[page].label.c_str() : "vanilla materials");
     liveReloadView(g_selfMod);   // the P line, the group grids and the plate names
+    // The catalogue is the view's as well: names, search, the label's counts. Reloaded under the
+    // model lock with the ownership recounted; the journal's display names follow it.
+    panelReloadCatalogue(g_selfMod);
+    char catPath[MAX_PATH] = {0};
+    if (utViewFile(g_selfMod, "catalogue.bin", catPath, sizeof(catPath)))
+        journalCatalogueReload(catPath);
     // The overlay in the database is the other view's: take it out of the guards and put this
     // view's in, in the same detour, before anything can ask for a page record.
     dbForgetLoad(why);
@@ -6392,20 +6435,37 @@ void runRescue() {
     // count >= 1, and the log line and the report line below print only when there IS something
     // to say.
     int tableRows = 0, tableCopies = 0;
-    {
-        static char recs[512][256];
-        static unsigned int counts[512];
-        const int n = journalCollectStored(recs, counts, 512);
-        for (int i = 0; i < n && i < 512; ++i) {
-            if (!recs[i][0] || !counts[i]) continue;
-            try {
-                std::string key(recs[i]);
-                toLower(&key);
-                held[key] += (int)(counts[i] > 64u ? 64u : counts[i]);
-                ++tableRows;
-                tableCopies += (int)counts[i];
-            } catch (...) {
+    // A row whose record the ACTIVE database has no record of is SKIPPED: the engine cannot build
+    // it here, and its count is never touched (journalRescuePlan). The game that has it hands it
+    // back. Every other row is walked - no cap on the number of rows.
+    std::vector<UtRescueRow> restoreRows, keptRows;
+    journalRescuePlan(&panelCatalogueHas, &restoreRows, &keptRows);
+    for (const UtRescueRow& r : restoreRows) {
+        if (r.record.empty() || !r.count) continue;
+        try {
+            std::string key(r.record);
+            toLower(&key);
+            held[key] += (int)(r.count > 64u ? 64u : r.count);
+            ++tableRows;
+            tableCopies += (int)r.count;
+        } catch (...) {
+        }
+    }
+    if (!keptRows.empty()) {
+        unsigned int keptCopies = 0;
+        for (const UtRescueRow& r : keptRows) keptCopies += r.count;
+        logI("rescue: %zu record(s) (%u cop%s) are not in this database - SKIPPED, their rows "
+             "untouched; rescue them in the game whose database has them",
+             keptRows.size(), keptCopies, keptCopies == 1 ? "y" : "ies");
+        try {
+            for (const UtRescueRow& r : keptRows) {
+                char line[512];
+                _snprintf_s(line, sizeof(line), _TRUNCATE,
+                            "%-60s  0  kept - not in this database (count %u, row untouched)\r\n",
+                            r.record.c_str(), r.count);
+                report += line;
             }
+        } catch (...) {
         }
     }
     if (tableRows > 0) {
@@ -6424,6 +6484,20 @@ void runRescue() {
         ++records;
         int gotBack = 0;
         char why[256] = {0};
+        // The ROLL this row holds, read before the hand-back (the row stays as history
+        // either way). An affixed item - a monster infrequent above all - is rebuilt from the
+        // journal with its prefix, suffix and seed exactly like any other identity
+        // (restoreOneFromTable -> reagentBuildIdentityProto -> utBuildSwapOverlay), and the
+        // report names the roll it handed back. A plain unique keeps its one line.
+        char roll[256] = {0};
+        bool namedRoll = false;
+        {
+            UtRollKey rk;
+            if (journalRollOf(it->first.c_str(), &rk) && rk.known &&
+                (rk.prefix[0] || rk.suffix[0] || journalRecordIsMi(it->first.c_str(), true) == 1)) {
+                namedRoll = journalRollText(it->first.c_str(), roll, sizeof(roll));
+            }
+        }
         for (int i = 0; i < it->second && i < 64; ++i) {
             const int r = restoreOne(it->first, why, sizeof(why));
             if (r == 1) {
@@ -6452,12 +6526,18 @@ void runRescue() {
         } else {
             InterlockedIncrement(&g_rescueFailed);
         }
-        logD("rescue: %s -> %d restored (%s)", it->first.c_str(), gotBack, why);
+        logD("rescue: %s -> %d restored (%s)%s%s", it->first.c_str(), gotBack, why,
+             namedRoll ? " - roll " : "", namedRoll ? roll : "");
         try {
             char line[512];
             _snprintf_s(line, sizeof(line), _TRUNCATE, "%-60s %2d  %s\r\n", it->first.c_str(),
                         gotBack, why);
             report += line;
+            if (namedRoll) {
+                _snprintf_s(line, sizeof(line), _TRUNCATE, "    roll %s: %s\r\n",
+                            gotBack > 0 ? "handed back" : "still stored", roll);
+                report += line;
+            }
         } catch (...) {
         }
         if (full) break;  // the engine says there is no room; stop rather than churn
@@ -6466,13 +6546,12 @@ void runRescue() {
     // the check is one read of it.
     int leftRecords = 0, leftItems = 0;
     {
-        static char recs2[512][256];
-        static unsigned int counts2[512];
-        const int n2 = journalCollectStored(recs2, counts2, 512);
-        for (int i = 0; i < n2 && i < 512; ++i) {
-            if (!recs2[i][0] || !counts2[i]) continue;
+        // The kept rows are left on purpose, so they are not "still stored" here.
+        std::vector<UtRescueRow> left, keptLeft;
+        journalRescuePlan(&panelCatalogueHas, &left, &keptLeft);
+        for (const UtRescueRow& r : left) {
             ++leftRecords;
-            leftItems += (int)counts2[i];
+            leftItems += (int)r.count;
         }
     }
     char tail[640];
@@ -6617,7 +6696,10 @@ void journalPruneTick(size_t markedFalse, size_t inconclusive) {
 // before anything is read or marked.
 void journalReconcile() {
     if (!g_cfg.journal) return;
-    const int cap = 4096;
+    // Every row, whatever the view's collection holds (a full ROT or DGD collection is 6-8 k).
+    size_t rowsNow = 0;
+    journalCounts(&rowsNow, nullptr, nullptr, nullptr);
+    const int cap = rowsNow + 64 > 4096 ? (int)(rowsNow + 64) : 4096;
     std::vector<char> scratch;
     try {
         scratch.resize((size_t)cap * 256);
@@ -6631,14 +6713,27 @@ void journalReconcile() {
     // A ROW THE TABLE OWNS IS THE ONLY KIND THERE IS. `stored` and `count >= 1` say the same
     // thing now: the mod's own file is the only place a copy of one of our records can be, so
     // the reconcile is one pass over the rows that writes the mark the count implies.
+    // An owned row no page of this view shows is kept and counted for the label: the catalogue
+    // lacks the record (another game's, an MI with collect_mi=0), or has it and no group takes it
+    // (a group's [exclude]) - liveGroupOfItem, once the group table is in.
+    int notInDb = 0;
+    const bool paged = liveGroupCount() > 0;
     for (int i = 0; i < n; ++i) {
         if (storeCount(records[i]) >= 1) {
             journalMarkStored(records[i], true);
             ++tableOwnedRows;
+            if (panelCatalogueHas(records[i]) == 0 || (paged && liveGroupOfItem(records[i]) < 0))
+                ++notInDb;   // kept; no box can show it
         } else {
             journalMarkStored(records[i], false);
             ++markedFalse;
         }
+    }
+    panelSetNotInDatabase(notInDb);
+    if (notInDb > 0) {
+        logD("rescue journal: %d owned record(s) are on no page of this view (not in its database, "
+             "or no group takes them) - kept, counted on the label as \"+N not on these pages\"",
+             notInDb);
     }
     size_t total = 0, stored = 0, notStored = 0, unknown = 0;
     journalCounts(&total, &stored, &notStored, &unknown);
@@ -6876,9 +6971,14 @@ bool reagentInit(HMODULE selfModule) {
          g_replicaOffset, g_replicaSize, g_seedRerollsOffset, g_affixRerollsOffset,
          g_prefixClassOffset, g_suffixClassOffset);
     logD("reagent collect: id->Object helper %s (decoded from TakeItemFromReagents(id,int)+0x2C); "
-         "policy: maxPerRecord=%d pristineOnly=%d quickPass=%d reconcile=%d",
+         "policy: maxPerRecord=%d pristineOnly=%d quickPass=%d",
          p_ObjectFromId ? "resolved" : "NOT resolved - falling back to the AddItem id map",
          g_cfg.maxPerRecord, g_cfg.collectPristineOnly, g_cfg.collectQuickPass);
+    logD("mi: the catalogue's KIND mark is %s - %s", journalKindMarkBuilt() ? "BUILT IN" : "absent",
+         journalKindMarkBuilt()
+             ? "a monster infrequent record holds ONE roll whatever max_per_record says, and a "
+               "second roll is refused with the stored one named"
+             : "this build has no catIsMi accessor, so no record is a monster infrequent here");
 
     // ---- the identity working set ------------------------------------------------------------
     g_stackMirrorInItem = decodeStackMirrorOffset((const void*)p_SetStackSize);
@@ -7997,6 +8097,17 @@ void reagentOnMainPlayer(GdGameEngine* engine) {
     // different object. The detour's own `this` is the source, and the other detours stay as the
     // fallback for anything that runs before the first Update with a main player.
     if (engine) g_gameEngine = engine;
+    // The world-start verdict's facts are taken BEFORE followSaveVariant: a journal switch there
+    // is a teardown (reagentOnWorldTeardown) that re-arms a per-world stop and clears the
+    // "this world's database cannot serve the page" flag, both of which this HUD build has
+    // already answered.
+    ut::UtTabFacts tab = {};
+    const char* tabWhy = nullptr;
+    const bool starting = InterlockedCompareExchange(&g_worldActive, 0, 0) == 0;
+    if (starting) {
+        liveTabFacts(&tab, &tabWhy);
+        tab.unservable = InterlockedCompareExchange(&g_frameUnavail, 0, 0) != 0;
+    }
     followSaveVariant();  // before anything else looks at the collection
     // A world exists from here on, so the registration LOG budget
     // switches from the small menu one to the full per-world one and starts from zero.
@@ -8005,6 +8116,14 @@ void reagentOnMainPlayer(GdGameEngine* engine) {
         logD("reagent gate: a world is live - the registration log budget is %d for this world "
              "(the main menu had %d)",
              kGateLogMax, kGateLogMenuMax);
+        // A dead page is never silent: one WARN per world when live paging is switched on but
+        // cannot be live here (without it a custom game such as DeathGrimDawn, and the main
+        // campaign after it, can show no tab and no line saying why).
+        if (starting) {
+            char line[640];
+            if (ut::utTabOffLine(line, sizeof(line), ut::utTabVerdict(tab), viewName(), tabWhy))
+                logW("%s", line);
+        }
     }
     static bool done = false;
     if (done) return;
@@ -8075,14 +8194,26 @@ bool reagentHandleMessage(unsigned int msg, WPARAM wParam, LPARAM lParam, LRESUL
     // to engine memory outside the game thread - the message thread only moves two integers and
     // the next GameEngine::Update applies the layout.
     if (liveActive()) {
+        // PageUp / PageDown act on the KEYDOWN only (an auto-repeat is one more KEYDOWN); the
+        // KEYUP never steps again - it is only swallowed, and only when its KEYDOWN was consumed
+        // here, so one Ctrl+PageDown is one button and one PageDown one window of rows, and a key
+        // the game saw go down also reaches it going up. Bit 0 = PageUp, bit 1 = PageDown: the
+        // last KEYDOWN of that key was consumed. The WindowProc's thread only.
+        static unsigned s_pageKeyEaten = 0;
         bool consumed = false;
         if (msg == WM_MOUSEWHEEL) {
             const int ticks = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
             consumed = liveHandleWheel(ticks, ctrl);
         } else if (msg == WM_KEYDOWN) {
             consumed = liveHandleKey((int)wParam, ctrl);
+            if (wParam == VK_PRIOR || wParam == VK_NEXT) {
+                const unsigned bit = wParam == VK_PRIOR ? 1u : 2u;
+                s_pageKeyEaten = consumed ? (s_pageKeyEaten | bit) : (s_pageKeyEaten & ~bit);
+            }
         } else if (msg == WM_KEYUP && (wParam == VK_PRIOR || wParam == VK_NEXT)) {
-            consumed = liveHandleKey((int)wParam, ctrl);
+            const unsigned bit = wParam == VK_PRIOR ? 1u : 2u;
+            consumed = (s_pageKeyEaten & bit) != 0;
+            s_pageKeyEaten &= ~bit;
         }
         if (consumed) {
             if (result) *result = 0;

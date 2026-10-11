@@ -30,6 +30,10 @@
 
 #include <windows.h>
 
+#include "ut_hudlife.h"
+#include "ut_layout.h"
+#include "ut_padpage.h"
+
 namespace ut {
 
 // Loads uniq-groups.txt from the mod folder and resolves the three signatures. Safe to call twice.
@@ -65,6 +69,18 @@ void liveCancelCapture();
 // session. Writes no engine memory.
 void liveOnWorldTeardown();
 
+// The HUD that built the captured boxes is gone: GameEngine::ExitPlayingMode (ut_reagent's
+// exitPlateSeh, next to plateOnWorldTeardown) and the view change (liveReloadView, the database
+// under the HUD is replaced). Empties the box list, closes a capture still open and marks the page
+// as showing nothing, so no relayout can reach a box of a destroyed window; the wanted group/row
+// are kept for the next HUD build. GAME THREAD. Writes no engine memory. A relayout that re-pointed
+// a dead box faults and takes the tab off for the session (the bug ut_hudlife.h describes).
+void liveOnHudGone(const char* why);
+
+// The live layer's half of the world-start verdict (ut_hudlife.h `utTabVerdict`); `unservable`
+// is ut_reagent's flag and is left false here. `why` = the live layer's own reason text.
+void liveTabFacts(UtTabFacts* f, const char** why);
+
 // Game-thread tick: applies a pending relayout and debounces the ini write.
 void liveTick(bool gameThread);
 
@@ -94,7 +110,10 @@ bool liveHandleKey(int vk, bool ctrl);
 // The collection group the page is CURRENTLY SHOWING (the last relayout that actually ran), or
 // -1 for the vanilla Crafting Materials layout / when live paging is not armed. This is what the
 // deposit gate reads. `label` is optional and gets the group's name (never null when the call
-// returns).
+// returns). ONE GRID PER BUTTON: a button of the buttons file holding several groups shows them
+// as one page - the union of their entries in group order, one row window, one label - keyed by
+// its FIRST group, which is what this returns (and what g_wantGroup / uniq_group hold); `label`
+// is then the union's ("Bows + Hunting Spears").
 int liveShownGroup(const char** label);
 
 // ---- UI scale -----------------------------------------------------------------------------------
@@ -114,12 +133,17 @@ void liveUiScaleRefresh();
 
 // The number of catalogue entries in a group, or -1.
 int liveGroupEntries(int group);
+// How many of a group's records are owned, as the last relayout's count saw them (the label's
+// {owned} for the shown group comes from the same walk); -1 = unknown (no mode yet, an old
+// uniq-groups.txt, no such group).
+int liveGroupOwned(int group);
 
 // The label of an arbitrary group (-1 = the vanilla Crafting Materials page). Never null.
 const char* liveGroupLabel(int group);
 
 // Absolute group selection - the Ctrl+wheel semantics with an explicit index.  -1 = the vanilla
-// layout, 0..23 = a collection group; anything else is refused and nothing changes.  Writes the
+// layout, 0..G-1 = a collection group (a group of a several-group button selects its button's
+// page, keyed by the button's first group); anything else is refused and nothing changes.  Writes the
 // same two ints Ctrl+wheel writes and calls markDirty(); NO engine call, so it is safe from
 // inside a detour body.  The next GAME-THREAD liveTick runs applyLayout exactly as it does for
 // Ctrl+wheel.  Deliberately does NOT call inputAllowed(): the caller (the mouse detour) has
@@ -154,8 +178,20 @@ bool liveToggleOwnedOnly();
 int liveGroupOfItem(const char* record);
 
 // ---- the group table ----------------------------------------------------------------------------
-// How many collection groups the loaded uniq-groups.txt has (0 before it loads, 24 today).
+// How many collection groups the loaded uniq-groups.txt has (0 before it loads).
 int liveGroupCount();
+
+// The group's id and 3-character tag from its G line (utg::parseGLine: a 9-field line carries
+// them, a 7-field one gets the built-in id and tag). Never null; "" / "?" out of range.
+const char* liveGroupId(int group);
+const char* liveGroupTag(int group);
+
+// Bumped after every group table that loaded completely (0 = none yet). The pad's caption table
+// is rebuilt when it moves.
+long liveGroupTableGen();
+
+// The view's vanilla box count (the F line's V count, 24 on the game's own page; 0 before load).
+int liveVanillaBoxCount();
 
 // Entry `index` of group `group`: its BOX record (the `uniq_b*` display record the mod's own
 // display prototype is built from - this is the key `liveCachedProtoId` wants) and its ITEM
@@ -179,7 +215,8 @@ const char* liveStatus();
 // leaves the epoch where it was, so the plate never claims it.
 long liveCaptureEpoch();
 
-// Everything the on-screen label needs, as one snapshot taken on the render thread. `label`
+// Everything the on-screen label needs, as one snapshot taken on the render thread (a
+// several-group button's page: the union's entries, owned count, rows, cell and grid). `label`
 // points at a string that lives for the process. Returns false when no collection group is on
 // screen (the vanilla layout, live paging off, or the boxes not captured yet) - the label must
 // then draw nothing at all.
@@ -197,8 +234,38 @@ struct LiveView {
     int collection;     // records in the whole collection
     int cellW, cellH;
     float scale;        // the measured UI scale
+    int cols, rows;     // the grid the page is laid out in (the user's grid_ when one is in force)
 };
 bool liveViewInfo(LiveView* out);
+
+// ---- the layout in force -------------------------------------------------------------------
+// The grid, the pad and the label as utLayoutResolve decides them for the view's caravan cover:
+// the derived rectangles (the P line, the default pad from pad_y/pad_h/pad_gap, the default
+// label) and the user's [layout] keys grid_/pad_/label_<W>x<H> for that cover, at the measured
+// UI scale.
+// Resolved again whenever the ini, the view, the scale or the group table changes; a refused user
+// rectangle is said once per change at WARN (utLayoutWhyText). `in.user[]` points into `user` of
+// the SAME struct (liveLayoutGet re-points it), so a copy is self-contained.
+struct LiveLayout {
+    int ok;                       // 1 = resolved at a valid UI scale; 0 = nothing to draw yet
+    long gen;                     // bumps on every change of the result
+    char cover[16];               // "438x627"
+    float scale;
+    UtLayoutInput in;
+    UtRect user[kUtLayParts];
+    UtLayout L;
+    int padmatSet;                // padmat_<cover> parses
+    UtRect padmat;
+    UtPadPages pages;             // the pad's buttons for the group table (ut_padpage.h)
+};
+// Any thread. False (and ok = 0) while no valid UI scale is known.
+bool liveLayoutGet(LiveLayout* out);
+
+// The screen the page is drawn on and the materials window's origin on it, published by the
+// Draw tail every frame it draws the page (ut_plate.cpp) while a screen key is set and the screen
+// site works. pad_screen / label_screen are placed against it; a change re-resolves the layout
+// (only while one of the two keys is set). Kept across worlds; (0,0,..) = not known.
+void liveSetScreenView(int screenW, int screenH, float originX, float originY);
 
 // The DISTINCT (cellW, cellH) pairs the loaded groups use, in FIRST-APPEARANCE order (the loop
 // keeps group order, it does not sort - for the shipped uniq-groups.txt that is 64x64, 64x96,

@@ -1,5 +1,5 @@
 // ut_config.h - every setting the mod has, in one plain text file (uniquetab.ini, in the mod
-// folder).
+// folder), plus one complete file of the same shape per custom game and a state file the mod owns.
 //
 // "key=value" per line, grouped into [sections] that exist for the reader only - a key is looked
 // up by NAME, so moving a line between sections changes nothing. The file is re-read once a
@@ -9,23 +9,121 @@
 //
 // ONE TABLE IS THE TRUTH. kUtCfgKeys below is the only list of keys there is: the parser walks
 // it, the file the mod writes is RENDERED from it (configRender), and the test suite derives what
-// it expects from it. Adding a setting means adding one row - the text and the parser cannot
-// drift apart any more, because there is only one of each.
+// it expects from it. Adding a setting means adding one row.
 //
-// GEOMETRY UNITS. The numbers in [advanced] that place something on the page (pad_y, pad_h,
-// pad_gap, plate_label_size) are RECORD px - the caravan window's own coordinates, which the mod
-// multiplies by the UI scale it measures at run time. They are clamped to their safe range when
-// they are read here AND clamped again where they are used.
+// THE SHAPE (ini_version 42). uniquetab.ini shows four keys ([general]: enabled, collect_mi,
+// tooltip_mark, log_level) and the [layout] lines the in-game editor writes. 40 added collect_mi
+// (the monster infrequents; default 1, a 39 file gains collect_mi=1, a 40 file keeps what it
+// says). 41 moved max_per_record and rescue into the [advanced] blob as hidden rows marked
+// "(untested)": a 40 file is rewritten in full, every value kept - one of the two at its default
+// becomes the blob's commented line, one set to anything else (max_per_record=2, rescue=1) stays
+// a LIVE line there. rescue still writes itself back to 0 when its run ends (configPersistInt),
+// which comments it again. 42 made a custom
+// game's own file a complete file of this same shape (PER CUSTOM GAME below); the main file only
+// gains the new number. Every other
+// key that is still parsed is a HIDDEN row (kUtCfgHidden): it is written as one commented line of
+// the [advanced] blob at the end of the file - ";key=default<tabs>; what it does" - and a hidden
+// key the user sets to a value other than its default is written LIVE in the same place (the ';'
+// gone, its description kept). The persist keeps that shape: a hidden key written back at its
+// default is commented again.
+//
+// GEOMETRY UNITS. plate_label_size and the [layout] rectangles are RECORD px - the caravan
+// window's own coordinates, which the mod multiplies by the UI scale it measures at run time. The
+// rectangles are window-local and are checked against the live page where they are used
+// (ut_layout.h).
+//
+// THE SCREEN KEYS. [layout] also holds pad_screen and label_screen = "<corner>,x,y,w,h"
+// (ut_layout.h UtScreenRect: tl|tr|bl|br, then x,y,w,h in record px from that screen corner): the
+// pad / the label pinned to a corner of the SCREEN instead of the page. ONE line each per
+// settings file, for every caravan cover: the main uniquetab.ini's for vanilla and basemods, a
+// custom game's own file's for that game (configPersistStr writes them to the active view's
+// file, like every other key). Written by the in-game editor; ABSENT until set (kUtCfgWhenSet: a
+// fresh file has no line, the self-check and the migration's counts leave them out). A value that does
+// not parse is refused with one WARN per edit and the key stays unset; the text is kept as typed
+// (trimmed) and parsed where it is used (ut_layout.h utLayoutFromSource).
+//
+// KEYED FAMILIES. Besides the fixed keys, a family is every key made of a fixed PREFIX and a free
+// SUFFIX - `grid_438x627` is the family `grid_` with the suffix `438x627`. kUtCfgFamilies lists
+// them: each names its [section], its prefix, the UtCfgFamilyStore inside UtConfig that holds its
+// lines, and two checks the family's owner supplies - one for the suffix (a line whose suffix
+// fails is a key this build does not have) and one for the value (a line whose value fails is
+// refused with one WARN per edit and not stored). A stored line survives a version bump. Lines are
+// kept in file order; a suffix given twice keeps the later value. Read one with configFamilyValue
+// ("grid_438x627"), write any key - fixed or family - with configPersistStr.
+//
+// PER CUSTOM GAME. A custom game's view (custom-<name> and basemods+custom-<name> share it, like
+// the journal) has its own mods\<name>\uniquetab.ini: a COMPLETE settings file rendered from the
+// same table as the main one (configRenderView: its own [general], [layout] with its own screen
+// keys and grid_ / pad_ / label_ lines, the [advanced] blob, its own ini_version), parsed the
+// same way. THE SEED: the first time the view is entered the file is written with the main
+// file's values then in force ([layout] lines and screen keys included; the one-shots rescue,
+// journal_prune and layout_edit start at 0). NOTHING IS INHERITED afterwards: while the view is
+// active that file is the whole configuration - the main file is not consulted, and a key the
+// game's file does not name is the compiled default (never the main file's value). The one
+// exception is journal_dir, read once at start-up from the main file before any custom game is
+// known (it is where the mods\<name>\ journal folders live): a game's file shows it as a
+// commented line saying so, and a live journal_dir line there is refused with one WARN. Every
+// key written back (the one-shots, the editor's SAVE) goes to the ACTIVE view's file
+// (configPersistStr decides), journal_dir always to the main one. Both files are polled once a
+// second: the game's is the one in force, the main file's stamp is still tracked so the vanilla
+// and basemods views have its edits on return. A game file deleted while the game runs is
+// written again from the seed. A game file from an older build (ini_version <= 41: the four
+// per-view keys under [game] and a [layout] whose `default` value hid a main line) is migrated
+// once: its lines kept (a `default` line drops the main line from the seed), every other value
+// copied from the main file, rewritten whole - one INFO line per game file. The old
+// [view:<name>] blocks of uniquetab.ini are migrated into these files on the 38 -> 39 bump; a
+// block met afterwards is ignored with one WARN and dropped by the next rewrite.
+//
+// THE STATE FILE. uniq_group, uniq_row and owned_only are not settings: the mod writes them to
+// uniquetab.state (beside uniquetab.ini for the start-up view, in the view's own folder
+// otherwise - mods\<name>\, and mods\<name>\basemods\ for basemods+custom-<name> -, so a group
+// index never crosses views) through configPersistInt / configPersistStr, which route those three
+// keys there. The 38 -> 39 bump's copies of the keys seed the main state file once (when it is
+// absent); in a 39 uniquetab.ini they are ignored with a WARN.
+//
+// DROPPED, MERGED, DERIVED (39). The feature switches, the timers, pad_y/pad_h/pad_gap,
+// tooltip_class_*, text_language and live_cache_max are no longer keys: a line naming one is
+// dropped by the bump (one INFO naming it) and is "a setting this build does not have" (WARN) in a
+// 39 file. log_flush_each_line and tooltip_text_yes/no are dropped the same way, with one WARN
+// naming their new home (log_level=trace; tooltip.yes/no under [tab] of uniquetab-buttons.ini) when the value
+// was not the old default.
 #pragma once
 
 #include <stddef.h>
+
+#include <string>
 
 // Bumped whenever the key set changes. A file written by an older build is MERGED, never reset:
 // every key that still exists keeps the user's value, new keys take their default, keys this
 // build no longer has are dropped with one log line naming them, and the file is rewritten in the
 // current layout. See configReload().
-#define UT_INI_VERSION 36
+#define UT_INI_VERSION 42
 
+// One family's lines, in file order. Plain bytes, zero-filled when unused, so UtConfig stays a
+// POD that the change test can memcmp.
+enum {
+    kUtCfgFamilySlots = 16,      // lines per family; one more is refused with a WARN
+    kUtCfgFamilySuffixCap = 48,  // the suffix, NUL included
+    kUtCfgFamilyValueCap = 64    // the value, NUL included
+};
+struct UtCfgFamilyEntry {
+    char suffix[kUtCfgFamilySuffixCap];
+    char value[kUtCfgFamilyValueCap];
+};
+struct UtCfgFamilyStore {
+    int count;
+    UtCfgFamilyEntry e[kUtCfgFamilySlots];
+};
+
+// A custom game's key (the part of a view name after "custom-") is 1..63 of [a-z0-9_.+-].
+enum { kUtCfgViewNameCap = 64 };
+
+// Since ini_version 39 a member whose key was DROPPED (the feature switches, the timers, pad_y/
+// pad_h/pad_gap, tooltip_class_*, text_language) keeps its default as a fixed value: nothing
+// parses it, the code reading it is untouched, and enabled=0 still collapses the switches.
+// live_cache_max is derived (its member is the floor); log_flush_each_line follows
+// log_level=trace; tooltip_text_yes/no moved to [tab] of uniquetab-buttons.ini (their members stay
+// empty).
 struct UtConfig {
     int iniVersion = 0;
 
@@ -65,7 +163,7 @@ struct UtConfig {
     int collectQuickPass = 1;     // 1 = shift-click on one of our records goes to the normal tab
     // The OWN filter's start state. 1 = show only the records the collection already holds; every
     // other box is parked off-grid, which also hides it from the game's own search. The OWN
-    // button toggles it and the mod writes the new value back into the file.
+    // button toggles it and the mod writes the new value back into the view's uniquetab.state.
     int ownedOnly = 0;
 
     // ---- [display] - what the mod draws, and its controls ------------------------------------
@@ -88,13 +186,39 @@ struct UtConfig {
     // in the collection. Items that are not collectible get no extra line at all. Off = the
     // vanilla tooltip, and so is any failure to hook.
     int tooltipMark = 1;
+    // 1 = the monster infrequents are collected too: every Rare item record of a slot (the game's
+    // MI symbol; the faction-store and the crafted rares included), one box per record, after the
+    // uniques of its slot's page. A generation input (the stamp): a flip regenerates every view
+    // once, at the next generation. Default 1. Turned off with MIs
+    // stored, those stay in the collection (the journal and the store keep them) but no page shows
+    // them - the label's "+N not on these pages" counts them - until the flag is 1 again.
+    int collectMi = 1;
     int plateLabel = 1;           // the group / owned / row-window line over the page
+    // 1 = outline the grid, the pad and the label rectangles in force, with their numbers and
+    // each group's cols x rows, so a [layout] key can be set by eye.
+    int layoutOutline = 0;
+
+    // ---- [layout] - where the grid, the pad and the label sit, per caravan cover size ----------
+    // The largest caption size on the buttons, screen px; the cell bounds it as well.
+    int padCaptionMax = 14;
+    // grid_<W>x<H>, pad_<W>x<H>, label_<W>x<H>, padmat_<W>x<H> = x,y,w,h: the user's rectangles
+    // for the caravan cover of that size (vanilla: 438x627). padmat_ is the pad on the game's own
+    // materials page when the pad in force would cover real material boxes there.
+    UtCfgFamilyStore layGrid = {};
+    UtCfgFamilyStore layPad = {};
+    UtCfgFamilyStore layLabel = {};
+    UtCfgFamilyStore layPadMat = {};
+    // pad_screen / label_screen = "<corner>,x,y,w,h": the pad / the label pinned to a SCREEN
+    // corner, one value for every view and cover; empty = not set (the page's own place).
+    char padScreen[64] = {0};     // the canonical value is at most 26 characters; the rest is
+    char labelScreen[64] = {0};   // room for blanks typed by hand (never cut into another value)
 
     // ---- [files] -----------------------------------------------------------------------------
     // Where the JOURNAL file lives. Empty = the mod folder (the folder beside the .asi). Only the
     // journal and its exports move - the log, this file and the rescue report always stay in the
     // mod folder, because this file LIVES there and its path is resolved before a key has been
-    // read. READ ONCE, at start-up, and never re-read.
+    // read. READ ONCE, at start-up, and never re-read. The main uniquetab.ini's only: g_cfg keeps
+    // the main file's value while a custom game is active.
     char journalDir[260] = {0};
     // A GD Stash import file beside the journal, rewritten on every journal write.
     // 0 = off (an existing file is left alone), 1 = the collection plus anything not yet checked
@@ -112,6 +236,9 @@ struct UtConfig {
     // "stored":false (never an unmarked one), after copying the whole file aside and logging
     // every record it drops. The only setting in the mod that deliberately removes entries.
     int journalPrune = 0;
+    // 1 (with the caravan open on a collection group) = open the in-game layout editor; set back
+    // to 0 when it opens. Ctrl+right-click on the button pad opens it as well.
+    int layoutEdit = 0;
 
     // ---- [advanced] - tuning. Every one of these is clamped to the range in its ini line ------
     int liveCacheMax = 4096;      // display prototypes kept per HUD; past it boxes re-Load
@@ -158,11 +285,12 @@ struct UtConfig {
     int tooltipClassYes = 0x2C;
     int tooltipClassNo = 0x4A;
     // 0 = buffer log lines and flush once a second from the worker. 1 = write each line at once,
-    // for debugging a crash where the very last lines matter.
+    // for debugging a crash where the very last lines matter. No key: it is 1 exactly while
+    // log_level=trace.
     int logFlushEachLine = 0;
-    // WRITTEN BY THE MOD, not by the user: the view the tab was last left in. They live here
-    // rather than in a file of their own because a setting the user can see and reset by hand is
-    // worth more than a tidier split, and a version bump now KEEPS them like any other key.
+    // WRITTEN BY THE MOD, not by the user: where the tab was last left in the ACTIVE view. They
+    // come from that view's uniquetab.state (see the top of this file), never from a settings
+    // file, and configPersistInt writes them there.
     int uniqGroup = -1;           // -1 = the vanilla Crafting Materials layout, else the group
     int uniqRow = 0;              // the first visible row inside that group (virtual scroll)
 
@@ -191,6 +319,9 @@ enum UtCfgType {
     kUtCfgStr         // text, at most `cap` - 1 bytes
 };
 
+// Null when `value` (trimmed, comment cut) is legal; else a few words saying what it should be.
+typedef const char* (*UtCfgValueCheck)(const char* value);
+
 struct UtCfgKey {
     const char* section;   // the [block] it is written under; the parser ignores blocks
     const char* name;      // the key as it appears in the file
@@ -202,6 +333,16 @@ struct UtCfgKey {
     size_t cap;            // sizeof(member) for kUtCfgStr
     const char* const* choices;  // null-terminated list of legal texts, or null
     const char* comment;   // ONE line, in plain words, written after the value
+    int flags;             // kUtCfgHidden | kUtCfgWhenSet
+    // kUtCfgStr only, optional: a non-empty value it refuses is ignored with one WARN (the
+    // default kept), like a word that is not one of `choices`.
+    UtCfgValueCheck check;
+};
+
+enum {
+    kUtCfgHidden = 1,      // a row of the commented [advanced] blob (live only when not default)
+    kUtCfgWhenSet = 4      // a visible line written only while it holds a value (the editor's
+                           // pad_screen / label_screen); never counted as a missing setting
 };
 
 struct UtCfgSection {
@@ -213,6 +354,82 @@ extern const UtCfgKey kUtCfgKeys[];
 extern const int kUtCfgKeyCount;
 extern const UtCfgSection kUtCfgSections[];
 extern const int kUtCfgSectionCount;
+
+// ---- KEYED FAMILIES (see the top of this file) ----------------------------------------------
+// True when `suffix` names a member of the family (else the line is an unknown key).
+typedef bool (*UtCfgSuffixCheck)(const char* suffix);
+
+struct UtCfgFamily {
+    const char* section;        // the [block] its lines are written under
+    const char* prefix;         // "grid_"
+    size_t off;                 // offsetof(UtConfig, <its UtCfgFamilyStore>)
+    UtCfgSuffixCheck suffixOk;
+    UtCfgValueCheck valueOk;
+    const char* example;        // suffix=value, written commented out: "438x627=105,76,333,552"
+    const char* comment;        // ONE line, written above the example
+};
+
+extern const UtCfgFamily kUtCfgFamilies[];
+extern const int kUtCfgFamilyCount;
+
+// The family of `table` that `key` belongs to (its suffix passing that family's own check), or
+// null. `suffix` (optional) receives a pointer into `key`. A family table and its stores can live
+// in any struct and any file: `off` is relative to whatever base the caller pairs it with.
+const UtCfgFamily* configFamilyIn(const UtCfgFamily* table, int count, const char* key,
+                                  const char** suffix);
+// The same over this file's own kUtCfgFamilies.
+const UtCfgFamily* configFamilyOf(const char* key, const char** suffix);
+// The store a family describes inside `base` (a UtConfig for kUtCfgFamilies).
+inline UtCfgFamilyStore* configFamilyStore(const UtCfgFamily& f, void* base) {
+    return (UtCfgFamilyStore*)((char*)base + f.off);
+}
+// The value stored for `suffix`, or null.
+const char* configFamilyGet(const UtCfgFamilyStore& s, const char* suffix);
+// Stores (or replaces) one line. False when the store is full or either text is too long.
+bool configFamilySet(UtCfgFamilyStore* s, const char* suffix, const char* value);
+// The value of a whole family key in `c` - configFamilyValue(g_cfg, "grid_438x627") - or null.
+const char* configFamilyValue(const UtConfig& c, const char* key);
+
+// ---- PER CUSTOM GAME AND THE STATE FILE (see the top of this file) ---------------------------
+// True for journal_dir, the one key a custom game's own file does not hold (every other row and
+// every family line is a key of both files).
+bool configMainOnlyKey(const char* key);
+// The custom game's key of a view name: "reignofterror" for custom-reignofterror and for
+// basemods+custom-reignofterror; "" for vanilla, basemods or anything that is not a legal key.
+std::string configCustomKey(const char* viewName);
+// The files of the view `viewName` beside the main settings file `mainIni` (pure path
+// arithmetic, ut_folders.h): `ini` = <dir>\mods\<key>\uniquetab.ini, shared by custom-<key> and
+// basemods+custom-<key> (empty for a view that is not a custom game's); `state` = the view
+// folder's uniquetab.state - <dir>\uniquetab.state for the start-up view (vanilla, basemods or
+// ""), <dir>\mods\<key>\uniquetab.state for custom-<key> and
+// <dir>\mods\<key>\basemods\uniquetab.state for basemods+custom-<key>.
+void configViewFiles(const wchar_t* mainIni, const char* viewName, std::wstring* ini,
+                     std::wstring* state);
+// The active view changed (ut_generate, before the view's generation reads a setting). A custom
+// game's own file is written when absent (the seed: the main file's values in force), migrated
+// when an older build wrote it, and read; the view's state file is read; g_cfg becomes the game's
+// file (journal_dir from the main one) or, for vanilla/basemods, the main file - with the state
+// applied - and the logger's level follows it. One INFO line when the game's own file is created
+// or starts or stops applying; configGeneration() bumps when the result differs. Any thread; file
+// I/O under the settings lock.
+void configSetView(const char* viewName);
+// The view g_cfg was derived for ("" until the first configSetView).
+void configActiveView(char* out, size_t cap);
+// The value the int row `key` WILL have in the view `viewName`, without making it active (the
+// custom-game probe runs before its configSetView): the main file's for vanilla/basemods; for a
+// custom game its own file's line, the compiled default when a current file does not name it,
+// or the main file's value when the game has no file yet or one from an older build (the seed /
+// the migration). Clamped to the row's range; 0 for a key that is not an int row.
+int configViewIntFor(const char* viewName, const char* key);
+// Renders a custom game's own file for `key`: the main file's template (configRender) with every
+// value from `src`, a header naming the game, and journal_dir as a commented line saying it is
+// set in the main file only. Returns the bytes written (the NUL is not counted), or 0 if it did
+// not fit.
+size_t configRenderView(char* out, size_t cap, const char* key, const UtConfig& src);
+// Renders a state file holding the three state values of `src`. Same return rule.
+size_t configRenderState(char* out, size_t cap, const UtConfig& src);
+// True for uniq_group, uniq_row and owned_only.
+bool configIsStateKey(const char* key);
 
 // Renders the whole file - header, sections, one line per key - taking every value from `src`.
 // Returns the bytes written (the NUL is not counted), or 0 if it did not fit in `cap`.
@@ -226,9 +443,35 @@ size_t configTemplateBytes();
 // unknown keys - and rewritten. Returns true if the file was parsed.
 bool configReload(const wchar_t* path);
 
-// Rewrites ONE integer key in the file, keeping every other line untouched. Atomic: a temp file
-// next to it is written in full and then moved over the original, so a reader never sees a
-// half-written file. Used by the tab's view keys and by the one-shot commands.
+// Rewrites ONE integer key in the active view's settings file (configPersistStr's rule), keeping
+// every other line untouched. Atomic: a temp file next to it is written in full and then moved
+// over the original, so a reader never sees a half-written file. Used by the one-shot commands
+// (rescue=0 goes back to the file that said rescue=1); uniq_group, uniq_row and owned_only go to the
+// ACTIVE view's state file instead (created when absent), and g_cfg takes the value at once.
 bool configPersistInt(const char* key, int value);
+
+// Rewrites up to 8 keys in ONE atomic rewrite, fixed or family keys alike. values[i] is the text
+// written after the '='; a NULL value REMOVES that key's line. Every other line stays byte for
+// byte. A key the file does not have yet is inserted at the end of its own [section] (the last
+// line of the file when the section is not there). The value is written as given: the next
+// reload checks it like a line typed by hand. THE FILE: the active view's - while a custom game's
+// view is active every key goes to that game's own file (written again from the seed first when
+// it was deleted), else to uniquetab.ini; journal_dir always to uniquetab.ini. In both a hidden
+// key keeps its row in the [advanced] blob.
+bool configPersistStr(const char* const* keys, const char* const* values, int n);
+
+// The [section] a key belongs under, or null (then a new key is appended at the end of the file).
+typedef const char* (*UtCfgSectionOf)(const char* key);
+
+// configPersistStr's engine for ANOTHER key=value file (a strings or groups file that keeps its
+// own keys and families): the same atomic rewrite, the same NULL-deletes rule, with the file's own
+// section rule. The settings file's own reload is only forced when `path` is that file.
+bool configPersistFile(const wchar_t* path, const char* const* keys, const char* const* values, int n,
+                       UtCfgSectionOf sectionOf);
+
+// Bumped every time a reload changes g_cfg. A reader that caches something derived from g_cfg
+// compares this instead of the struct; g_cfg is replaced by a struct copy on the worker thread,
+// so a cache built from a torn read is rebuilt on the next call.
+long configGeneration();
 
 }  // namespace ut

@@ -24,6 +24,14 @@
 //                                                data\oracle\plates on the vanilla view, a flat ground
 //                                                on the two modded ones. The third argument is
 //                                                uniquetab.ini's plate_ground.
+//   test_catalogue.exe --layout-plates <data dir> <out dir>
+//                                                a user grid's own plate set (ensureLayoutPlates):
+//                                                painted, found again, superseded and removed,
+//                                                the derived plates / overlay / stamp untouched,
+//                                                the generation lock; prints the plates-only time
+//                                                and heap on vanilla, Baul and X-Mod
+//   test_catalogue.exe --layout-compare <cpp dir> <py dir> <names file>
+//                                                those plates against make_plates.py --grid
 //   test_catalogue.exe --ensure <data dir> <mod dir>
 //                                                the DLL's start-up path (gen::ensureOutputs)
 //                                                against a scratch mod folder: a fresh install
@@ -43,6 +51,11 @@
 #include "gen/pages_gen.h"
 #include "gen/plate_gen.h"
 #include "gen/ui_geometry.h"
+#include "gen/ut_groups.h"
+#include "gen/ut_groups_default.h"
+#include "model/catalogue.h"
+#include "ut_layout.h"
+#include "ut_padmat.h"
 
 #include <algorithm>
 #include <chrono>
@@ -51,6 +64,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -191,6 +205,22 @@ int compareBytes(const char* what, const std::vector<std::uint8_t>& got,
     return 1;
 }
 
+// THE SHIPPED DEFAULT (uniquetab.ini collect_mi=1): the monster infrequents admitted and the
+// view answering to [view:collect_mi] - what the DLL generates on a fresh install. data\oracle\ is
+// this cut; data\oracle\nomi\ is the flag-off one (pass 5 pins it).
+// Its vanilla view has SIX cell sizes, so six plates: the MI spears are 64 wide, so Spears takes
+// 64x128 and the flag-off view's 32x128 plate (data\oracle\nomi\plates) is not painted.
+constexpr int kVanillaPlates = 6;
+const gen::GroupsInput* shippedGroups(std::string* err) {
+    static gen::GroupsInput in;
+    if (!in.set) {
+        in.set = gen::defaultGroupSet(err);
+        in.viewKeys = utg::viewKeysFor("vanilla");
+        in.viewKeys.push_back("collect_mi");
+    }
+    return in.set ? &in : nullptr;
+}
+
 int catalogue(const std::string& oracle, const std::string& outPath) {
     std::string game = gameDir();
     if (game.empty()) return fail("UNIQUETAB_TEST_GAME_DIR is not set");
@@ -200,7 +230,7 @@ int catalogue(const std::string& oracle, const std::string& outPath) {
     if (!g.load(game, "EN", &err)) return fail(err.c_str());
     std::vector<gen::CatalogueItem> items;
     std::vector<std::string> warnings;
-    if (!gen::collectItems(g, items, warnings, &err)) return fail(err.c_str());
+    if (!gen::collectItems(g, items, warnings, &err, true)) return fail(err.c_str());
     std::vector<std::uint8_t> bin;
     gen::CatalogueStats st;
     if (!gen::packCatalogue(items, bin, &st, &err)) return fail(err.c_str());
@@ -222,6 +252,93 @@ int catalogue(const std::string& oracle, const std::string& outPath) {
     return compareBytes("catalogue.bin", bin, want);
 }
 
+// ---- the groups as data on the real database (src\gen\ut_groups.h) ---------------------------
+// The default rule set given explicitly, and in a custom view, must write what the implicit one
+// wrote. Then a rule file that excludes every relic, with a journal owning two of them and a
+// blueprint: the relics are on no page (their journal rows stay; there is no Retired group), the
+// blueprint stays on the Blueprints page (its group takes it), and the 23 slot groups before
+// them are untouched.
+// With an output folder the rule file and the three files are written there, so
+// tools\build_uniq_db.py --groups can be run on the same inputs and diffed.
+int groupsAsData(const gen::GameData& g, const std::vector<gen::CatalogueItem>& items,
+                 const gen::PagesOutput& base, const std::string& outDir) {
+    int rc = 0;
+    auto ok = [&](bool c, const char* what) {
+        std::printf("[test] %s: %s\n", c ? "ok  " : "FAIL", what);
+        if (!c) rc = 1;
+    };
+    std::string err;
+    const utg::GroupSet* def = gen::defaultGroupSet(&err);
+    ok(def != nullptr, "the built-in groups template parses");
+    if (!def) return 1;
+    for (const char* view : {"vanilla", "custom-reignofterror", "basemods+custom-deathgrimdawn"}) {
+        gen::GroupsInput in;
+        in.set = def;
+        in.viewKeys = utg::viewKeysFor(view);
+        in.viewKeys.push_back("collect_mi");   // the shipped default, as `base` was made
+        gen::PagesOutput po;
+        bool made = gen::generatePages(g, items, po, &err, nullptr, &in);
+        std::string what = std::string("the built-in groups in the ") + view
+                         + " view write the same three files on the base database";
+        ok(made && po.groups == base.groups && po.records == base.records && po.pages == base.pages,
+           what.c_str());
+    }
+    std::string relic1, relic2, blueprint;
+    for (const gen::CatalogueItem& it : items) {
+        if (it.isRelic && relic1.empty()) relic1 = it.record;
+        else if (it.isRelic && relic2.empty()) relic2 = it.record;
+        else if (it.cls == "ItemArtifactFormula" && blueprint.empty()) blueprint = it.record;
+    }
+    const std::string journal =
+        "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":4}\n"
+        "{\"record\":\"" + utg::normPath(relic1) + "\",\"count\":1}\n"
+        "{\"record\":\"" + utg::normPath(relic2) + "\",\"count\":2}\n"
+        "{\"record\":\"" + utg::normPath(blueprint) + "\",\"count\":1}\n"
+        "{\"record\":\"records/items/no/such_record.dbr\",\"count\":1}\n";
+    utg::JournalCounts jc;
+    ok(utg::scanJournalText(journal, jc, &err) && jc.counts.size() == 4, "the journal fixture scans");
+    std::unordered_set<std::string> owned;
+    utg::ownedFrom({jc}, owned);
+    ok(owned.size() == 4, "the journal owns the two relics, the blueprint and a record no database has");
+    utg::GroupSet noRelics;
+    const std::string rulesText = std::string("[exclude]\nclass = ItemArtifact\n") + utg::defaultGroupsIni();
+    ok(utg::parseGroups(rulesText, noRelics, &err), "a rule file excluding every relic parses");
+    gen::GroupsInput in;
+    in.set = &noRelics;
+    in.viewKeys = utg::viewKeysFor("vanilla");
+    in.viewKeys.push_back("collect_mi");
+    gen::PagesOutput po;
+    ok(gen::generatePages(g, items, po, &err, nullptr, &in), "the pages generate with it");
+    ok(po.groupList.size() == 24 && po.groupList[23].id == "blueprint" && po.groupList[23].tag == "BLU",
+       "23 slot groups and the Blueprints - no Retired group");
+    bool noRelicGroup = true;
+    for (const auto& gr : po.groupList) noRelicGroup = noRelicGroup && gr.id != "relic" && gr.id != "retired";
+    ok(noRelicGroup, "the Relics group is gone");
+    ok(!relic1.empty() && !relic2.empty() && po.records.find(relic1 + "\r\n") == std::string::npos &&
+           po.records.find(relic2 + "\r\n") == std::string::npos,
+       "the owned relics are on no page (the journal keeps their rows)");
+    ok(!blueprint.empty() && po.records.find(blueprint) != std::string::npos,
+       "the owned blueprint is on the Blueprints page"); 
+    // the 23 slot groups' lines are the default's, record for record
+    auto beforeGroup = [](const std::string& text, const char* label) {
+        std::size_t at = text.find(std::string("\r\nG\t23\t") + label);
+        return at == std::string::npos ? text : text.substr(0, at);
+    };
+    ok(beforeGroup(po.groups, "Blueprints") == beforeGroup(base.groups, "Relics"),
+       "every line before the Blueprints is the default's (the slot groups)");
+    if (!outDir.empty()) {
+        const std::pair<const char*, const std::string*> files[] = {
+            {"groups-norelics.ini", &rulesText},
+            {"norelics-uniq-groups.txt", &po.groups}, {"norelics-uniq-records.txt", &po.records},
+            {"norelics-uniq-pages.txt", &po.pages}};
+        for (const auto& f : files) {
+            FILE* fh = std::fopen((outDir + "\\" + f.first).c_str(), "wb");
+            if (fh) { std::fwrite(f.second->data(), 1, f.second->size(), fh); std::fclose(fh); }
+        }
+    }
+    return rc;
+}
+
 int pages(const std::string& dataDir, const std::string& outDir) {
     std::string game = gameDir();
     if (game.empty()) return fail("UNIQUETAB_TEST_GAME_DIR is not set");
@@ -231,9 +348,11 @@ int pages(const std::string& dataDir, const std::string& outDir) {
     if (!g.load(game, "EN", &err)) return fail(err.c_str());
     std::vector<gen::CatalogueItem> items;
     std::vector<std::string> warnings;
-    if (!gen::collectItems(g, items, warnings, &err)) return fail(err.c_str());
+    if (!gen::collectItems(g, items, warnings, &err, true)) return fail(err.c_str());
+    const gen::GroupsInput* shipped = shippedGroups(&err);
+    if (!shipped) return fail(err.c_str());
     gen::PagesOutput po;
-    if (!gen::generatePages(g, items, po, &err)) return fail(err.c_str());
+    if (!gen::generatePages(g, items, po, &err, nullptr, shipped)) return fail(err.c_str());
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     std::printf("[test] pages: %zu records on %zu pages in %zu groups (%zu skipped), generated in %lld ms\n",
@@ -266,6 +385,7 @@ int pages(const std::string& dataDir, const std::string& outDir) {
         if (!readAll(dataDir + "\\oracle\\" + names[i], want)) return fail("cannot read the oracle txt");
         if (compareBytes(names[i], got, want)) rc = 1;
     }
+    if (groupsAsData(g, items, po, outDir)) rc = 1;
     return rc;
 }
 
@@ -332,9 +452,11 @@ int overlayGate(const std::string& dataDir, const std::string& outDir) {
     if (!g.load(game, "EN", &err)) return fail(err.c_str());
     std::vector<gen::CatalogueItem> items;
     std::vector<std::string> warnings;
-    if (!gen::collectItems(g, items, warnings, &err)) return fail(err.c_str());
+    if (!gen::collectItems(g, items, warnings, &err, true)) return fail(err.c_str());
+    const gen::GroupsInput* shipped = shippedGroups(&err);
+    if (!shipped) return fail(err.c_str());
     gen::PagesOutput po;
-    if (!gen::generatePages(g, items, po, &err)) return fail(err.c_str());
+    if (!gen::generatePages(g, items, po, &err, nullptr, shipped)) return fail(err.c_str());
     const std::string got = (outDir.empty() ? dataDir : outDir) + "\\uniq-pages-gen.arz";
     { FILE* f = std::fopen(got.c_str(), "wb");
       if (!f) return fail("cannot write the generated overlay");
@@ -358,7 +480,7 @@ int overlayGate(const std::string& dataDir, const std::string& outDir) {
 }
 
 // ---- the derived geometry -------------------------------------------------------------------
-// The three views research\\stashmods measured, reproduced by the C++ derivation. The vanilla
+// The three views measured in the stash-UI mods, reproduced by the C++ derivation. The vanilla
 // row is the one that matters most: it must equal what the shipped layout was built with, or
 // the grid has moved under everyone. The two modded rows are read out of the unpacked archives
 // named by UNIQUETAB_TEST_MODS_DIR and skipped when it is unset, so this passes on a machine
@@ -371,16 +493,19 @@ struct GeoCase {
     int frameX, frameY, frameBoxes;  // what the overlay writer puts in the frame for this view
 };
 
-// The frame numbers: vanilla fits 10 x 16 32 px boxes and hits the cap, Baul's narrower band
-// fits 9 x 16 = 144, and X-Mod's 967 px band is 30 columns wide, so the cap walks the rows
-// back to 5. Only Baul MOVES the page - which is the whole reason the overlay is generated.
+// The frame numbers: the frame carries the view's own count (ut_layout.h utFrameBoxes: the whole
+// cover's fit at the view's cell sizes, 160..512), whatever the band fits today, so a live layout
+// change anywhere on the cover never needs a new overlay: vanilla 438x627 = 13 x 18 = 234 (the band
+// fits 10 x 16 = 160), Baul 346x625 = 10 x 18 = 180 (band 9 x 16 = 144), X-Mod 975x968 = 30 x 28
+// = 840 -> the 512 ceiling (band 30 x 25 wanted, 30 x 17 shown). Only Baul MOVES the page - which
+// is the whole reason the overlay is generated.
 const GeoCase kGeoCases[] = {
     {"vanilla", nullptr, 105, 76, 333, 552, 438, 627,
-     "ui/caravan/caravan_transfercomponent1_bg.tex", 0, 88, 160},
+     "ui/caravan/caravan_transfercomponent1_bg.tex", 0, 88, 234},
     {"X-Mod 3.04 (= Falendar)", "xmod\\X-Mod", 8, 76, 967, 866, 975, 968,
-     "x-mod/caravan_transfercomponent1_bg.tex", 0, 88, 150},
+     "x-mod/caravan_transfercomponent1_bg.tex", 0, 88, 512},
     {"Loot Ascension (Baul)", "lootascension\\LootAscension", 128, 76, 310, 550, 346, 625,
-     "baul/caravan_transfercomponent1_bg_n.tex", 513, 70, 144},
+     "baul/caravan_transfercomponent1_bg_n.tex", 513, 70, 180},
 };
 
 int geometry() {
@@ -414,6 +539,27 @@ int geometry() {
             std::printf("[test] FAIL: geometry %s: %s\n", c.label, err.c_str());
             rc = 1;
             continue;
+        }
+        // THE PAD ON THE MATERIALS PAGE (src\ut_padmat.h): a view whose materials boxes all
+        // start below the pad band keeps the pad clear of them; on a page with a box under the
+        // band the whole pad is drawn over it and takes the clicks there.
+        {
+            std::vector<std::pair<int, int> > bp;
+            std::string berr;
+            const bool read = gen::materialBoxPositions(g, mods, bp, &berr);
+            int under = 0, minY = 1 << 30;
+            for (const std::pair<int, int>& p : bp) {
+                if (!ut::utBoxClearOfBand(p.second)) ++under;
+                if (p.second < minY) minY = p.second;
+            }
+            std::printf("[test] pad band %-24s %zu materials box record(s), top row y %d, %d under "
+                        "the band (y %d..%d)\n", c.label, bp.size(), bp.empty() ? -1 : minY, under,
+                        ut::kUtPadBandY0, ut::kUtPadBandY1);
+            if (!read || bp.empty() || under != 0) {
+                std::printf("[test] FAIL: the %s materials page has a box under the pad band "
+                            "(or none could be read: %s)\n", c.label, berr.c_str());
+                rc = 1;
+            }
         }
         const bool same = geo.x0 == c.x0 && geo.y0 == c.y0 && geo.usableW == c.usableW
                        && geo.usableH == c.usableH && geo.plateW == c.plateW
@@ -454,7 +600,7 @@ int geometry() {
 }
 
 // ---- the painted plates -----------------------------------------------------------------
-// The vanilla gate: the seven plates the DLL paints are byte-identical to the oracle
+// The vanilla gate: the six plates the DLL paints (collect_mi=1) are byte-identical to the oracle
 // data\oracle\plates\*.tex, which tools/make_plates.py made. The two modded views prove the ground
 // rule instead - under X-Mod the reagent cluster's own rectangle must come out of the STASH
 // cover, not the materials cover, which is the fault this pass exists for.
@@ -516,7 +662,9 @@ int plates(const std::string& dataDir, const std::string& dumpDir,
     if (!g.load(game, "EN", &err)) return fail(err.c_str());
     std::vector<gen::CatalogueItem> items;
     std::vector<std::string> warnings;
-    if (!gen::collectItems(g, items, warnings, &err)) return fail(err.c_str());
+    if (!gen::collectItems(g, items, warnings, &err, true)) return fail(err.c_str());
+    const gen::GroupsInput* shipped = shippedGroups(&err);
+    if (!shipped) return fail(err.c_str());
     const char* mdir = std::getenv("UNIQUETAB_TEST_MODS_DIR");
     int rc = 0, skipped = 0;
     for (const GeoCase& gc : kGeoCases) {
@@ -526,7 +674,7 @@ int plates(const std::string& dataDir, const std::string& dumpDir,
             if (!mods.loadCustom(std::string(mdir) + "\\" + gc.sub, &err)) { ++skipped; continue; }
         }
         gen::PagesOutput po;
-        if (!gen::generatePages(g, items, po, &err, gc.sub ? &mods : nullptr))
+        if (!gen::generatePages(g, items, po, &err, gc.sub ? &mods : nullptr, shipped))
             return fail(err.c_str());
         PlateCase c;
         c.geo = &po.geo;
@@ -760,7 +908,7 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
     // a0: A FRESH INSTALL. The release ships the .asi and nothing else: no overlay, no plate, no
     // list. So an EMPTY mod folder and an EMPTY override root must come out of the first launch
     // holding the complete set - the four lists byte-identical to the oracle, the overlay record
-    // for record the oracle's, the seven vanilla plates byte-identical to the oracle's - and
+    // for record the oracle's, the six vanilla plates byte-identical to the oracle's - and
     // nothing more. And a first launch whose generation fails must leave both exactly as empty:
     // no overlay (the tab stays off with one error line) and no plate (the plain cover draws).
     {
@@ -800,16 +948,16 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
         std::printf("[test] ensure (fresh install): the written frame is at %d,%d with %d boxes, "
                     "%d pages, %d boxes%s%s\n", wo.frameX, wo.frameY, wo.frameBoxes, wo.pages, wo.boxes,
                     wo.error.empty() ? "" : " - ", wo.error.c_str());
-        check(wo.ok && wo.frameX == 0 && wo.frameY == 88 && wo.frameBoxes == 160,
-              "fresh install: the frame record is the vanilla one, 160 boxes at 0,88");
+        check(wo.ok && wo.frameX == 0 && wo.frameY == 88 && wo.frameBoxes == 234,
+              "fresh install: the frame record is the vanilla one, 234 boxes (the cover's fit) at 0,88");
         std::vector<std::string> wantPlates;
         for (const std::string& f : filesIn(dataDir + "\\oracle\\plates"))
             if (f.rfind("uniq_plate_", 0) == 0 && f.size() > 4 && f.compare(f.size() - 4, 4, ".tex") == 0)
                 wantPlates.push_back(f);
         const std::vector<std::string> gotPlates = filesIn(fRoot);
         std::printf("[test] ensure (fresh install): %s\n", fr.plates.c_str());
-        check(wantPlates.size() == 7 && gotPlates == wantPlates,
-              "fresh install: the override root holds exactly the seven vanilla plates");
+        check(wantPlates.size() == kVanillaPlates && gotPlates == wantPlates,
+              "fresh install: the override root holds exactly the six vanilla plates (collect_mi=1)");
         bool platesSame = !gotPlates.empty();
         for (const std::string& f : gotPlates) {
             std::vector<std::uint8_t> got, want;
@@ -840,6 +988,12 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
     // shipped 1740 MB peak got the whole process OOM-killed there on the first launch after
     // an install or a patch. Streaming the archives brought this installation to 110 MB;
     // 200 MB is that with room for a bigger database, and well under what a Deck can spare.
+    // THE BUDGET IS THE GENERATION'S OWN HEAP (heap_meter: what the DLL's "N MB for this" line
+    // reports in the game, and what kPeakBudgetMb is held to there). The harness's PROCESS peak
+    // adds this harness's own ~30 MB (its CRT, the comparison buffers, the oracle files it reads)
+    // and only ever grows across passes, so it is printed as information and never judged: a big
+    // custom game (Grimarillion 204 MB process / 172 MB own, Dawn of Masteries 201 / 170) would
+    // otherwise fail a line the game itself never draws.
     const double kPeakBudgetMb = 200.0;
 
     // a: first launch
@@ -851,11 +1005,14 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
                 ok ? "generated" : "FAILED", r.reason.c_str(), (long long)ms, peakMb,
                 r.summary.c_str(), r.error.c_str());
     check(ok && r.generated && r.reason == "catalogue.bin is missing", "a first launch generates, reason = the missing catalogue");
-    if (peakMb > kPeakBudgetMb)
-        std::printf("[test] the generation peaked at %.1f MB, over the %.0f MB budget - an archive\n"
-                    "[test] is being held whole again; see arc_reader.h and arz_reader.h\n",
-                    peakMb, kPeakBudgetMb);
-    check(peakMb > 0.0 && peakMb <= kPeakBudgetMb, "the generation stays inside the peak-memory budget");
+    if (r.ownPeakMb > kPeakBudgetMb)
+        std::printf("[test] the generation's own heap peaked at %.1f MB, over the %.0f MB budget - an\n"
+                    "[test] archive is being held whole again; see arc_reader.h and arz_reader.h\n",
+                    r.ownPeakMb, kPeakBudgetMb);
+    std::printf("[test] ensure: own heap %.1f MB (the budget, %.0f MB); process peak %.1f MB "
+                "(information)\n", r.ownPeakMb, kPeakBudgetMb, peakMb);
+    check(r.ownPeakMb > 0.0 && r.ownPeakMb <= kPeakBudgetMb,
+          "the generation's own heap stays inside the 200 MB budget");
     std::printf("[test] ensure: %s\n", r.memory.c_str());
     check(r.ownPeakMb > 0.0 && r.ownPeakMb <= peakMb,
           "the metered heap is non-zero and inside the process peak");
@@ -865,8 +1022,8 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
         if (compareBytes(names[i], got, want)) rc = 1;
     }
     std::printf("[test] ensure: %s\n", r.plates.c_str());
-    check(r.plates.find("7 cover plate(s) painted, 7 written") != std::string::npos,
-          "the seven plates were painted into the (scratch) override root");
+    check(r.plates.find("6 cover plate(s) painted, 6 written") != std::string::npos,
+          "the six plates (collect_mi=1) were painted into the (scratch) override root");
     unsigned long long plateMt = mtimeOf(plateDir + "\\uniq_plate_32x32.tex");
     check(plateMt != 0, "a plate is on disk under its resource name");
     check(GetFileAttributesA(stamp.c_str()) != INVALID_FILE_ATTRIBUTES, "catalogue.stamp written");
@@ -906,7 +1063,8 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
         check(bok && br.generated && br.view == "basemods", "the /basemods start-up view generates");
         check(br.ownPeakMb > 0.0 && br.ownPeakMb <= kPeakBudgetMb,
               "its own heap stays inside the peak-memory budget");
-        check(peakNow <= kPeakBudgetMb, "the process peak after both start-up views stays inside the budget");
+        std::printf("[test] ensure: process peak after both start-up views %.1f MB (information)\n",
+                    peakNow);
         if (!basemodArz) {
             // no basemod database: the merged database is the vanilla one, and so are the outputs
             bool same = true;
@@ -958,7 +1116,7 @@ int ensure(const std::string& dataDir, const std::string& modDir) {
     ok = gen::ensureOutputsGuarded(game, modDir, pagesArz, plateDir, "EN", "", r);
     check(ok && r.generated && r.reason == "uniq-groups.txt is missing", "a missing output regenerates");
     check(r.plates.find("0 written") != std::string::npos
-              && r.plates.find("7 already current") != std::string::npos
+              && r.plates.find("6 already current") != std::string::npos
               && mtimeOf(plateDir + "\\uniq_plate_32x32.tex") == plateMt,
           "a regeneration does not rewrite a plate whose bytes are already on disk");
     for (int i = 0; i < 4; ++i) mt[i] = mtimeOf(modDir + "\\" + names[i]);
@@ -1056,7 +1214,7 @@ int viewPass(const std::string& root) {
     };
 
     // THE PATH THE ENGINE HANDS OVER. Engine::LoadDatabase names a custom game's archive
-    // relative to the game folder with forward slashes, exactly as the user's session logged it:
+    // relative to the game folder with forward slashes, exactly as a session logs it:
     //   reagent db: Engine::LoadDatabase("mods/LootAscension/database/LootAscension.arz") ...
     // Every form below must name the same folder; the base game's own archives, the Crucible's
     // DLC parts and the /basemods archive must name none.
@@ -1101,7 +1259,7 @@ int viewPass(const std::string& root) {
               "the base game's, the DLC parts' and the /basemods archives name no custom game");
     }
 
-    // A game folder laid out as the user's was: <layout>\mods\LootAscension, mirrored from the
+    // A game folder laid out as a real one is: <layout>\mods\LootAscension, mirrored from the
     // unpacked mod (read-only) into build\test. The switch below starts from the engine's exact
     // string resolved against it, not from a path the harness already knows.
     const std::string layout = root + "\\layout";
@@ -1157,6 +1315,15 @@ int viewPass(const std::string& root) {
     // the view folder starts empty, so this pass always exercises a real first entry
     for (const char* n : names) DeleteFileA((viewDir + "\\" + n).c_str());
     DeleteFileA((viewDir + "\\catalogue.stamp").c_str());
+    {   // and so do the view's plates: the count below must see this run's plates only -
+        // a stale flag-off uniq_plate_32x128_346x625_lootascension.tex would make it seven
+        WIN32_FIND_DATAA of;
+        HANDLE oh = FindFirstFileA((plateDir + "\\uniq_plate_*_346x625_lootascension.tex").c_str(), &of);
+        if (oh != INVALID_HANDLE_VALUE) {
+            do DeleteFileA((plateDir + "\\" + of.cFileName).c_str()); while (FindNextFileA(oh, &of));
+            FindClose(oh);
+        }
+    }
 
     // the start-up view, where it has always gone
     gen::GenReport sr;
@@ -1183,9 +1350,10 @@ int viewPass(const std::string& root) {
     std::printf("[test] view: %s\n", r.plates.c_str());
     std::printf("[test] view: %s\n", r.plateGround.c_str());
     check(r.generated && r.view == "custom-lootascension", "the Baul view generates");
-    check(r.overlay.find("frame at 513,70 with 144 boxes") != std::string::npos,
-          "the frame is where Baul's materials page is, with 144 boxes");
-    check(r.summary.find(" on 115 pages ") != std::string::npos, "115 pages");
+    check(r.overlay.find("frame at 513,70 with 180 boxes") != std::string::npos,
+          "the frame is where Baul's materials page is, with all 180 boxes (the 346x625 cover's fit)");
+    check(r.summary.find(" on 236 pages ") != std::string::npos,
+          "236 pages with collect_mi=1, the default (130 with it off: 115 + 15 of Blueprints, 4 x 16 of 64x32)");
     check(r.plates.find("cut at 605,71") != std::string::npos,
           "the ground is the 346x625 cut of Baul's window art at 605,71");
     check(r.plateGround.find("a flat 060606") != std::string::npos,
@@ -1205,13 +1373,13 @@ int viewPass(const std::string& root) {
                     s.maxX, s.maxY);
         check(w.ok && w.frameX == 513 && w.frameY == 70,
               "the WRITTEN frame record puts the page at 513,70");
-        check(w.frameBoxes == 144, "the written frame lists 144 boxes");
-        check(w.pages == 115, "the written archive holds 115 collection pages");
+        check(w.frameBoxes == 180, "the written frame lists all 180 boxes");
+        check(w.pages == 236, "the written archive holds 236 collection pages");
         check(w.minX == 128 && w.minY == 76 && w.maxX < 128 + 310 && w.maxY < 76 + 550,
               "every written page box is on the derived grid (origin 128,76, 310x550)");
-        check(s.ok && s.frameX == 0 && s.frameY == 88 && s.frameBoxes == 160 &&
+        check(s.ok && s.frameX == 0 && s.frameY == 88 && s.frameBoxes == 234 &&
                   s.minX == 105 && s.minY == 76,
-              "the start-up view's written frame is the vanilla 0,88 with 160 boxes on 105,76");
+              "the start-up view's written frame is the vanilla 0,88 with 234 boxes on 105,76");
     }
 
     // the plate names carry the view, so two mods with one cover size cannot collide
@@ -1223,13 +1391,17 @@ int viewPass(const std::string& root) {
         FindClose(h);
     }
     std::printf("[test] view: %d plate(s) named uniq_plate_<cell>_346x625_lootascension.tex\n", tagged);
-    check(tagged == 7, "every plate of the view carries the view's tag");
+    check(tagged == kVanillaPlates, "every plate of the view carries the view's tag (the vanilla cell set: six)");
 
     // the stamp is the view's own
     std::vector<std::uint8_t> stamp;
     check(readAll(viewDir + "\\catalogue.stamp", stamp), "the view folder has its own stamp");
     const std::string stampText(stamp.begin(), stamp.end());
-    check(stampText.find("GDUT-STAMP 7\n") == 0, "stamp format 7");
+    check(stampText.find("GDUT-STAMP 9\n") == 0, "stamp format 9 (the frame's box count is the view's own)");
+    check(stampText.find("\ngroups=builtin:") != std::string::npos && stampText.find("+user:") == std::string::npos,
+          "with no groups file the stamp names the built-in groups (by their text's hash) alone");
+    check(stampText.find("\nplates=tagged\n") != std::string::npos,
+          "a custom view's stamp says its plate names are tagged");
     check(stampText.find("view=custom-lootascension\n") != std::string::npos,
           "the stamp names the view");
     check(stampText.find("LootAscension\\database\\") != std::string::npos,
@@ -1243,6 +1415,129 @@ int viewPass(const std::string& root) {
         if (after != before[i] || after.empty()) same = false;
     }
     check(same, "the start-up view's five outputs are byte-identical after the switch");
+
+    // AN UNREADABLE ARCHIVE AND A VANILLA-SIZED COVER. A scratch custom game built from the
+    // first custom game in the game folder that leaves the caravan alone: its database, its two
+    // smallest resource archives renamed to sort before and after a text_ko.arc whose header is
+    // zeroed (DeathGrimDawn ships one). The view must skip that one archive with one warning
+    // naming it, keep the other two, and - its caravan being the vanilla 438x627 one - still
+    // tag every plate name with the view, never the campaign's names.
+    {
+        std::string srcArz, arcA, arcB;
+        for (const std::pair<std::string, std::string>& cg : installedCustomGames(game)) {
+            const std::string dir = game + "\\mods\\" + cg.first;
+            gen::ModView probe;
+            std::string perr;
+            if (!probe.loadCustom(dir, &perr) || probe.touchesCaravan()) continue;
+            std::vector<std::pair<unsigned long long, std::string> > arcs;
+            WIN32_FIND_DATAA af;
+            HANDLE ah = FindFirstFileA((dir + "\\resources\\*.arc").c_str(), &af);
+            if (ah != INVALID_HANDLE_VALUE) {
+                do arcs.emplace_back((static_cast<unsigned long long>(af.nFileSizeHigh) << 32) | af.nFileSizeLow,
+                                     dir + "\\resources\\" + af.cFileName);
+                while (FindNextFileA(ah, &af));
+                FindClose(ah);
+            }
+            if (arcs.size() < 2) continue;
+            std::sort(arcs.begin(), arcs.end());
+            srcArz = dir + "\\database\\" + cg.second;
+            arcA = arcs[0].second;
+            arcB = arcs[1].second;
+            break;
+        }
+        const std::string zmod = root + "\\zeroarcmod";
+        const std::string zdb = zmod + "\\database";
+        const std::string zres = zmod + "\\resources";
+        const std::string zview = root + "\\views\\custom-zeroarcmod";
+        const std::string zplates = root + "\\plateroot-zeroarcmod";
+        const std::string zdirs[5] = {zmod, zdb, zres, zview, zplates};
+        for (const std::string& d : zdirs) CreateDirectoryA(d.c_str(), nullptr);
+        {   // a scratch folder from an earlier run may hold other archives
+            WIN32_FIND_DATAA of;
+            HANDLE oh = FindFirstFileA((zres + "\\*.arc").c_str(), &of);
+            if (oh != INVALID_HANDLE_VALUE) {
+                do DeleteFileA((zres + "\\" + of.cFileName).c_str()); while (FindNextFileA(oh, &of));
+                FindClose(oh);
+            }
+        }
+        const bool haveSrc =
+            !srcArz.empty() &&
+            CopyFileA(srcArz.c_str(), (zdb + "\\zeroarcmod.arz").c_str(), FALSE) &&
+            CopyFileA(arcA.c_str(), (zres + "\\a_first.arc").c_str(), FALSE) &&
+            CopyFileA(arcB.c_str(), (zres + "\\zz_last.arc").c_str(), FALSE);
+        if (!haveSrc) {
+            std::printf("[test] view: no custom game in the game folder that leaves the caravan alone "
+                        "with two resource archives - the unreadable-archive and vanilla-cover tag "
+                        "cases were NOT tested\n");
+        } else {
+            {
+                std::vector<std::uint8_t> zeros(4096, 0);
+                FILE* f = std::fopen((zres + "\\text_ko.arc").c_str(), "wb");
+                if (f) {
+                    std::fwrite(zeros.data(), 1, zeros.size(), f);
+                    std::fclose(f);
+                }
+            }
+            WIN32_FIND_DATAA zf;
+            HANDLE zh = FindFirstFileA((zplates + "\\uniq_plate_*.tex").c_str(), &zf);
+            if (zh != INVALID_HANDLE_VALUE) {
+                do DeleteFileA((zplates + "\\" + zf.cFileName).c_str()); while (FindNextFileA(zh, &zf));
+                FindClose(zh);
+            }
+            DeleteFileA((zview + "\\catalogue.stamp").c_str());
+
+            gen::ModView zm;
+            std::string zerr;
+            const bool zloaded = zm.loadCustom(zmod, &zerr);
+            std::printf("[test] view: scratch mod with a zeroed text_ko.arc - loadCustom %s, %zu "
+                        "archive(s) read, %zu skipped%s%s\n", zloaded ? "OK" : "FAILED",
+                        zm.arcCount(), zm.skipped().size(), zm.skipped().empty() ? "" : ": ",
+                        zm.skipped().empty() ? "" : zm.skipped()[0].c_str());
+            check(zloaded, "an unreadable .arc does not sink the view");
+            check(zm.skipped().size() == 1 &&
+                      zm.skipped()[0].find("text_ko.arc") != std::string::npos,
+                  "exactly the zeroed archive is skipped, and it is named");
+            check(zm.arcCount() == 2, "the archives sorted before and after it are both read");
+
+            gen::ViewSpec zv;
+            zv.customDir = zmod;
+            gen::GenReport zr;
+            const bool zok = gen::ensureOutputsGuarded(game, zview, zview + "\\uniq-pages.arz",
+                                                       zplates, "EN", "", zr, nullptr, nullptr, &zv);
+            int skipWarn = 0;
+            for (const std::string& w : zr.warnings) {
+                std::printf("[test] view: zeroarcmod warning: %s\n", w.c_str());
+                if (w.find("skips an unreadable archive") != std::string::npos &&
+                    w.find("text_ko.arc") != std::string::npos)
+                    ++skipWarn;
+            }
+            std::printf("[test] view: zeroarcmod %s; %s\n", zok ? "generated" : zr.error.c_str(),
+                        zr.geometry.c_str());
+            check(zok && zr.generated, "the view with an unreadable archive generates");
+            check(skipWarn == 1, "one warning names the skipped archive");
+            check(zr.geometry.find("cover 438x627") != std::string::npos,
+                  "the scratch mod keeps the vanilla 438x627 cover");
+            int all = 0, ztagged = 0;
+            zh = FindFirstFileA((zplates + "\\uniq_plate_*.tex").c_str(), &zf);
+            if (zh != INVALID_HANDLE_VALUE) {
+                do ++all; while (FindNextFileA(zh, &zf));
+                FindClose(zh);
+            }
+            zh = FindFirstFileA((zplates + "\\uniq_plate_*_438x627_zeroarcmod.tex").c_str(), &zf);
+            if (zh != INVALID_HANDLE_VALUE) {
+                do ++ztagged; while (FindNextFileA(zh, &zf));
+                FindClose(zh);
+            }
+            std::printf("[test] view: zeroarcmod wrote %d plate(s), %d named "
+                        "uniq_plate_<cell>_438x627_zeroarcmod.tex\n", all, ztagged);
+            check(all == kVanillaPlates && ztagged == kVanillaPlates,
+                  "a custom view with the vanilla cover size tags every plate name");
+            std::vector<std::uint8_t> zst;
+            readAll(zview + "\\catalogue.stamp", zst);
+            check(std::string(zst.begin(), zst.end()).find("\nplates=tagged\n") != std::string::npos,
+                  "the custom view's stamp carries the tagged-plates line");
+        }
+    }
 
     // A custom game that leaves records/ui/caravan alone needs no view of its own: the
     // start-up view already describes its caravan. The Crucible is that case and it ships
@@ -1290,18 +1585,969 @@ int viewPass(const std::string& root) {
     // the most any of them reached
     std::printf("[test] view: %s\n", r.memory.c_str());
     const double peakMb = peakWorkingSetMb();
-    std::printf("[test] view: process peak %.1f MB after the start-up view, the custom view and %zu "
-                "probe(s) of the real mods folder\n", peakMb, games.size());
-    check(peakMb > 0.0 && peakMb <= 200.0, "the view pass stays inside the 200 MB peak budget");
+    std::printf("[test] view: own heap %.1f MB; process peak %.1f MB (information) after the start-up "
+                "view, the custom view and %zu probe(s) of the real mods folder\n", r.ownPeakMb, peakMb,
+                games.size());
+    check(r.ownPeakMb > 0.0 && r.ownPeakMb <= 200.0, "the view's own heap stays inside the 200 MB budget");
     return rc;
+}
+
+// ---- the layout plates ---------------------------------------------------------------------
+// A user grid's own plate set (gen::ensureLayoutPlates): painted under hashed names beside the
+// derived set, repainted only when its inputs change, its superseded files removed (only ours),
+// the derived plates, the overlay and the stamp untouched, one generation at a time. The bytes
+// are compared with tools/make_plates.py --grid by --layout-compare (build_test_catalogue.bat).
+bool fileAttrs(const std::string& p, WIN32_FILE_ATTRIBUTE_DATA* fa) {
+    return GetFileAttributesExA(p.c_str(), GetFileExInfoStandard, fa) != 0;
+}
+bool sameFileTime(const WIN32_FILE_ATTRIBUTE_DATA& a, const WIN32_FILE_ATTRIBUTE_DATA& b) {
+    return a.ftLastWriteTime.dwLowDateTime == b.ftLastWriteTime.dwLowDateTime &&
+           a.ftLastWriteTime.dwHighDateTime == b.ftLastWriteTime.dwHighDateTime &&
+           a.nFileSizeLow == b.nFileSizeLow;
+}
+bool touchFile(const std::string& p) {
+    FILE* f = std::fopen(p.c_str(), "wb");
+    if (!f) return false;
+    std::fputs("x", f);
+    std::fclose(f);
+    return true;
+}
+bool exists(const std::string& p) {
+    const DWORD a = GetFileAttributesA(p.c_str());
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+int countLayoutFiles(const std::string& plateDir) {
+    int n = 0;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((plateDir + "\\uniq_plate_*_L*.tex").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do { ++n; } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+// The grid in force for a grid_ value over the view's P line, as the layout-plates thread resolves
+// it: through ut::utLayoutPlatesGrid, the function layWantNow calls, so the two never drift (no
+// screen key here - the fixtures set none).
+bool resolveGrid(const std::string& outDir, const char* value, gen::LayoutGrid* lg) {
+    gen::UiGeometry geo;
+    int mw = 0, mh = 0, gap = 2;
+    if (!gen::readGroupsGeometry(outDir + "\\uniq-groups.txt", geo, &mw, &mh, &gap, nullptr))
+        return false;
+    ut::UtLayoutSource src = {};
+    src.x0 = geo.x0; src.y0 = geo.y0; src.usableW = geo.usableW; src.usableH = geo.usableH;
+    src.plateW = geo.plateW; src.plateH = geo.plateH;
+    src.maxCellW = mw; src.maxCellH = mh; src.rowGap = gap;
+    src.grid = value;
+    src.padY = 25; src.padH = 14; src.padGap = 1; src.labelSize = 13; src.captionMax = 14;
+    ut::UtRect r;
+    char canon[64];
+    if (!ut::utLayoutPlatesGrid(src, &r, canon, sizeof canon)) return false;
+    lg->x = r.x; lg->y = r.y; lg->w = r.w; lg->h = r.h;
+    char cover[32];
+    std::snprintf(cover, sizeof cover, "%dx%d", geo.plateW, geo.plateH);
+    lg->text = std::string("grid_") + cover + "=" + canon;
+    return true;
+}
+
+DWORD WINAPI holdGenLock(LPVOID) {
+    gen::generationLockAcquire();
+    Sleep(400);
+    gen::generationLockRelease();
+    return 0;
+}
+
+int layoutPlates(const std::string& dataDir, const std::string& outDir) {
+    std::string game = gameDir();
+    if (game.empty()) return fail("UNIQUETAB_TEST_GAME_DIR is not set");
+    const std::string modDir = outDir + "\\mod";
+    const std::string plateDir = outDir + "\\plateroot";   // never a game folder
+    CreateDirectoryA(outDir.c_str(), nullptr);
+    CreateDirectoryA(modDir.c_str(), nullptr);
+    CreateDirectoryA(plateDir.c_str(), nullptr);
+    {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((plateDir + "\\uniq_plate_*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do { DeleteFileA((plateDir + "\\" + fd.cFileName).c_str()); } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+    int rc = 0;
+    auto check = [&](bool ok, const std::string& what) {
+        std::printf("[test] %s: layout plates: %s\n", ok ? "ok  " : "FAIL", what.c_str());
+        if (!ok) rc = 1;
+    };
+    gen::ViewSpec v;   // the vanilla start-up view
+    DeleteFileA((modDir + "\\catalogue.stamp").c_str());   // a fresh main generation paints the derived set
+    gen::GenReport gr;
+    const std::string pagesArz = modDir + "\\uniq-pages.arz";
+    if (!gen::ensureOutputs(game, modDir, pagesArz, plateDir, "EN", "", gr, nullptr, nullptr, &v,
+                            nullptr))
+        return fail(("the main generation: " + gr.error).c_str());
+    WIN32_FILE_ATTRIBUTE_DATA before[3];
+    const std::string watched[3] = {pagesArz, modDir + "\\catalogue.stamp", modDir + "\\catalogue.bin"};
+    for (int i = 0; i < 3; ++i) fileAttrs(watched[i], &before[i]);
+
+    // 1. no user grid: nothing painted, the derived plates are today's
+    gen::LayoutPlatesReport rep;
+    bool ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, nullptr, rep);
+    check(ok && !rep.painted && rep.hash.empty() && countLayoutFiles(plateDir) == 0,
+          "no grid override - nothing painted, no _L plate");
+    int same = 0, n = 0;
+    {
+        WIN32_FIND_DATAA fd;
+        HANDLE h = FindFirstFileA((dataDir + "\\oracle\\plates\\uniq_plate_*.tex").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            do {
+                std::vector<std::uint8_t> a, b;
+                ++n;
+                if (readAll(plateDir + "\\" + fd.cFileName, a) &&
+                    readAll(dataDir + "\\oracle\\plates\\" + fd.cFileName, b) && a == b)
+                    ++same;
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+    }
+    check(n == kVanillaPlates && same == kVanillaPlates, "vanilla with no override: the " + std::to_string(same) + " of " +
+                                   std::to_string(n) + " derived plates byte-identical to the oracle");
+
+    // 2. a user grid: six _L plates (collect_mi=1), timed and metered
+    gen::LayoutGrid a;
+    if (!resolveGrid(modDir, "105,120,333,460", &a)) return fail("grid_438x627=105,120,333,460 does not resolve");
+    check(a.x == 105 && a.y == 120 && a.w == 333 && a.h == 460 &&
+          a.text == "grid_438x627=105,120,333,460", "the grid in force is " + a.text);
+    ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &a, rep);
+    check(ok && rep.painted && rep.names.size() == kVanillaPlates && rep.hash.size() == 8 &&
+              rep.written == kVanillaPlates,
+          "a user grid paints " + std::to_string(rep.names.size()) + " plates _L" + rep.hash +
+              (ok ? "" : " - " + rep.error));
+    std::printf("[test] layout plates: vanilla 438x627 plates-only pass %lld ms, own heap %.1f MB "
+                "(%zu painted) - %s\n", rep.ms, rep.ownPeakMb, rep.names.size(), rep.ground.c_str());
+    check(rep.ownPeakMb < 200.0, "the plates-only pass holds less than the 200 MB budget");
+    const std::string hashA = rep.hash;
+    const std::vector<std::string> namesA = rep.names;
+    bool allOk = true;
+    for (const std::string& nm : namesA) {
+        std::vector<std::uint8_t> t;
+        gen::PlateSurface sf;
+        std::string why;
+        if (nm.find("_438x627_L" + hashA) == std::string::npos || !readAll(plateDir + "\\" + nm + ".tex", t) ||
+            !gen::plateDecodeTex(t, sf, &why) || sf.w != 438 || sf.h != 627)
+            allOk = false;
+    }
+    check(allOk, "every _L plate is a 438x627 TEX named uniq_plate_<cell>_438x627_L" + hashA);
+
+    // 3. the same grid again: on disk, nothing painted
+    ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &a, rep);
+    check(ok && rep.upToDate && !rep.painted && rep.hash == hashA,
+          "the same grid again finds its set on disk (" + std::to_string(rep.ms) + " ms)");
+    // the hash follows each input
+    {
+        gen::LayoutPlan p1, p2;
+        std::string e;
+        gen::planLayoutPlates(modDir, a, "", "", p1, &e);
+        gen::planLayoutPlates(modDir, a, "102030", "", p2, &e);
+        std::vector<gen::CellGrid> cells = p1.cells;
+        const std::string h0 = gen::layoutPlateHash("S", a.text, cells, "");
+        cells[0].cols += 1;
+        check(p1.hash == hashA && p2.hash != hashA &&
+              gen::layoutPlateHash("T", a.text, p1.cells, "") != h0 &&
+              gen::layoutPlateHash("S", a.text + " ", p1.cells, "") != h0 &&
+              gen::layoutPlateHash("S", a.text, cells, "") != h0,
+              "the hash follows the stamp, the override, the cells and plate_ground");
+        // The painter's lattice rule is in the hash (ut::kUtLatticeRule 2: every fitted cell
+        // framed), so a set painted under rule 1 - a 29-column Reign of Terror grid with its 29th
+        // column bare - is superseded and painted again. Golden values: with the rule line
+        // 604a59c8; the same inputs without it (rule 1) gave 048edde9.
+        {
+            gen::CellGrid c32;
+            c32.cellW = 32;
+            c32.cellH = 32;
+            c32.cols = 29;
+            c32.rows = 15;
+            const std::string hr = gen::layoutPlateHash("S", "46,72,928,520", {c32}, "");
+            check(ut::kUtLatticeRule == 2 && hr == "604a59c8" && hr != "048edde9",
+                  "the hash carries the lattice rule: a rule-1 set (" + std::string("048edde9") +
+                      ") is not found again, rule 2 gives " + hr);
+        }
+    }
+
+    // 4. a new grid: a new set, the superseded one removed, nothing else
+    const std::string foreign[5] = {
+        plateDir + "\\uniq_plate_64x64_438x627_Lzzzzzzzz.tex",      // not hex
+        plateDir + "\\uniq_plate_64x64_438x627_other_L12345678.tex", // another view's tag
+        plateDir + "\\uniq_plate_64x64_975x968_L12345678.tex",       // another cover
+        plateDir + "\\uniq_plate_64x64_L12345678.tex",               // no cover
+        plateDir + "\\notours_438x627_L12345678.tex"};
+    for (const std::string& f : foreign) touchFile(f);
+    touchFile(plateDir + "\\uniq_plate_64x64_438x627_L00000000.tex");   // ours, stale
+    gen::LayoutGrid b;
+    resolveGrid(modDir, "105,100,333,500", &b);
+    ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &b, rep);
+    bool foreignKept = true;
+    for (const std::string& f : foreign) foreignKept = foreignKept && exists(f);
+    bool oldGone = !exists(plateDir + "\\uniq_plate_64x64_438x627_L00000000.tex");
+    for (const std::string& nm : namesA) oldGone = oldGone && !exists(plateDir + "\\" + nm + ".tex");
+    check(ok && rep.painted && rep.hash != hashA && rep.removed == kVanillaPlates + 1 && oldGone && foreignKept,
+          "a new grid paints _L" + rep.hash + " and removes the " + std::to_string(kVanillaPlates + 1) +
+          " superseded plates of the cover (its set + one stale), "
+          "and no other file (" + std::to_string(rep.removed) + " removed)");
+    for (const std::string& f : foreign) DeleteFileA(f.c_str());
+
+    // 5. the override removed: every _L plate of the cover goes, the derived ones stay
+    ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, nullptr, rep);
+    check(ok && rep.removed == kVanillaPlates && countLayoutFiles(plateDir) == 0,
+          "the override removed: its " + std::to_string(kVanillaPlates) + " plates go");
+    same = 0;
+    for (const char* c : {"32x32", "32x96", "64x32", "64x64", "64x96", "64x128"}) {
+        std::vector<std::uint8_t> x, y;
+        const std::string leaf = std::string("uniq_plate_") + c + ".tex";
+        if (readAll(plateDir + "\\" + leaf, x) && readAll(dataDir + "\\oracle\\plates\\" + leaf, y) && x == y) ++same;
+    }
+    check(same == kVanillaPlates, "the derived plates are still byte-identical to the oracle");
+
+    // 6. nothing regenerated the overlay, the catalogue or the stamp; the stamp has no layout line
+    bool untouched = true;
+    for (int i = 0; i < 3; ++i) {
+        WIN32_FILE_ATTRIBUTE_DATA now;
+        untouched = untouched && fileAttrs(watched[i], &now) && sameFileTime(before[i], now);
+    }
+    std::vector<std::uint8_t> st;
+    readAll(modDir + "\\catalogue.stamp", st);
+    const std::string stText(st.begin(), st.end());
+    check(untouched && stText.find("layout=") == std::string::npos,
+          "the overlay, catalogue.bin and catalogue.stamp were not rewritten; no layout= line");
+
+    // 7. one generation at a time: a held lock makes the pass wait
+    {
+        HANDLE t = CreateThread(nullptr, 0, &holdGenLock, nullptr, 0, nullptr);
+        Sleep(50);
+        const auto t0 = std::chrono::steady_clock::now();
+        ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, nullptr, rep);
+        const long long waited = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - t0).count();
+        WaitForSingleObject(t, INFINITE);
+        CloseHandle(t);
+        check(ok && waited >= 250, "a pass waits for a generation in progress (" +
+                                       std::to_string(waited) + " ms)");
+    }
+
+    // 8. the set the Python reference is compared with (left on disk for --layout-compare)
+    ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &a, rep);
+    check(ok && rep.painted && rep.hash == hashA, "grid_438x627=105,120,333,460 painted again (" +
+                                                       std::to_string(rep.ms) + " ms)");
+    {
+        FILE* f = std::fopen((outDir + "\\layout-hash.txt").c_str(), "wb");
+        if (f) { std::fputs(hashA.c_str(), f); std::fclose(f); }
+        f = std::fopen((outDir + "\\layout-names.txt").c_str(), "wb");
+        if (f) { for (const std::string& nm : namesA) std::fprintf(f, "%s\n", nm.c_str()); std::fclose(f); }
+    }
+
+    // 9. the timing on the other covers: Baul (346x625) and a wide one (X-Mod 975x968)
+    const char* mdir = std::getenv("UNIQUETAB_TEST_MODS_DIR");
+    if (!mdir || !*mdir) {
+        std::printf("[test] layout plates: Baul / X-Mod SKIPPED - UNIQUETAB_TEST_MODS_DIR is not set\n");
+    } else {
+        gen::GameData g;
+        std::string err;
+        std::vector<gen::CatalogueItem> items;
+        std::vector<std::string> warnings;
+        if (!g.load(game, "EN", &err) || !gen::collectItems(g, items, warnings, &err))
+            return fail(err.c_str());
+        struct Wide { const GeoCase* c; const char* grid; };
+        // X-Mod's grid ends flush with the plate's right edge (591 + 384 = 975), as a Reign
+        // of Terror grid 46,72,928,520 does (974): its last column must be framed.
+        const Wide wide[2] = {{&kGeoCases[2], "128,120,310,400"}, {&kGeoCases[1], "591,76,384,584"}};
+        for (const Wide& w : wide) {
+            gen::ModView mods;
+            const std::string custom = std::string(mdir) + "\\" + w.c->sub;
+            if (!mods.loadCustom(custom, &err)) { std::printf("[test] layout plates %s SKIPPED (%s)\n", w.c->label, err.c_str()); continue; }
+            gen::PagesOutput po;
+            if (!gen::generatePages(g, items, po, &err, &mods)) return fail(err.c_str());
+            const std::string vdir = outDir + "\\view-" + std::to_string(w.c->plateW);
+            CreateDirectoryA(vdir.c_str(), nullptr);
+            FILE* f = std::fopen((vdir + "\\uniq-groups.txt").c_str(), "wb");
+            if (f) { std::fwrite(po.groups.data(), 1, po.groups.size(), f); std::fclose(f); }
+            f = std::fopen((vdir + "\\catalogue.stamp").c_str(), "wb");
+            if (f) { std::fputs("GDUT-STAMP 9\nharness view\n", f); std::fclose(f); }
+            gen::LayoutGrid lg;
+            if (!resolveGrid(vdir, w.grid, &lg)) {
+                check(false, std::string("the grid ") + w.grid + " does not resolve on " + w.c->label);
+                continue;
+            }
+            gen::ViewSpec cv;
+            cv.customDir = custom;
+            ok = gen::ensureLayoutPlatesGuarded(game, vdir, plateDir, "EN", "", cv, &lg, rep);
+            check(ok && rep.painted && rep.names.size() >= 7,
+                  std::string(w.c->label) + " " + lg.text + ": " + std::to_string(rep.names.size()) +
+                      " plates" + (ok ? "" : " - " + rep.error));
+            std::printf("[test] layout plates: %s %dx%d plates-only pass %lld ms, own heap %.1f MB "
+                        "(%zu painted, first %s)\n", w.c->label, w.c->plateW, w.c->plateH, rep.ms,
+                        rep.ownPeakMb, rep.names.size(), rep.names.empty() ? "-" : rep.names[0].c_str());
+            check(rep.ownPeakMb < 200.0, std::string(w.c->label) + " holds less than the 200 MB budget");
+            // The user grid's lattice is fitted under the view's OWN frame (the F line), exactly
+            // as the live page fits it - not under the old 160: on X-Mod 400x584 the 32 px cells
+            // are 12 x 17 = 204 (the 160 frame cut them to 12 x 13).
+            {
+                gen::LayoutPlan plan;
+                std::string perr;
+                const bool planned = gen::planLayoutPlates(vdir, lg, "", "", plan, &perr);
+                int wrong = 0, c32 = -1;
+                for (const gen::CellGrid& c : plan.cells) {
+                    const ut::UtGrid want = ut::utGridFit({lg.x, lg.y, lg.w, lg.h}, c.cellW, c.cellH,
+                                                          plan.rowGap, w.c->frameBoxes);
+                    if (c.cols != want.cols || c.rows != want.rows) ++wrong;
+                    if (c.cellW == 32 && c.cellH == 32) c32 = c.cols * 1000 + c.rows;
+                }
+                std::printf("[test] layout plates: %s plan under the %d-box frame: %zu cell(s), 32x32 "
+                            "%d x %d, %d off the rule%s%s\n", w.c->label, w.c->frameBoxes,
+                            plan.cells.size(), c32 / 1000, c32 % 1000, wrong, planned ? "" : " - ",
+                            perr.c_str());
+                check(planned && !plan.cells.empty() && wrong == 0,
+                      std::string(w.c->label) + ": every layout-plate cell is utGridFit under the F "
+                                                "line's frame count");
+                if (w.c == &kGeoCases[1])
+                    check(c32 == 12 * 1000 + 17,
+                          "X-Mod grid 591,76,384,584: the 32 px lattice is 12 x 17 = 204 (was 12 x 13 "
+                          "under the 160 frame)");
+            }
+            // THE LAST COLUMN IS FRAMED: on the flush X-Mod grid the 12th 32 px cell is 943..974
+            // in plate px (bmpX 0); its frame, cut to the plate, has its right line at 973..974.
+            // The old painter dropped that cell (its 2 px outset did not fit), leaving 11 columns.
+            if (w.c == &kGeoCases[1]) {
+                std::string n32;
+                for (const std::string& nm : rep.names)
+                    if (nm.compare(0, 17, "uniq_plate_32x32_") == 0) n32 = nm;
+                std::vector<std::uint8_t> t;
+                gen::PlateSurface sf;
+                std::string why;
+                int edge = 0, prev = 0;
+                if (!n32.empty() && readAll(plateDir + "\\" + n32 + ".tex", t) &&
+                    gen::plateDecodeTex(t, sf, &why) && sf.w == 975) {
+                    auto gold = [](const std::uint8_t* q) {
+                        return q[3] > 40 && q[0] > 55 && q[1] > 45 && int(q[0]) > int(q[2]) + 8;
+                    };
+                    // row 0's cell: window y 76 -> plate y 102 (bmpY -26), 102..133
+                    for (int y = 102; y < 134; ++y) {
+                        for (int x = 973; x < 975; ++x) edge += gold(sf.at(x, y)) ? 1 : 0;
+                        for (int x = 943; x < 945; ++x) prev += gold(sf.at(x, y)) ? 1 : 0;
+                    }
+                }
+                std::printf("[test] layout plates: X-Mod %s: gold pixels on the last column's right "
+                            "line %d, on the 11th column's %d\n", n32.c_str(), edge, prev);
+                check(edge >= 16 && prev >= 16,
+                      "X-Mod's flush grid: the 12th column of 32 px cells is framed to the plate's "
+                      "edge (the lattice has the page's 12 columns, not 11)");
+            }
+            const std::string pre = outDir + "\\layout-" + std::to_string(w.c->plateW);
+            f = std::fopen((pre + "-hash.txt").c_str(), "wb");
+            if (f) { std::fputs(rep.hash.c_str(), f); std::fclose(f); }
+            f = std::fopen((pre + "-names.txt").c_str(), "wb");
+            if (f) { for (const std::string& nm : rep.names) std::fprintf(f, "%s\n", nm.c_str()); std::fclose(f); }
+        }
+    }
+    return rc;
+}
+
+// The DLL's layout plates against tools/make_plates.py --grid, byte for byte.
+int layoutCompare(const std::string& cppDir, const std::string& pyDir, const std::string& namesFile) {
+    std::vector<std::uint8_t> raw;
+    if (!readAll(namesFile, raw)) return fail("no layout-names.txt");
+    std::string text(raw.begin(), raw.end());
+    int n = 0, same = 0;
+    std::size_t at = 0;
+    while (at < text.size()) {
+        std::size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        const std::string nm = text.substr(at, nl - at);
+        at = nl + 1;
+        if (nm.empty()) continue;
+        ++n;
+        std::vector<std::uint8_t> a, b;
+        if (!readAll(cppDir + "\\" + nm + ".tex", a) || !readAll(pyDir + "\\" + nm + ".tex", b)) {
+            std::printf("[test] FAIL: layout plates: %s is missing on one side\n", nm.c_str());
+            continue;
+        }
+        if (a != b) {
+            std::printf("[test] FAIL: layout plates: %s differs from the Python reference (%zu vs %zu bytes)\n",
+                        nm.c_str(), a.size(), b.size());
+            continue;
+        }
+        ++same;
+    }
+    std::printf("[test] %s: layout plates: %d of %d byte-identical to tools/make_plates.py --grid\n",
+                n >= kVanillaPlates && same == n ? "ok  " : "FAIL", same, n);
+    // at least the vanilla view's six cell sizes (collect_mi=1); X-Mod's view has seven
+    return n >= kVanillaPlates && same == n ? 0 : 1;
 }
 
 } // namespace
 
+// A database mod's view (Reign of Terror, DeathGrimDawn): the catalogue built from the base game
+// plus the mod's own layer - records, names, icons - through the DLL's start-up path with a
+// groups file, against the fixtures tools\build_catalogue.py + pack_catalogue.py +
+// build_uniq_db.py cut from the same two folders (data\oracle\views\<tag>\, lists only). The mod
+// folder is only read; the outputs and the groups file go under outDir. Its own process, so the
+// peak working set is this one generation's.
+int dbMod(const std::string& modFolder, const std::string& dataDir, const std::string& outDir) {
+    const std::string game = gameDir();
+    if (game.empty()) return fail("UNIQUETAB_TEST_GAME_DIR is not set");
+    int g_failures = 0;
+    auto check = [&](bool ok, const std::string& what) {
+        std::printf("[test] %s: %s\n", ok ? "ok  " : "FAIL", what.c_str());
+        if (!ok) ++g_failures;
+    };
+    gen::ViewSpec v;
+    v.customDir = modFolder;
+    const std::string fixtures = dataDir + "\\oracle\\views\\" + v.tag();
+    CreateDirectoryA(outDir.c_str(), nullptr);
+    const char* names[4] = {"catalogue.bin", "uniq-records.txt", "uniq-pages.txt", "uniq-groups.txt"};
+    for (const char* n : names) DeleteFileA((outDir + "\\" + n).c_str());
+    DeleteFileA((outDir + "\\catalogue.stamp").c_str());
+    DeleteFileA((outDir + "\\uniquetab-groups.ini").c_str());
+    DeleteFileA((outDir + "\\uniquetab-groups.ini.old").c_str());
+    gen::GenInputs in;
+    in.groupsPath = outDir + "\\uniquetab-groups.ini";
+    // the groups file an earlier build wrote, unedited: renamed .old by this generation, which
+    // then groups by the built-in set alone (the fixtures)
+    std::string stock;
+    for (const char* p = utg::defaultGroupsIni(); *p; ++p) { if (*p == '\n') stock += '\r'; stock += *p; }
+    if (FILE* f = std::fopen(in.groupsPath.c_str(), "wb")) {
+        std::fwrite(stock.data(), 1, stock.size(), f);
+        std::fclose(f);
+    }
+    in.journals = {outDir + "\\uniq-items.jsonl", outDir + "\\uniq-items-hc.jsonl"};
+    DeleteFileA(in.journals[0].c_str());
+    DeleteFileA(in.journals[1].c_str());
+    gen::GenReport r;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = gen::ensureOutputsGuarded(game, outDir, outDir + "\\uniq-pages.arz", "", "EN", "",
+                                              r, nullptr, nullptr, &v, &in);
+    const long long ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    const double peak = peakWorkingSetMb();
+    if (!ok) return fail(("the " + v.name() + " view: " + r.error).c_str());
+    std::printf("[test] dbmod %s: %s\n", r.view.c_str(), r.summary.c_str());
+    std::printf("[test] dbmod %s: %s\n", r.view.c_str(), r.overlay.c_str());
+    std::printf("[test] dbmod %s: %s\n", r.view.c_str(), r.groups.c_str());
+    for (const std::string& w : r.warnings) std::printf("[test] dbmod warning: %s\n", w.c_str());
+    std::printf("[test] dbmod %s: %lld ms, own heap peak %.1f MB (the budget, 200 MB), process peak "
+                "%.1f MB (information)\n", r.view.c_str(), ms, r.ownPeakMb, peak);
+    check(r.generated && r.groups.find("the built-in groups (") == 0
+              && r.groups.find("is renamed " + in.groupsPath + ".old") != std::string::npos,
+          "the view generates with the built-in groups, the stock copy renamed .old and said so");
+    {
+        std::vector<std::uint8_t> old;
+        check(GetFileAttributesA(in.groupsPath.c_str()) == INVALID_FILE_ATTRIBUTES
+                  && readAll(in.groupsPath + ".old", old) && std::string(old.begin(), old.end()) == stock,
+              "no groups file is written; the .old holds the stock copy byte for byte");
+    }
+    check(r.ownPeakMb > 0.0 && r.ownPeakMb <= 200.0,
+          "the generation's own heap stays inside the 200 MB budget");
+    // the G lines, for the report
+    std::vector<std::uint8_t> gtxt;
+    if (readAll(outDir + "\\uniq-groups.txt", gtxt)) {
+        const std::string t(gtxt.begin(), gtxt.end());
+        std::size_t at = 0;
+        while ((at = t.find("\nG\t", at)) != std::string::npos) {
+            ++at;
+            std::string line = t.substr(at, t.find('\r', at) - at);
+            utg::GLine gl;
+            if (utg::parseGLine(line, gl))
+                std::printf("[test]   %-24s %-4s %5d  %dx%d cells %dx%d\n", gl.id.c_str(), gl.tag.c_str(),
+                            gl.count, gl.cols, gl.rows, gl.cellW, gl.cellH);
+        }
+    }
+    // the stamp: a second call is a stat per archive
+    gen::GenReport r2;
+    check(gen::ensureOutputsGuarded(game, outDir, outDir + "\\uniq-pages.arz", "", "EN", "", r2,
+                                    nullptr, nullptr, &v, &in) && r2.upToDate,
+          "the second call finds the stamp current (the built-in groups' hash is in it)");
+    // A USER'S FILE ADDS: one block of yours before the built-in ones - its group first, every
+    // built-in group still there, its records off their usual page, its bytes in the stamp.
+    {
+        const std::string udir = outDir + "-user";
+        CreateDirectoryA(udir.c_str(), nullptr);
+        for (const char* n : names) DeleteFileA((udir + "\\" + n).c_str());
+        DeleteFileA((udir + "\\catalogue.stamp").c_str());
+        gen::GenInputs uin = in;
+        uin.groupsPath = udir + "\\uniquetab-groups.ini";
+        uin.journals = {udir + "\\uniq-items.jsonl", udir + "\\uniq-items-hc.jsonl"};
+        DeleteFileA(uin.journals[0].c_str());
+        DeleteFileA(uin.journals[1].c_str());
+        if (FILE* f = std::fopen(uin.groupsPath.c_str(), "wb")) {
+            std::fprintf(f, "; mine\r\n[group my.legendary.rings]\r\nlabel = Legendary Rings\r\ntag = LRG\r\n"
+                            "class = ArmorJewelry_Ring\r\nrank = Legendary\r\nsource = base\r\n");
+            std::fclose(f);
+        }
+        gen::GenReport ur;
+        const bool uok = gen::ensureOutputsGuarded(game, udir, udir + "\\uniq-pages.arz", "", "EN", "",
+                                                   ur, nullptr, nullptr, &v, &uin);
+        std::printf("[test] dbmod %s user: %s; %s\n", ur.view.c_str(), ur.summary.c_str(), ur.groups.c_str());
+        std::vector<std::uint8_t> ug, fg;
+        readAll(udir + "\\uniq-groups.txt", ug);
+        readAll(outDir + "\\uniq-groups.txt", fg);
+        const std::string ugt(ug.begin(), ug.end()), fgt(fg.begin(), fg.end());
+        auto countOf = [](const std::string& t, const char* id) {
+            std::size_t at = 0;
+            while ((at = t.find("\nG\t", at)) != std::string::npos) {
+                ++at;
+                utg::GLine gl;
+                if (utg::parseGLine(t.substr(at, t.find('\r', at) - at), gl) && gl.id == id) return gl.count;
+            }
+            return -1;
+        };
+        const int mine = countOf(ugt, "my.legendary.rings"), ringsBefore = countOf(fgt, "ring"),
+                  ringsAfter = countOf(ugt, "ring");
+        check(uok && ur.groups.find("groups from " + uin.groupsPath + ": ") == 0
+                  && ur.groups.find(" + 1 of yours (0 built-in") != std::string::npos,
+              "a user's file is merged in front of the built-in groups (" + ur.groups + ")");
+        check(ugt.find("\nG\t0\tLegendary Rings\t") != std::string::npos && mine > 0 && ringsAfter > 0
+                  && mine + ringsAfter == ringsBefore && countOf(ugt, "head") == countOf(fgt, "head"),
+              "its group comes first and takes its records off Rings (" + std::to_string(mine) + " + " +
+                  std::to_string(ringsAfter) + " = " + std::to_string(ringsBefore) + "); the built-in groups stay");
+        std::vector<std::uint8_t> st;
+        readAll(udir + "\\catalogue.stamp", st);
+        check(std::string(st.begin(), st.end()).find("+user:") != std::string::npos, "the user's bytes are in the stamp");
+    }
+    // NOT SHOWN: a journal owns a base Rare helm the rule never admits (collect_mi=0), and a
+    // record no database has. Neither is on a page and there is no Retired group; the report
+    // counts both and its warning names them; the journals are not stamp inputs. The groups file
+    // in this folder does not parse: one warning naming its line, and the built-in groups.
+    {
+        gen::ArzDatabase base;
+        std::string berr;
+        std::string helm;
+        if (base.loadGame(game, &berr)) {
+            gen::ArzRecord rec;
+            for (const auto& w : base.winners()) {
+                const gen::ArzEntry& e = *w.second;
+                if (e.key.compare(0, 14, "records/items/") != 0 || e.key.find("enemygear") != std::string::npos) continue;
+                if (!base.archives()[w.first].decode(e, rec)) continue;
+                if (rec.str("Class") == "ArmorProtective_Head" && rec.str("itemClassification") == "Rare" &&
+                    !rec.str("bitmap").empty()) { helm = e.name; break; }
+            }
+        }
+        check(!helm.empty(), "the base game has a Rare helm to own (collect_mi=0: not admitted)");
+        const std::string jdir = outDir + "-notshown";
+        CreateDirectoryA(jdir.c_str(), nullptr);
+        for (const char* n : names) DeleteFileA((jdir + "\\" + n).c_str());
+        DeleteFileA((jdir + "\\catalogue.stamp").c_str());
+        gen::GenInputs rin = in;
+        // collect_mi=0 for this case: with the flag on (the default) every Rare helm is an MI the
+        // rule admits; off, an owned one is exactly the record the rule no longer admits
+        rin.collectMi = false;
+        rin.groupsPath = jdir + "\\uniquetab-groups.ini";
+        if (FILE* f = std::fopen(rin.groupsPath.c_str(), "wb")) {
+            std::fprintf(f, "[group head]\r\nlabel = Helms\r\nbogus = 1\r\n");
+            std::fclose(f);
+        }
+        rin.journals = {jdir + "\\uniq-items.jsonl", jdir + "\\uniq-items-hc.jsonl"};
+        if (FILE* f = std::fopen(rin.journals[0].c_str(), "wb")) {
+            std::fprintf(f, "{\"journal\":\"grim dawn uniquetab\",\"format\":2}\r\n");
+            std::fprintf(f, "{\"record\":\"%s\",\"count\":1}\r\n", helm.c_str());
+            std::fprintf(f, "{\"record\":\"records/items/no/such/record.dbr\",\"count\":2}\r\n");
+            std::fclose(f);
+        }
+        DeleteFileA(rin.journals[1].c_str());
+        gen::GenReport rr;
+        const bool rok = gen::ensureOutputsGuarded(game, jdir, jdir + "\\uniq-pages.arz", "", "EN", "",
+                                                   rr, nullptr, nullptr, &v, &rin);
+        std::printf("[test] dbmod %s not shown: %s; %s\n", rr.view.c_str(), rr.summary.c_str(), rr.groups.c_str());
+        std::vector<std::uint8_t> recs;
+        readAll(jdir + "\\uniq-records.txt", recs);
+        const std::string rtxt = utg::normPath(std::string(recs.begin(), recs.end()));
+        check(rok && rr.notShown == 2 && rtxt.find(utg::normPath(helm) + "\r\n") == std::string::npos &&
+                  rr.groups.find(", 2 owned not shown") != std::string::npos,
+              "an owned record the rule does not admit is on no page; it and the record no database has "
+              "are the report's 2 owned not shown (" + helm + ")");
+        bool named = false;
+        for (const std::string& w : rr.warnings)
+            if (w.find("2 owned record(s) no group of this game takes - kept in the collection, not shown: ") == 0 &&
+                w.find(utg::normPath(helm)) != std::string::npos && w.find("records/items/no/such/record.dbr") != std::string::npos)
+                named = true;
+        check(named, "one warning names both");
+        std::vector<std::uint8_t> gt;
+        readAll(jdir + "\\uniq-groups.txt", gt);
+        const std::string gtx(gt.begin(), gt.end());
+        check(gtx.find("\tretired\t") == std::string::npos && gtx.find("\tRetired\t") == std::string::npos,
+              "no Retired G line");
+        bool refused = false;
+        for (const std::string& w : rr.warnings)
+            if (w.find("uniquetab-groups.ini is ignored") != std::string::npos && w.find("line 3") != std::string::npos)
+                refused = true;
+        check(refused && rr.groups.find("the built-in groups") == 0,
+              "a groups file that does not parse is one warning naming its line, and the built-in groups");
+        std::vector<std::uint8_t> st;
+        readAll(jdir + "\\catalogue.stamp", st);
+        const std::string stt(st.begin(), st.end());
+        check(stt.find("\ngroups=builtin:") != std::string::npos && stt.find("+user:") == std::string::npos,
+              "the stamp says the built-in groups alone were used");
+        DeleteFileA(rin.journals[0].c_str());
+        gen::GenReport r3;
+        check(gen::ensureOutputsGuarded(game, jdir, jdir + "\\uniq-pages.arz", "", "EN", "", r3,
+                                        nullptr, nullptr, &v, &rin) && r3.upToDate,
+              "the journals are not stamp inputs (a changed journal does not regenerate)");
+    }
+    if (GetFileAttributesA((fixtures + "\\uniq-groups.txt").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::printf("[test] dbmod %s: SKIPPED the fixture comparison - %s holds no fixtures\n",
+                    r.view.c_str(), fixtures.c_str());
+        return g_failures ? 1 : 0;
+    }
+    for (const char* n : names) {
+        std::vector<std::uint8_t> a, b;
+        const bool have = readAll(outDir + "\\" + n, a) && readAll(fixtures + "\\" + n, b);
+        std::printf("[test] dbmod %s: %s %s (%zu B)\n", r.view.c_str(), n,
+                    have && a == b ? "byte-identical to the Python reference" : "DIFFERS", a.size());
+        check(have && a == b, std::string(n) + " of the " + v.name() + " view equals the fixture");
+    }
+    return g_failures ? 1 : 0;
+}
+
+// ---- monster infrequents (collect_mi) -------------------------------------------------------
+// --mi <data dir> <out dir>: the vanilla catalogue and pages with the flag ON (the default)
+// against the Python reference data\oracle\ (build_catalogue.py --collect-mi,
+// pack_catalogue.py, build_uniq_db.py --collect-mi): catalogue.bin and the three lists byte for
+// byte; the rule's counts (every Rare equipment record: 2,909 = the census's 2,393 + the 466
+// faction-store + the 50 blacksmith-crafted rares); every MI after the uniques of its group,
+// in the bin and on the pages; the KIND mark read back through the model (catIsMi). Then the
+// NOT-SHOWN case with a synthetic journal owning two MIs: the flag OFF - neither in the catalogue,
+// no Retired group, the pages the flag-off oracle's byte for byte (a journal changes nothing);
+// the flag ON - both on their slot pages. Then the stamp: a
+// generation with the flag ON writes "collect_mi=1", a second call is current, the flag OFF
+// regenerates once and writes the flag-off oracle's four files (data\oracle\nomi\) byte for byte -
+// the pin on the flag-off path.
+namespace mi {
+
+bool miOrderOk(const gdut::Catalogue& c, std::size_t* mis, std::string* why) {
+    *mis = 0;
+    for (int gi = 0; gi < gdut::kSlotGroupCount; ++gi) {
+        const gdut::GroupRange r = c.groupRange(static_cast<gdut::SlotGroup>(gi));
+        bool seenMi = false;
+        for (std::uint32_t i = r.first; i < r.first + r.count; ++i) {
+            const gdut::ItemView& it = c.item(i);
+            if (gdut::catIsMi(it)) { seenMi = true; ++*mis; continue; }
+            if (seenMi) { *why = std::string(it.record) + " (a unique) after an MI in its group"; return false; }
+        }
+    }
+    return true;
+}
+
+// The records of uniq-groups.txt per group id, in page order (E lines).
+std::map<std::string, std::vector<std::string>> groupRecords(const std::string& text) {
+    std::map<std::string, std::vector<std::string>> out;
+    std::string cur;
+    std::size_t at = 0;
+    while (at < text.size()) {
+        std::size_t nl = text.find('\n', at);
+        if (nl == std::string::npos) nl = text.size();
+        std::string line = text.substr(at, nl - at);
+        at = nl + 1;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.compare(0, 2, "G\t") == 0) {
+            utg::GLine gl;
+            cur = utg::parseGLine(line, gl) ? gl.id : std::string();
+        } else if (line.compare(0, 2, "E\t") == 0 && !cur.empty()) {
+            out[cur].push_back(utg::normPath(line.substr(line.rfind('\t') + 1)));
+        }
+    }
+    return out;
+}
+
+void printGLines(const std::string& text, const char* who) {
+    std::size_t at = 0;
+    while ((at = text.find("\nG\t", at)) != std::string::npos) {
+        ++at;
+        utg::GLine gl;
+        if (utg::parseGLine(text.substr(at, text.find('\r', at) - at), gl))
+            std::printf("[test]   %s %-12s %-4s %5d  %2dx%-2d cells %dx%d\n", who, gl.id.c_str(),
+                        gl.tag.c_str(), gl.count, gl.cols, gl.rows, gl.cellW, gl.cellH);
+    }
+}
+
+int vanilla(const std::string& dataDir, const std::string& outDir) {
+    const std::string game = gameDir();
+    if (game.empty()) return fail("UNIQUETAB_TEST_GAME_DIR is not set");
+    int rc = 0;
+    auto ok = [&](bool c, const std::string& what) {
+        std::printf("[test] %s: %s\n", c ? "ok  " : "FAIL", what.c_str());
+        if (!c) rc = 1;
+    };
+    CreateDirectoryA(outDir.c_str(), nullptr);
+    const std::string fx = dataDir + "\\oracle";            // the flag-on cut (the shipped default)
+    const std::string fxOff = dataDir + "\\oracle\\nomi";   // the flag-off cut
+    gen::GameData g;
+    std::string err;
+    if (!g.load(game, "EN", &err)) return fail(err.c_str());
+    // ---- the flag ON: the catalogue
+    std::vector<gen::CatalogueItem> items;
+    std::vector<std::string> warnings;
+    if (!gen::collectItems(g, items, warnings, &err, true)) return fail(err.c_str());
+    std::vector<std::uint8_t> bin;
+    gen::CatalogueStats st;
+    if (!gen::packCatalogue(items, bin, &st, &err)) return fail(err.c_str());
+    std::size_t faction = 0, crafted = 0, rareEquip = 0;
+    for (const gen::CatalogueItem& it : items) {
+        if (!it.isMi) continue;
+        const std::string low = utg::normPath(it.record);
+        if (low.find("/faction/") != std::string::npos) ++faction;
+        gen::ArzRecord rec;
+        if (g.record(low, rec)) {
+            std::string fd = rec.str("FileDescription").substr(0, 7);
+            for (char& c : fd) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
+            if (fd == "crafted") ++crafted;
+        }
+        if (it.isEquipment && it.classification == "Rare") ++rareEquip;
+    }
+    std::printf("[test] mi: collect_mi=1 vanilla catalogue %zu items (%zu monster infrequents), %zu B\n",
+                st.items, st.mi, st.bytes);
+    ok(st.mi == 2909 && rareEquip == st.mi,
+       "2,909 monster infrequents (every Rare equipment record: the census's 2,393 + 466 faction + 50 crafted) - " +
+           std::to_string(st.mi));
+    ok(faction == 466 && crafted == 50,
+       "the faction-store rares (" + std::to_string(faction) + ") and the blacksmith-crafted ones (" +
+           std::to_string(crafted) + ") are collected too");
+    ok(st.items == 4392 + st.mi, "the flag-off catalogue's 4,392 items + the MIs");
+    {
+        std::vector<std::uint8_t> want;
+        if (!readAll(fx + "\\catalogue.bin", want)) { ok(false, "data\\oracle\\catalogue.bin is there"); }
+        else if (compareBytes("mi catalogue.bin", bin, want)) rc = 1;
+        else std::printf("[test] mi: catalogue.bin byte-identical to the Python reference (%zu B)\n", bin.size());
+        gdut::Catalogue c;
+        std::string why;
+        std::size_t mis = 0;
+        ok(c.loadFromMemory(bin, &why), "the flag-on catalogue.bin loads through the model (format 1)");
+        const bool ordered = miOrderOk(c, &mis, &why);
+        ok(ordered && mis == st.mi,
+           "catIsMi marks " + std::to_string(mis) + " entries, each after the uniques of its group" +
+               (why.empty() ? "" : " - " + why));
+    }
+    // ---- the flag ON: the pages
+    std::string derr;
+    const utg::GroupSet* def = gen::defaultGroupSet(&derr);
+    if (!def) return fail(derr.c_str());
+    gen::GroupsInput on;
+    on.set = def;
+    on.viewKeys = utg::viewKeysFor("vanilla");
+    on.viewKeys.push_back("collect_mi");
+    gen::PagesOutput po;
+    if (!gen::generatePages(g, items, po, &err, nullptr, &on)) return fail(err.c_str());
+    std::printf("[test] mi: pages %zu records on %zu pages in %zu groups (%zu skipped, no icon)\n",
+                po.itemCount, po.pageCount, po.groupList.size(), po.skipped);
+    printGLines(po.groups, "mi");
+    const char* names[3] = {"uniq-records.txt", "uniq-pages.txt", "uniq-groups.txt"};
+    const std::string* texts[3] = {&po.records, &po.pages, &po.groups};
+    for (int i = 0; i < 3; ++i) {
+        std::vector<std::uint8_t> got(texts[i]->begin(), texts[i]->end()), want;
+        if (FILE* f = std::fopen((outDir + "\\" + names[i]).c_str(), "wb")) {
+            std::fwrite(got.data(), 1, got.size(), f);
+            std::fclose(f);
+        }
+        if (!readAll(fx + "\\" + names[i], want)) { ok(false, std::string("data\\oracle\\") + names[i] + " is there"); continue; }
+        if (compareBytes((std::string("mi ") + names[i]).c_str(), got, want)) rc = 1;
+        else std::printf("[test] mi: %s byte-identical to the Python reference\n", names[i]);
+    }
+    // the uniques first, then the MIs, on every slot page
+    // (the page order is rank, then name: Rare after Epic. The one Common record - the curated
+    // Leovinus' Ring - ranks after Rare and so stays the last box of Rings, as it always was.)
+    std::unordered_set<std::string> miSet, extras;
+    for (const gen::CatalogueItem& it : items) {
+        if (it.isMi) miSet.insert(utg::normPath(it.record));
+        if (it.isExtra) extras.insert(utg::normPath(it.record));
+    }
+    const auto perGroup = groupRecords(po.groups);
+    std::size_t paged = 0, badOrder = 0, groupsWithMi = 0;
+    for (const auto& kv : perGroup) {
+        bool seenMi = false, any = false;
+        for (const std::string& r : kv.second) {
+            if (miSet.count(r)) { seenMi = any = true; ++paged; continue; }
+            if (seenMi && !extras.count(r)) {
+                if (!badOrder) std::printf("[test]   %s: %s after an MI\n", kv.first.c_str(), r.c_str());
+                ++badOrder;
+            }
+        }
+        if (any) ++groupsWithMi;
+    }
+    ok(badOrder == 0 && groupsWithMi == 23 && paged == st.mi,
+       "the 23 slot groups take MIs, each after its uniques (" + std::to_string(paged) + " MIs paged in " +
+           std::to_string(groupsWithMi) + " groups; Leovinus' Ring stays last in Rings)");
+    // ---- NOT SHOWN: the flag OFF, a journal owning two MIs (their rows stay; no page shows them)
+    std::string helm, ring;
+    for (const gen::CatalogueItem& it : items) {
+        if (!it.isMi || !it.bitmapFound) continue;
+        if (helm.empty() && it.slot == "head") helm = utg::normPath(it.record);
+        if (ring.empty() && it.slot == "ring") ring = utg::normPath(it.record);
+    }
+    const std::string journal =
+        "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":2}\n"
+        "{\"record\":\"" + helm + "\",\"count\":1,\"prefix\":\"records/items/lootaffixes/prefix/x.dbr\"}\n"
+        "{\"record\":\"" + ring + "\",\"count\":1}\n";
+    utg::JournalCounts jc;
+    ok(!helm.empty() && !ring.empty() && utg::scanJournalText(journal, jc, &err) && jc.counts.size() == 2,
+       "a synthetic journal owning two MIs (" + helm + ", " + ring + ")");
+    {
+        std::vector<gen::CatalogueItem> off;
+        std::vector<std::string> w2;
+        ok(gen::collectItems(g, off, w2, &err, false), "the flag-off rule runs");
+        std::size_t offMi = 0;
+        bool ownedIn = false;
+        for (const gen::CatalogueItem& it : off) {
+            if (it.isMi) ++offMi;
+            const std::string k = utg::normPath(it.record);
+            if (k == helm || k == ring) ownedIn = true;
+        }
+        ok(off.size() == 4392 && offMi == 0 && !ownedIn,
+           "the flag-off catalogue holds no MI, the two owned ones neither: " + std::to_string(off.size()) + " items");
+        gen::GroupsInput offIn;
+        offIn.set = def;
+        offIn.viewKeys = utg::viewKeysFor("vanilla");
+        gen::PagesOutput rp;
+        ok(gen::generatePages(g, off, rp, &err, nullptr, &offIn), "the flag-off pages generate");
+        bool noRet = true;
+        for (const auto& gr : rp.groupList) noRet = noRet && gr.id != "retired";
+        std::vector<std::uint8_t> og;
+        readAll(fxOff + "\\uniq-groups.txt", og);
+        const std::string oracleGroups(og.begin(), og.end());
+        ok(noRet && rp.groups == oracleGroups,
+           "no Retired group: the flag-off pages are the flag-off oracle's uniq-groups.txt byte for byte");
+        gen::PagesOutput np;
+        gen::GroupsInput onIn = on;
+        std::vector<gen::CatalogueItem> onItems;
+        ok(gen::collectItems(g, onItems, w2, &err, true) && onItems.size() == items.size(),
+           "the flag-on rule: the fixture's catalogue");
+        const bool made = gen::generatePages(g, onItems, np, &err, nullptr, &onIn);
+        const std::string nrec = utg::normPath(np.records);
+        ok(made && np.groups == po.groups && nrec.find(helm + "\r\n") != std::string::npos &&
+               nrec.find(ring + "\r\n") != std::string::npos,
+           "with the flag ON the same MIs are on their slot pages (the flag-on fixture)");
+    }
+    // ---- THE STAMP: the flag is an input
+    {
+        const std::string mod = outDir + "\\gen-mod";
+        CreateDirectoryA(mod.c_str(), nullptr);
+        const char* outs[5] = {"catalogue.bin", "uniq-records.txt", "uniq-pages.txt", "uniq-groups.txt", "catalogue.stamp"};
+        for (const char* n : outs) DeleteFileA((mod + "\\" + n).c_str());
+        DeleteFileA((mod + "\\uniq-pages.arz").c_str());
+        gen::ViewSpec v;   // vanilla
+        gen::GenInputs gi;
+        gi.collectMi = true;
+        gen::GenReport r1, r2, r3;
+        const bool g1 = gen::ensureOutputsGuarded(game, mod, mod + "\\uniq-pages.arz", "", "EN", "", r1,
+                                                  nullptr, nullptr, &v, &gi);
+        std::printf("[test] mi: ensure collect_mi=1: %s\n", r1.summary.c_str());
+        std::printf("[test] mi: own heap peak %.1f MB (the budget, 200 MB), process peak %.1f MB\n",
+                    r1.ownPeakMb, peakWorkingSetMb());
+        std::vector<std::uint8_t> sb, cb;
+        readAll(mod + "\\catalogue.stamp", sb);
+        readAll(mod + "\\catalogue.bin", cb);
+        const std::string stamp(sb.begin(), sb.end());
+        ok(g1 && r1.generated && stamp.find("\ncollect_mi=1\n") != std::string::npos,
+           "a generation with the flag ON writes collect_mi=1 into catalogue.stamp");
+        std::vector<std::uint8_t> want;
+        readAll(fx + "\\catalogue.bin", want);
+        ok(cb == want && r1.ownPeakMb > 0.0 && r1.ownPeakMb <= 200.0,
+           "its catalogue.bin is the flag-on fixture, its own heap inside 200 MB");
+        ok(gen::ensureOutputsGuarded(game, mod, mod + "\\uniq-pages.arz", "", "EN", "", r2, nullptr,
+                                     nullptr, &v, &gi) && r2.upToDate,
+           "a second call with the flag ON is current");
+        gi.collectMi = false;
+        const bool g3 = gen::ensureOutputsGuarded(game, mod, mod + "\\uniq-pages.arz", "", "EN", "", r3,
+                                                  nullptr, nullptr, &v, &gi);
+        ok(g3 && r3.generated && !r3.upToDate, "the flag OFF regenerates once (" + r3.reason + ")");
+        bool same = true;
+        for (int i = 0; i < 4; ++i) {
+            std::vector<std::uint8_t> a, b;
+            same = same && readAll(mod + "\\" + outs[i], a) && readAll(fxOff + "\\" + outs[i], b) && a == b;
+        }
+        std::vector<std::uint8_t> s3;
+        readAll(mod + "\\catalogue.stamp", s3);
+        ok(same && std::string(s3.begin(), s3.end()).find("collect_mi") == std::string::npos,
+           "and writes the flag-off oracle's four files byte for byte, a stamp with no collect_mi line");
+    }
+    return rc;
+}
+
+// --mi-dbmod <mod folder> <data dir> <out dir>: a custom game's view with the flag ON (the default)
+// - the counts, the own heap against the 200 MB budget, and, where data\oracle\views\<tag>\ holds the
+// Python cut (Reign of Terror, DeathGrimDawn), the four files byte for byte; then the flag OFF:
+// the view regenerates once and, where data\oracle\nomi\views\<tag>\ holds the flag-off cut, writes
+// its four files byte for byte (the pin on the flag-off path of a database mod).
+int dbmod(const std::string& modFolder, const std::string& dataDir, const std::string& outDir) {
+    const std::string game = gameDir();
+    if (game.empty()) return fail("UNIQUETAB_TEST_GAME_DIR is not set");
+    int rc = 0;
+    auto ok = [&](bool c, const std::string& what) {
+        std::printf("[test] %s: %s\n", c ? "ok  " : "FAIL", what.c_str());
+        if (!c) rc = 1;
+    };
+    gen::ViewSpec v;
+    v.customDir = modFolder;
+    CreateDirectoryA(outDir.c_str(), nullptr);
+    const char* names[4] = {"catalogue.bin", "uniq-records.txt", "uniq-pages.txt", "uniq-groups.txt"};
+    for (const char* n : names) DeleteFileA((outDir + "\\" + n).c_str());
+    DeleteFileA((outDir + "\\catalogue.stamp").c_str());
+    gen::GenInputs in;
+    in.collectMi = true;
+    gen::GenReport r;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool done = gen::ensureOutputsGuarded(game, outDir, outDir + "\\uniq-pages.arz", "", "EN", "",
+                                                r, nullptr, nullptr, &v, &in);
+    const long long ms = (long long)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    if (!done) return fail(("the " + v.name() + " view with collect_mi=1: " + r.error).c_str());
+    std::printf("[test] mi-dbmod %s: %s\n", r.view.c_str(), r.summary.c_str());
+    std::printf("[test] mi-dbmod %s: %s\n", r.view.c_str(), r.overlay.c_str());
+    for (const std::string& w : r.warnings) std::printf("[test] mi-dbmod warning: %s\n", w.c_str());
+    std::printf("[test] mi-dbmod %s: %lld ms, own heap peak %.1f MB (the budget, 200 MB), process peak "
+                "%.1f MB (information)\n", r.view.c_str(), ms, r.ownPeakMb, peakWorkingSetMb());
+    ok(r.ownPeakMb > 0.0 && r.ownPeakMb <= 200.0, "the generation's own heap with collect_mi=1 stays inside 200 MB");
+    std::vector<std::uint8_t> gt;
+    readAll(outDir + "\\uniq-groups.txt", gt);
+    printGLines(std::string(gt.begin(), gt.end()), "mi-dbmod");
+    const std::string fx = dataDir + "\\oracle\\views\\" + v.tag();
+    const std::string fxOff = dataDir + "\\oracle\\nomi\\views\\" + v.tag();
+    if (GetFileAttributesA((fx + "\\uniq-groups.txt").c_str()) == INVALID_FILE_ATTRIBUTES ||
+        GetFileAttributesA((fxOff + "\\uniq-groups.txt").c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::printf("[test] mi-dbmod %s: no fixture (Reign of Terror and DeathGrimDawn have them) - counts and budget only\n",
+                    r.view.c_str());
+        return rc;
+    }
+    for (const char* n : names) {
+        std::vector<std::uint8_t> a, b;
+        const bool have = readAll(outDir + "\\" + n, a) && readAll(fx + "\\" + n, b);
+        ok(have && a == b, std::string(n) + " of the " + v.name() + " view with collect_mi=1 equals the Python cut (" +
+                               std::to_string(a.size()) + " B)");
+    }
+    // the flag OFF: one regeneration (the stamp), the flag-off cut byte for byte
+    in.collectMi = false;
+    gen::GenReport r2;
+    const bool off = gen::ensureOutputsGuarded(game, outDir, outDir + "\\uniq-pages.arz", "", "EN", "",
+                                               r2, nullptr, nullptr, &v, &in);
+    ok(off && r2.generated && !r2.upToDate, "the " + v.name() + " view with collect_mi=0 regenerates once");
+    std::printf("[test] mi-dbmod %s collect_mi=0: %s; own heap peak %.1f MB\n", r2.view.c_str(),
+                r2.summary.c_str(), r2.ownPeakMb);
+    for (const char* n : names) {
+        std::vector<std::uint8_t> a, b;
+        const bool have = readAll(outDir + "\\" + n, a) && readAll(fxOff + "\\" + n, b);
+        ok(have && a == b, std::string(n) + " of the " + v.name() + " view with collect_mi=0 equals the flag-off cut (" +
+                               std::to_string(a.size()) + " B)");
+    }
+    return rc;
+}
+
+}  // namespace mi
+
 int main(int argc, char** argv) {
+    if (argc >= 4 && std::string(argv[1]) == "--mi") return mi::vanilla(argv[2], argv[3]);
+    if (argc >= 5 && std::string(argv[1]) == "--mi-dbmod") return mi::dbmod(argv[2], argv[3], argv[4]);
     if (argc >= 4 && std::string(argv[1]) == "--ensure") return ensure(argv[2], argv[3]);
+    if (argc >= 4 && std::string(argv[1]) == "--layout-plates") return layoutPlates(argv[2], argv[3]);
+    if (argc >= 5 && std::string(argv[1]) == "--layout-compare")
+        return layoutCompare(argv[2], argv[3], argv[4]);
     if (argc >= 2 && std::string(argv[1]) == "--geometry") return geometry();
     if (argc >= 3 && std::string(argv[1]) == "--view") return viewPass(argv[2]);
+    if (argc >= 5 && std::string(argv[1]) == "--dbmod") return dbMod(argv[2], argv[3], argv[4]);
     if (argc >= 3 && std::string(argv[1]) == "--plates")
         return plates(argv[2], argc >= 4 ? argv[3] : "", argc >= 5 ? argv[4] : "");
     if (argc >= 3 && std::string(argv[1]) == "--overlay")

@@ -149,9 +149,9 @@ if errorlevel 1 set RC=1
 if errorlevel 1 set RC=1
 
 rem ---- case (f): a FORMAT-2 file is UPGRADED to format 3 without loss --------------------------
-rem The fixture is a COPY of the user's live format-2 journal when this machine has one (that is
-rem the file on their disk right now, 358 entries) and a small synthetic one otherwise. The
-rem original is only ever READ - copied out, never opened for writing, never moved, never deleted.
+rem The fixture is a COPY of the format-2 journal installed on this machine when there is one,
+rem and a small synthetic one otherwise. The original is only ever READ - copied out, never
+rem opened for writing, never moved, never deleted.
 set "UP=%OUT%\journal-upgrade"
 if exist "%UP%" rd /s /q "%UP%"
 mkdir "%UP%"
@@ -194,10 +194,10 @@ if errorlevel 1 set RC=1
 "%OUT%\test_journal.exe" --case-noreconcile
 if errorlevel 1 set RC=1
 
-rem ---- case (i): THE USER'S BUG - a journal full of history and an EMPTY page ------------------
+rem ---- case (i): a journal full of history and an EMPTY page -----------------------------------
 rem Every entry checked and none of them on the page: the guard must ALLOW the uninstall while the
-rem file still holds every line. This is the regression for "356 item(s) are still stored" said of
-rem a page that held six.
+rem file still holds every line. Counting every stale line as stored would refuse with hundreds
+rem of items "still stored" for a page that holds six.
 set "ST=%OUT%\journal-allstale"
 if exist "%ST%" rd /s /q "%ST%"
 mkdir "%ST%"
@@ -255,7 +255,7 @@ set "UNIQUETAB_OUT=%CSVD%"
 if errorlevel 1 set RC=1
 
 rem ---- case (k): export_csv AS A MODE ---------------------------------------------------------
-rem The fixture is the shape of the user's own journal - one entry stored, one not stored (the
+rem The fixture is the shape of a real journal - one entry stored, one not stored (the
 rem stale history a refund left behind) and one nobody has reconciled yet. Proves export_csv=1
 rem exports the collection INCLUDING the unreconciled entry, that =2 still exports everything
 rem with the not-stored rows last, that =0 writes nothing and deletes nothing, and that an out of
@@ -273,7 +273,7 @@ rem ---- case (l): the FRESH INSTALL -------------------------------------------
 rem No fixture: an empty folder, i.e. a machine that has never deposited anything. Proves that
 rem changing export_csv writes the CSV and does NOT create a uniq-items.jsonl (the mode change
 rem arms the CSV-only pass, never the journal writer), and that an empty collection really is
-rem the header line on its own - both of them promises the USER-GUIDE makes about this exact
+rem the header line on its own - both of them promises the README makes about this exact
 rem machine state.
 set "CSVE=%OUT%\journal-csvempty"
 if exist "%CSVE%" rd /s /q "%CSVE%"
@@ -316,7 +316,7 @@ if errorlevel 1 set RC=1
 if exist "%GDSE%\uniq-items.jsonl" (echo [test] FAIL: the empty-journal .gds case created a journal file & set RC=1)
 
 rem ---- one journal set per custom game ----------------------------------------------------------
-rem A custom game's journal, exports, prune copy and rescue report stay in views\custom-<name>\;
+rem A custom game's journal, exports, prune copy and rescue report stay in mods\<name>\;
 rem the start-up files come back byte-identical.
 set "JVIEW=%OUT%\journal-views"
 if exist "%JVIEW%" rd /s /q "%JVIEW%"
@@ -329,15 +329,41 @@ rem custom game's is left with a stored entry written AFTER its report, so it mu
 del /q "%JVIEW%\uniq-items.jsonl" 2>nul
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JVIEW%" >"%JVIEW%\guard.txt"
 set GRC=%ERRORLEVEL%
-findstr /c:"(custom-lootascension)" "%JVIEW%\guard.txt" >nul
+findstr /c:"(mods\\lootascension)" "%JVIEW%\guard.txt" >nul
 if errorlevel 1 (echo [test] FAIL: the guard did not look at the custom game's journal & set RC=1)
 rem ... and with the custom game's journal gone as well, it allows.
-del /q "%JVIEW%\views\custom-lootascension\uniq-items.jsonl" 2>nul
+del /q "%JVIEW%\mods\lootascension\uniq-items.jsonl" 2>nul
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JVIEW%" >nul
 set GRC2=%ERRORLEVEL%
 echo [test] guard over a custom game's journal = %GRC% (1 = refuses), with no journal left = %GRC2% (0 = allows)
 if not "%GRC%"=="1" (echo [test] FAIL: the guard allowed an uninstall over a custom game's collection & set RC=1)
 if not "%GRC2%"=="0" (echo [test] FAIL: the guard refused with no journal present & set RC=1)
+
+rem ---- the folder move: views\ -> mods\ ----------------------------------------------------
+rem The old layout (views\custom-<name>\, views\basemods+custom-<name>\) renamed once to
+rem mods\<name>\ and mods\<name>\basemods\, under the mod folder and under journal_dir; a target
+rem that exists is never merged into; views\ goes only when empty; nothing else moves.
+set "JFOLD=%OUT%\journal-folders"
+if exist "%JFOLD%" rd /s /q "%JFOLD%"
+mkdir "%JFOLD%"
+set "UNIQUETAB_OUT=%JFOLD%"
+"%OUT%\test_journal.exe" --case-folders
+if errorlevel 1 set RC=1
+rem (findstr reads a backslash as an escape even with /c:, hence the doubled ones.)
+rem The uninstall guard scans the OLD layout as well, forever: a collection left in
+rem views\custom-<name>\ (a refused move, a downgrade) still refuses. No start-up journal, a
+rem stored entry in views\custom-legacy\ and no report beside it.
+set "JOLD=%OUT%\journal-oldlayout"
+if exist "%JOLD%" rd /s /q "%JOLD%"
+mkdir "%JOLD%\views\custom-legacy"
+copy /b /y "%JVIEW%\mods\lootascension\uniq-items.jsonl.pruned-*" "%JOLD%\views\custom-legacy\uniq-items.jsonl" >nul 2>nul
+if not exist "%JOLD%\views\custom-legacy\uniq-items.jsonl" (echo [test] FAIL: no journal to copy for the old-layout guard case & set RC=1)
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JOLD%" >"%JOLD%\guard.txt"
+set GRC3=%ERRORLEVEL%
+findstr /c:"(views\\custom-legacy)" "%JOLD%\guard.txt" >nul
+if errorlevel 1 (echo [test] FAIL: the guard did not look at the old views\custom-legacy folder & set RC=1)
+echo [test] guard over an old-layout custom game's journal = %GRC3% (1 = refuses)
+if not "%GRC3%"=="1" (echo [test] FAIL: the guard allowed an uninstall over an old-layout collection & set RC=1)
 
 rem ---- case (m): a FORMAT-3 file, the shape an existing install has -----------------------------
 rem Format 3 with 7 entries, every one of them an item the ENGINE reagent map holds. The upgrade

@@ -55,7 +55,8 @@ echo [undeploy] game "%GAME%"
 rem ---- THE SAFETY INTERLOCK --------------------------------------------------------------------
 rem The collection is uniquetab\uniq-items.jsonl and the items it names are held in the mod's own
 rem private table - with the mod gone they are not in the game at all. tools\journal_guard.ps1
-rem exits 1 while that journal, or a custom game's own under views\custom-<name>\, still holds
+rem exits 1 while that journal, or a custom game's own under mods\<name>\ (or the old
+rem views\custom-<name>\), still holds
 rem entries and no NEWER rescue-report.txt sits beside it.
 rem Use "undeploy.bat --force" to accept the loss.
 if defined FORCE (
@@ -71,9 +72,21 @@ if defined FORCE (
 
 rem ---- the mod folder ---------------------------------------------------------------------------
 rem Only the files the mod GENERATES (and older builds shipped) are deleted: the catalogue, its
-rem stamp, the three lists and the page overlay. The ini, the log, the collection and the exports
-rem are the user's, so the folder is left in place holding them; delete it by hand when you are
-rem done. views\ holds a custom game's collection beside its generated set and is never touched.
+rem stamp, the three lists and the page overlay. KEPT, because they are the user's: uniquetab.ini
+rem (the settings), uniquetab-buttons.ini (the buttons, written once with the game's groups, then
+rem yours - only its [unassigned] section is ever rewritten), uniquetab-groups.ini (optional,
+rem yours: the mod never writes it), uniquetab-groups.ini.old* (an unedited copy an older build
+rem wrote, renamed), uniquetab-text.ini.old* (an older build's words, folded into the buttons file
+rem and renamed; uniquetab-text.ini itself is no longer written), the collection
+rem (uniq-items*.jsonl, their prune copies), the exports (uniq-export*.gds, uniq-export.csv),
+rem rescue-report.txt, uniquetab.log and its archives. Also kept, though the mod writes it:
+rem uniquetab.state (where the tab was left - the group, the row, the OWN filter; deleting it only
+rem resets that). So the folder is left in place holding them; delete it by hand when you are done.
+rem mods\ holds one folder per custom game, mods\<name>\: its collection and exports, its own
+rem settings (uniquetab.ini) and buttons (uniquetab-buttons.ini), and the generated set,
+rem uniquetab.state and uniquetab.log (+ archives) of the game without /basemods; mods\<name>\basemods\
+rem holds the same game's /basemods generated set, state and log. It is never touched (nor is an
+rem old views\ folder an older build left).
 for %%N in (catalogue.bin catalogue.stamp uniq-pages.arz uniq-vanilla.arz uniq-records.txt uniq-pages.txt uniq-groups.txt) do (
     if exist "%MODDIR%\%%N" (
         del /q "%MODDIR%\%%N"
@@ -93,7 +106,7 @@ if exist "%MODDIR%\plates" (
 )
 rd "%MODDIR%" 2>nul
 if exist "%MODDIR%" (
-    echo [undeploy] "%MODDIR%" kept - it still holds your own files (the collection, the ini, the log^).
+    echo [undeploy] "%MODDIR%" kept - it still holds your own files (the collection, the ini files, the logs^).
 ) else (
     echo [undeploy] removed "%MODDIR%"
 )
@@ -103,19 +116,6 @@ for %%N in (catalogue.bin uniq.arz uniq-pages.arz uniq-vanilla.arz uniq-records.
     if exist "%GAMEDIR%\%%N" (
         del /q "%GAMEDIR%\%%N"
         if exist "%GAMEDIR%\%%N" (echo [undeploy] WARNING: could not delete "%GAMEDIR%\%%N") else (echo [undeploy] removed "%GAMEDIR%\%%N")
-    )
-)
-
-rem An installation that once ran the old build still has that build's own winmm.dll. It is
-rem taken away ONLY when it carries the old marker string; the loader, ReShade and anything else
-rem under that name are left alone. This is the last use of that marker.
-if exist "%GAMEDIR%\winmm.dll" (
-    findstr /m /c:GDUNIQUETAB_LANEA_HOOKDLL "%GAMEDIR%\winmm.dll" >nul 2>&1
-    if errorlevel 1 (
-        echo [undeploy] "%GAMEDIR%\winmm.dll" is not this mod - left alone
-    ) else (
-        del /q "%GAMEDIR%\winmm.dll"
-        if exist "%GAMEDIR%\winmm.dll" (echo [undeploy] WARNING: could not delete the older winmm.dll build of this mod) else (echo [undeploy] removed the older winmm.dll build of this mod)
     )
 )
 

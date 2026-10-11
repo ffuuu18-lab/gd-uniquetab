@@ -79,6 +79,11 @@ enum : std::uint16_t {
     Equipment      = 1u << 5,
     DefaultVisible = 1u << 6,  // Equipment || Relic
     HasBitmap      = 1u << 7,
+    // The KIND mark: a monster infrequent - an equipment record whose own itemClassification is
+    // Rare (the engine's MI symbol), admitted with collect_mi=1 or kept for a journal that owns it.
+    // A file written before the mark has the bit clear everywhere (no MI was ever admitted), so
+    // the format version stays 1: the loader never checked the flag bits it does not know.
+    MonsterInfrequent = 1u << 8,
 };
 }  // namespace ItemFlag
 
@@ -96,6 +101,11 @@ struct ItemView {
 
     bool has(std::uint16_t f) const noexcept { return (flags & f) != 0; }
 };
+
+// The catalogue entry's KIND: a monster infrequent (one roll per record - the store's cap) or
+// not (a unique, a relic, a blueprint ...). The one accessor every MI decision goes through
+// (ut_miroll.h's utCatIsMiOf), so no two places can disagree on what an MI is.
+inline bool catIsMi(const ItemView& e) noexcept { return e.has(ItemFlag::MonsterInfrequent); }
 
 struct SetView {
     std::string_view    name;     // localised set name
@@ -161,6 +171,14 @@ private:
     std::uint32_t m_relicCount = 0;
     std::uint32_t m_defaultVisibleCount = 0;
 };
+
+// The KIND of a record (its catalogue spelling, as uniq-records.txt and the overlay carry it):
+// true when the catalogue holds it with the MI mark. A record the catalogue does not hold is not
+// an MI. With collect_mi=0 the catalogue holds no MI at all (a stored one is not in it).
+inline bool catIsMi(const Catalogue& c, std::string_view record) noexcept {
+    const int i = c.indexOfRecord(record);
+    return i >= 0 && catIsMi(c.item(static_cast<std::size_t>(i)));
+}
 
 }  // namespace gdut
 

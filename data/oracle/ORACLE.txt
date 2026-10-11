@@ -14,8 +14,8 @@ The model suite (build_model.bat) loads catalogue.bin. src\ holds the sample .db
 tools\build_uniq_db.py dumps next to the archive it writes; plates\src\ holds the game's own
 caravan textures tools\make_plates.py paints over (see the README.txt there).
 
-Everything here is derived from the game's data, so none of it is in the public tree. To run the
-harness from there, rebuild it from your own copy of Grim Dawn 1.3.0.8, with GD_DIR naming that
+Everything here but templates\ is derived from the game's data, and none of it is in the public
+tree. To run the harness from there, rebuild it from your own copy of Grim Dawn 1.3.0.8, with GD_DIR naming that
 game folder, in this order:
 
     python tools\build_catalogue.py     catalogue.json, catalogue-stats.md
@@ -31,3 +31,20 @@ the harness runs, whatever version the installed game has moved on to.
 uniq-pages.json (the per-page manifest a full build_uniq_db.py run writes beside the .arz) is
 0.9 MB of derived data that no harness compares; catalogue.json is the 4 MB intermediate and is
 not committed.
+
+templates\<n>.ini are the groups templates earlier builds wrote as uniquetab-groups.ini, byte for
+byte (CRLF); n is the "earlier template n" of src\gen\ut_groups_default.h, whose list of stock
+copies recognises each one. They are the mod's own text, not the game's, and are never rebuilt:
+each is the raw string of that header in the build that wrote it. build_uniq_db.py
+--stock-templates copies them for the groups suite (tools\build_test_groups.bat), which proves
+every one is retired to .old; without them that part of the suite says SKIPPED. A later change
+of the built-in template adds the next number, cut the same way: the header's raw string with
+its line ends as CRLF.
+
+THE FLAG. uniquetab.ini's collect_mi defaults to 1, so the files above are the FLAG-ON cut
+(the monster infrequents collected: every Rare equipment record, faction-store and crafted rares
+included): build_catalogue.py and build_uniq_db.py are run with --collect-mi. The vanilla view then
+has six cell sizes, so plates\ holds six plates (make_plates.py reads uniq-groups.txt here). nomi\
+holds the FLAG-OFF cut (the four lists, the buttons file, catalogue-stats.md, the 32x128 plate only
+that view paints, and views\<tag>\ for the two database mods). nomi\README.txt gives the
+order to cut either.

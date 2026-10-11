@@ -13,9 +13,19 @@ catalogue.bin (item order is slot group, level requirement, name, record).
 
 Usage:
     python pack_catalogue.py [--in catalogue.json] [--out catalogue.bin] [--check]
+    python pack_catalogue.py --if-newer [--dry-run]
 
 --check re-packs into memory and compares against the file on disk instead of
 writing (exit 1 on a difference).
+
+--if-newer is build_model.bat's step 1: the json is the gitignored INTERMEDIATE and
+catalogue.bin is the committed truth, so a json that is NOT newer than the bin (a
+leftover from an older build_catalogue.py run, or a bin that a checkout or a merge
+has just replaced) is never packed over it - it prints "catalogue.json is older than
+catalogue.bin - not repacked" and exits 0. Only a json written after the bin is
+packed, and only when the packed bytes differ. --dry-run says what it would do and
+writes nothing. (Without the rule, a json left over from an older run would silently
+replace a newer committed catalogue with a smaller, stale one.)
 """
 
 from __future__ import annotations
@@ -121,9 +131,13 @@ SLOT_TO_GROUP = {
 # layout.h's kAllClassificationsMask then follows automatically - a C++ change, not this tool's.
 #
 # The curated inclusion list (build_catalogue.py's EXTRA_RECORDS) adds a `Common` entry -
-# Leovinus' Ring - for exactly the same reason, and it is narrowed the same way.
+# Leovinus' Ring - for exactly the same reason, and it is narrowed the same way. Blueprints
+# (ItemArtifactFormula) are collected at every classification too, so their `Magical`, `Rare`
+# and `Quest` words are narrowed the same way (catalogue_gen.cpp packCatalogue; Quest for a
+# blueprint only).
 CLASSIFICATION = {"Epic": 0, "Legendary": 1}
-CLASSIFICATION_NARROWED = {"Rare": 0, "Common": 0}
+CLASSIFICATION_NARROWED = {"Rare": 0, "Common": 0, "Magical": 0}
+CLASSIFICATION_NARROWED_FORMULA = {"Quest": 0}
 
 # item flags (u16)
 F_SET_PIECE = 1 << 0
@@ -134,6 +148,7 @@ F_FACTION = 1 << 4
 F_EQUIPMENT = 1 << 5
 F_DEFAULT_VISIBLE = 1 << 6   # isEquipment || isRelic
 F_HAS_BITMAP = 1 << 7
+F_MI = 1 << 8                # the KIND mark: a monster infrequent (catIsMi, model/catalogue.h)
 
 FACTION_PREFIX = "records/items/faction/"
 
@@ -177,7 +192,25 @@ def flags_of(item: dict) -> int:
         f |= F_DEFAULT_VISIBLE
     if item.get("bitmap"):
         f |= F_HAS_BITMAP
+    if item.get("isMi"):
+        f |= F_MI
     return f
+
+
+def strip_colour_codes(s: str) -> str:
+    """build_catalogue.strip_colour_codes (catalogue_gen.cpp stripColourCodes)."""
+    o, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "{" and i + 3 < n and s[i + 1] == "^" and s[i + 3] == "}":
+            i += 4
+            continue
+        if c == "^" and i + 1 < n:
+            i += 2
+            continue
+        o.append(c)
+        i += 1
+    return "".join(o)
 
 
 def clamp_u16(v, what: str, record: str) -> int:
@@ -195,15 +228,16 @@ def clamp_u16(v, what: str, record: str) -> int:
 def build(cat: dict) -> tuple[bytes, dict]:
     items = list(cat["items"])
 
-    # ---- deterministic order: slot group, level requirement, name, record
+    # ---- deterministic order: slot group, kind (a monster infrequent after the uniques),
+    # ---- level requirement, name (without its colour codes), record
     decorated = []
     for it in items:
         rec = it["record"]
         decorated.append(
             (group_of(it), clamp_u16(it.get("levelRequirement", 0), "levelRequirement", rec),
-             it.get("name", ""), rec, it)
+             strip_colour_codes(it.get("name", "")), rec, it)
         )
-    decorated.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+    decorated.sort(key=lambda t: (t[0], bool(t[4].get("isMi")), t[1], t[2], t[3]))
 
     index_of_record = {t[3]: i for i, t in enumerate(decorated)}
     if len(index_of_record) != len(decorated):
@@ -226,11 +260,14 @@ def build(cat: dict) -> tuple[bytes, dict]:
     st = StringTable()
     item_rows = []
     narrowed = []
-    for i, (grp, lvl, name, rec, it) in enumerate(decorated):
+    for i, (grp, lvl, _key, rec, it) in enumerate(decorated):
+        name = it.get("name", "")
         word = it.get("itemClassification", "")
         cls = CLASSIFICATION.get(word, None)
         if cls is None:
             cls = CLASSIFICATION_NARROWED.get(word, None)
+            if cls is None and it.get("class") == "ItemArtifactFormula":
+                cls = CLASSIFICATION_NARROWED_FORMULA.get(word, None)
             if cls is None:
                 raise SystemExit("unexpected itemClassification %r on %s" % (word, rec))
             narrowed.append((word, rec))
@@ -367,17 +404,49 @@ def print_summary(blob: bytes, stats: dict, src: str, dst: str) -> None:
         for word, rec in stats["narrowed"]:
             by_word[word] = by_word.get(word, 0) + 1
         print("  NARROWED classification bytes: "
-              + ", ".join("%s -> %d (%d records)" % (w, CLASSIFICATION_NARROWED[w], n)
+              + ", ".join("%s -> %d (%d records)"
+                          % (w, {**CLASSIFICATION_NARROWED, **CLASSIFICATION_NARROWED_FORMULA}[w], n)
                           for w, n in sorted(by_word.items())))
         print("    (model/catalogue.h Classification has only Epic=0/Legendary=1 and "
               "catalogue.cpp:237 rejects >= 2; the true word is in catalogue.json)")
         print("    first: " + ", ".join(r for _, r in stats["narrowed"][:3]))
     flagged = {
         "setPiece": F_SET_PIECE, "blueprint": F_BLUEPRINT, "augment": F_AUGMENT,
-        "relic": F_RELIC, "faction": F_FACTION, "hasBitmap": F_HAS_BITMAP,
+        "relic": F_RELIC, "faction": F_FACTION, "hasBitmap": F_HAS_BITMAP, "mi": F_MI,
     }
     print("  flags: " + ", ".join(
         "%s %d" % (k, sum(1 for r in stats["itemRows"] if r[8] & m)) for k, m in flagged.items()))
+
+
+def if_newer(src: str, dst: str, dry_run: bool) -> int:
+    """build_model.bat's guard. Returns 0 unless packing itself failed."""
+    if not os.path.exists(src):
+        print("catalogue.json is absent - catalogue.bin is used as it is")
+        return 0
+    if os.path.exists(dst) and os.path.getmtime(src) <= os.path.getmtime(dst):
+        print("catalogue.json is older than catalogue.bin - not repacked")
+        return 0
+    with open(src, "r", encoding="utf-8") as fh:
+        cat = json.load(fh)
+    blob, _stats = build(cat)
+    old = b""
+    if os.path.exists(dst):
+        with open(dst, "rb") as fh:
+            old = fh.read()
+    if old == blob:
+        print("catalogue.json is newer and packs byte-identical to catalogue.bin - nothing to do")
+        return 0
+    if dry_run:
+        print("DRY RUN: catalogue.json is newer and differs (%d B on disk, %d B packed) - "
+              "would repack" % (len(old), len(blob)))
+        return 0
+    tmp = dst + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(blob)
+    os.replace(tmp, dst)
+    print("catalogue.json is newer and differs - repacked %s (%d B -> %d B)"
+          % (dst, len(old), len(blob)))
+    return 0
 
 
 def main(argv: list[str]) -> int:
@@ -386,7 +455,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--out", dest="dst", default=DEFAULT_OUT)
     ap.add_argument("--check", action="store_true",
                     help="compare with the existing file instead of writing")
+    ap.add_argument("--if-newer", action="store_true",
+                    help="pack only when the json is newer than the bin and differs from it")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --if-newer: say what would happen, write nothing")
     args = ap.parse_args(argv)
+
+    if args.if_newer:
+        return if_newer(args.src, args.dst, args.dry_run)
 
     with open(args.src, "r", encoding="utf-8") as fh:
         cat = json.load(fh)

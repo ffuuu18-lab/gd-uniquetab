@@ -40,6 +40,11 @@
 
 #include <stddef.h>
 
+#include <string>
+#include <vector>
+
+#include "ut_miroll.h"
+
 namespace ut {
 
 // What the deposit detour captures on the game thread. Fixed size on purpose: the capture runs
@@ -240,7 +245,7 @@ bool journalFollowMode(int variant);
 // A custom game (a mod chosen from the main menu, with a view of its own) keeps its own journal
 // set, beside that view's generated files:
 //   start-up view (vanilla, /basemods)   <journal dir>\uniq-items[-hc].jsonl        (never moves)
-//   custom-<name>, basemods+custom-<name> <journal dir>\views\custom-<name>\uniq-items[-hc].jsonl
+//   custom-<name>, basemods+custom-<name> <journal dir>\mods\<name>\uniq-items[-hc].jsonl
 // with the .gds/.csv exports, the .pruned-/.bad- copies and rescue-report.txt in the same
 // folder. The key is the custom MOD's name, not the view's, so the same mod with and without
 // /basemods is one collection. <journal dir> is the mod folder, or `journal_dir` when set.
@@ -286,6 +291,35 @@ int journalPruneNotStored(char (*out)[256], int cap, char* why, size_t whyCap);
 // derived at write time and the reader ignores it.
 bool journalItemName(const char* record, char* out, size_t cap);
 
+// ---- monster infrequents: the KIND and the stored ROLL (ut_miroll.h has the rules) -------------
+// The record's KIND out of the view's catalogue.bin (the same one the display names come from):
+// 1 = an MI (`catIsMi(entry)`), 0 = not, or this build's catalogue has no KIND mark at all,
+// -1 = unknown (no catalogue loaded, or the record is not in it). `mayLoad` = the lazy catalogue
+// load may run on this thread now (the deposit gate and the rescue: yes; the tooltip, 4 Hz per
+// record on the game thread: no - it reads what is loaded, and when nothing has loaded the
+// catalogue yet it asks the worker to, so the next question is answered). Never faults, never
+// throws.
+int journalRecordIsMi(const char* record, bool mayLoad);
+
+// TEST ONLY - tools\test_store.cpp; the mod never calls it. Forces journalRecordIsMi's answer for
+// every record (1, 0 or -1) so the harness can prove the commit's MI belt without a catalogue
+// that carries the KIND mark; -2 hands the answer back to the catalogue.
+void journalTestSetKind(int kind);
+
+// True when this build's catalogue type declares the KIND accessor (`gdut::catIsMi`). False =
+// no record is ever an MI in this build, whatever catalogue.bin says.
+bool journalKindMarkBuilt();
+
+// The STORED roll of `record`'s row - {prefix +0x28, suffix +0x48, seed +0x68} out of the
+// journal's own entry, whatever its count. False = no such row (out->known false). One linear
+// scan under the journal lock: a caller on a hot path memoises it (ut_tooltip.cpp does, 4 Hz).
+bool journalRollOf(const char* record, UtRollKey* out);
+
+// The stored roll in words, with the item's name and level out of the catalogue:
+//   "Chthonian Devourer" level 55: prefix b_ar007_ar_b, suffix a030b_off_dmg%fire_05_je, seed N
+// False = no such row (`out` then says so). For the MI refusal reason and rescue-report.txt.
+bool journalRollText(const char* record, char* out, size_t cap);
+
 // Copies out at most `cap` record paths (for the reconcile walk). Returns how many were written.
 int journalRecords(char (*out)[256], int cap);
 
@@ -303,6 +337,26 @@ bool journalStoreRow(const char* record, int* stored, unsigned int* stack);
 // authorisation to paint a box, to let a take succeed or to let the rescue hand the item back -
 // a row at count 0 is HISTORY, never inventory. False = no such entry.
 bool journalTableRow(const char* record, unsigned int* count, int* stored, unsigned int* stack);
+
+// ---- the rescue's plan, and the view's catalogue -------------------------------------------------
+// One table row at count >= 1.
+struct UtRescueRow {
+    std::string record;
+    unsigned int count;
+};
+
+// Splits the table's rows at count >= 1: `restore` = the rows to hand back, `kept` = the rows whose
+// record the ACTIVE database has no record of (`inDb(record)` == 0). The rescue SKIPS a kept row -
+// nothing is built and its count is never touched - because the engine cannot build an item its
+// database lacks; the game whose database has it hands it back. -1 (unknown: no catalogue) counts
+// as present: the build then decides, and a failed build leaves the row untouched as it always
+// did. `inDb` is called outside the journal's lock. Returns the rows considered.
+int journalRescuePlan(int (*inDb)(const char* record), std::vector<UtRescueRow>* restore,
+                      std::vector<UtRescueRow>* kept);
+
+// The view changed: the "item" display names come from `catalogueBin` (the view's catalogue.bin)
+// from now on. The previous catalogue stays alive (a reader may hold it).
+void journalCatalogueReload(const char* catalogueBin);
 
 // Set the count. `count == 0` also marks the entry "stored":false; the entry itself is NEVER
 // removed here (journal_prune stays the only thing in the mod that removes a row). Returns

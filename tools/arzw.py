@@ -31,7 +31,7 @@ import lz4.block
 
 from arz import ArzArchive, FT_BOOL, FT_FLOAT, FT_INT, FT_STRING, HEADER
 
-# A fixed FILETIME so rebuilds are byte-identical (2026-09-06 00:00:00 UTC).
+# A fixed FILETIME (a midnight UTC; any fixed value would do) so rebuilds are byte-identical.
 DEFAULT_MTIME = 133707744000000000
 
 Field = Tuple[str, int, Sequence]           # (name, type, values)

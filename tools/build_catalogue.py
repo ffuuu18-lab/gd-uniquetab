@@ -2,7 +2,19 @@
 
 Build data/oracle/catalogue.json + catalogue-stats.md from the four .arz databases.
 
-    python build_catalogue.py [--game <dir>] [--out <dir>]
+    python build_catalogue.py [--game <dir>] [--out <dir>] [--basemods] [--custom <mod dir>]
+                              [--lang EN]
+
+THE VIEW (--basemods, --custom): the catalogue is built from the database the engine will have -
+the four base databases, then mods/database.arz, then the custom game's database/*.arz, the
+last layer that has a record winning (src/gen/catalogue_gen.cpp does the same). A record a MOD
+layer wins is judged by the mod rules: JUNK_PREFIX/JUNK_PART instead of the records/items/ path
+rule, a class the slot table does not know admitted as slot "other" (Epic/Legendary only), and a
+classification catalogue.bin cannot store skipped with a warning. Base records keep the rules
+below exactly; a mod's own augments are admitted at every classification. Names: the base
+Text_<lang>.arc, then the mod's text_en*.arc, then its text_<lang>*.arc over it; icons: the
+mod's .arc files, then the base archives. The
+asserts below are the vanilla database's and are not checked in a view.
 
 One entry per shipped item record that the collection rule accepts, plus separate lists for
 Rare-classification equipment records (Monster Infrequents / unique rares) and faction store
@@ -30,6 +42,17 @@ EXTRA_RECORDS is a small CURATED INCLUSION LIST that bypasses the four rules abo
 for named items a player really owns but the rules drop - today exactly one, Leovinus' Ring.
 EXTRA_EXCLUDE names the developer test records that live beside it and must never be collectible.
 Both lists are asserted, so a game patch that moves either is loud instead of silent.
+
+MONSTER INFREQUENTS (--collect-mi = uniquetab.ini's collect_mi=1, the DLL's default; this tool's
+default stays off, so the flag-off cut needs no switch): every equipment
+record (MI_CLASSES: the EQUIP_SLOT classes and the two per-class groups' WeaponMagical_Staff and
+WeaponHunting_Spear) whose own itemClassification is Rare - the engine's MI rule - through the same
+shipped filter (a mod layer's: the mod rule), the faction-store rares and the blacksmith-crafted
+ones included: is_mi_candidate,
+catalogue_gen.cpp isMiCandidate. Each entry carries "isMi" (the KIND mark; catalogue.bin flag bit 8,
+pack_catalogue.py F_MI). Without the flag no MI is admitted and the output is what it always was
+(a stored MI keeps its journal row and is on no page). With it the vanilla asserts do not
+apply and only the items are written (write_view), like a view.
 """
 
 from __future__ import annotations
@@ -45,6 +68,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arc  # noqa: E402
 import gdpath  # noqa: E402
 import arz  # noqa: E402
+import ui_geometry  # noqa: E402
 
 DEFAULT_GAME = gdpath.find_game_dir() or ""
 DEFAULT_OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "oracle")
@@ -75,6 +99,11 @@ EQUIP_SLOT = {
     "WeaponArmor_Offhand": "offhand",
     "WeaponArmor_Shield": "shield",
 }
+# catalogue_gen.cpp isEquipmentClass: the slot classes and the two equipment classes the base game
+# has no slot for, each with a per-class group of its own (staff, spear1h) - only a mod layer has
+# them, admitted as "other". "isEquipment" stays EQUIP_SLOT (catalogue.bin unchanged); the KIND
+# mark and the MI rule use this set.
+MI_CLASSES = frozenset(EQUIP_SLOT) | {"WeaponMagical_Staff", "WeaponHunting_Spear"}
 OTHER_SLOT = {
     "ItemArtifact": "relic",
     "ItemArtifactFormula": "blueprint",
@@ -160,6 +189,95 @@ COLLECTION_EXPECT_TOTAL = 3288    # 3,196 Epic/Legendary equipment + 91 relics +
 
 BLUEPRINT_CLASSES = ("ItemArtifactFormula", "ItemAscensionFormula", "AscendantAltarFormula",
                      "ItemRandomSetFormula", "ItemRerollFormula", "ItemSetFormula")
+# The blueprint a player learns at the blacksmith. It is collected at EVERY classification (a
+# recipe is a recipe: Magical and Rare ones too), base and mod alike; its five siblings above
+# (the altar's formulas, the ascension/reroll/set ones) are not recipes and never collected.
+FORMULA_CLASS = "ItemArtifactFormula"
+
+
+# Where a record a MOD layer wins is never collected from (the custom-view path rule).
+JUNK_PREFIX = ("records/sandbox/", "records/creatures/", "records/mod_testgrounds/",
+               "records/endlessdungeon/scriptentities/")
+JUNK_PART = "/enemygear/"
+STORABLE = ("Common", "Rare", "Epic", "Legendary")
+
+
+def storable(cls: str, cla: str) -> bool:
+    """catalogue_gen.cpp storable: a blueprint is stored at Magical and Quest too (packed as Epic)."""
+    return cla in STORABLE or (cls == FORMULA_CLASS and cla in ("Magical", "Quest"))
+
+
+def scroll_of(cla: str) -> str:
+    """catalogue_gen.cpp scrollOf: the base game's scroll for a blueprint of this classification,
+    for one whose artifactFormulaBitmapName is empty - never the crafted item's icon."""
+    return {
+        "Magical": "items/craftingparts/materials/blueprint_a001_magical.tex",
+        "Rare": "items/craftingparts/materials/blueprint_a002_rare.tex",
+        "Epic": "items/craftingparts/materials/blueprint_a003_epic.tex",
+        "Legendary": "items/craftingparts/materials/blueprint_a004_legendary.tex",
+    }.get(cla, "items/misc/blueprint01.tex")
+
+
+def is_mi_candidate(key: str, cls: str, cla: str, file_description: str) -> bool:
+    """catalogue_gen.cpp isMiCandidate: an MI_CLASSES class and itemClassification Rare - the
+    faction-store and the blacksmith-crafted rares included. key and file_description are
+    unused, kept as the C++ signature keeps them."""
+    del key, file_description
+    return cla == "Rare" and cls in MI_CLASSES
+
+
+def is_junk(key: str) -> bool:
+    return key.startswith(JUNK_PREFIX) or JUNK_PART in key
+
+
+def strip_colour_codes(s: str) -> str:
+    """A name without its colour codes ({^X} and ^X) - the sort key; the stored name keeps them."""
+    o, i, n = [], 0, len(s)
+    while i < n:
+        c = s[i]
+        if c == "{" and i + 3 < n and s[i + 1] == "^" and s[i + 3] == "}":
+            i += 4
+            continue
+        if c == "^" and i + 1 < n:
+            i += 2
+            continue
+        o.append(c)
+        i += 1
+    return "".join(o)
+
+
+def is_text_arc(path: str, lang: str) -> bool:
+    leaf = os.path.basename(path).lower()
+    want = ("text_" + lang).lower()
+    return leaf.endswith(".arc") and (leaf.startswith(want) or ("_" + want) in leaf)
+
+
+def tex_wh(data):
+    """ui_geometry.cpp texWH: a cover-sized bound (4096)."""
+    import struct
+    if not data or len(data) < 32 or data[:3] != b"TEX":
+        return None
+    h = struct.unpack_from("<I", data, 24)[0]
+    w = struct.unpack_from("<I", data, 28)[0]
+    if not (0 < w <= 4096 and 0 < h <= 4096):
+        return None
+    return (w, h)
+
+
+def view_tex_size(view, bitmap: str):
+    """ModView::texSize: every mod .arc in load order, the name whole, without its first
+    element, and by leaf; the first readable header wins."""
+    if not bitmap or view is None:
+        return None
+    key = bitmap.replace("\\", "/").lower()
+    keys = [key, key.split("/", 1)[1] if "/" in key else key, key.rsplit("/", 1)[-1]]
+    for a in view.arcs:
+        for k in keys:
+            if k in a:
+                wh = tex_wh(a.read(k))
+                if wh:
+                    return wh
+    return None
 
 
 def slot_of(cls: str) -> str:
@@ -181,18 +299,24 @@ def crafted_record(rec, cls: str) -> str:
 
 
 def bitmap_of(rec, cls: str) -> str:
-    """ItemArtifact -> artifactBitmap, ItemRelic -> relicBitmap, everything else -> bitmap."""
-    for f in ("bitmap", "artifactBitmap", "relicBitmap"):
+    """ItemArtifact -> artifactBitmap, ItemRelic -> relicBitmap, everything else -> bitmap; a
+    blueprint (ItemArtifactFormula) -> artifactFormulaBitmapName, the scroll the game draws for it
+    (64 x 32), before the others. An empty one takes the rarity's scroll (scroll_of, entry())."""
+    fields = ("bitmap", "artifactBitmap", "relicBitmap")
+    if cls == FORMULA_CLASS:
+        fields = ("artifactFormulaBitmapName",) + fields
+    for f in fields:
         v = arz.sfield(rec, f)
         if v:
             return v
     return ""
 
 
-def is_shipped(key: str, rec, cls: str, tags, db=None) -> bool:
-    if not key.startswith("records/items/"):
-        return False
-    if key.startswith("records/items/enemygear/"):
+def is_shipped(key: str, rec, cls: str, tags, db=None, mod_rule=False) -> bool:
+    if mod_rule:
+        if is_junk(key):
+            return False
+    elif not key.startswith("records/items/") or key.startswith("records/items/enemygear/"):
         return False
     if "BLANK" in arz.sfield(rec, "FileDescription").upper():
         return False
@@ -207,11 +331,42 @@ def is_shipped(key: str, rec, cls: str, tags, db=None) -> bool:
     return False
 
 
-def build(game_dir: str, out_dir: str):
-    db = arz.ArzDatabase.load_game(game_dir)
-    tags = arc.load_text_tags(game_dir)
+class LayeredDb:
+    """The base database with a view's mod layers on top (get/real_name as ArzDatabase)."""
+
+    def __init__(self, base, layers):
+        self.base, self.layers = base, layers
+
+    def get(self, name):
+        for a in reversed(self.layers):
+            r = a.get(name)
+            if r is not None:
+                return r
+        return self.base.get(name)
+
+
+def build(game_dir: str, out_dir: str, basemods=False, custom=None, lang="EN", collect_mi=False):
+    layered = bool(basemods or custom)
+    view = ui_geometry.View(game_dir, basemods, custom) if layered else None
+    db = view.db if view else arz.ArzDatabase.load_game(game_dir)
+    layers = [a for a, _ in view.layers] if view else []
+    tags = arc.load_text_tags(game_dir, lang)
+    if view and (layers or view.arcs):
+        # the mod's English set, then its set in this language over it (catalogue_gen.cpp)
+        text = [a for a in view.arcs if is_text_arc(a.path, "en")]
+        if not is_text_arc("text_en.arc", lang):
+            text += [a for a in view.arcs if is_text_arc(a.path, lang)]
+        for a in text:
+            for key in a.keys():
+                if key.endswith(".txt"):
+                    data = a.read(key)
+                    if data:
+                        tags.update(arc.parse_tag_file(data))
     items_arc = arc.ArcSet.load(game_dir, os.path.join("resources", "Items.arc"))
     ui_arc = arc.ArcSet.load(game_dir, os.path.join("resources", "UI.arc"))
+    base_db = db
+    if layers:
+        db = LayeredDb(base_db, layers)
 
     def tex_exists(bitmap: str):
         """Bitmap paths are resource paths; the .arc entries drop the leading segment.
@@ -224,6 +379,8 @@ def build(game_dir: str, out_dir: str):
             return (True, "Items.arc:" + (items_arc.source_of(rest) or ""))
         if head == "ui" and rest in ui_arc:
             return (True, "UI.arc:" + (ui_arc.source_of(rest) or ""))
+        if view is not None and (layers or view.arcs) and view_tex_size(view, bitmap):
+            return (True, "mod")
         return (False, "")
 
     set_name_cache = {}
@@ -240,9 +397,11 @@ def build(game_dir: str, out_dir: str):
         set_name_cache[set_record] = nm
         return nm
 
-    def entry(key, src, rec, cls):
+    def entry(key, src, rec, cls, real=None, mod_layer=False):
         tag = name_tag_of(rec, cls)
         bmp = bitmap_of(rec, cls)
+        if not bmp and cls == FORMULA_CLASS:
+            bmp = scroll_of(arz.sfield(rec, "itemClassification"))
         name = tags.get(tag, "")
         crafts = crafted_record(rec, cls)
         if crafts:                                  # blueprint: name + icon come from the target
@@ -258,7 +417,7 @@ def build(game_dir: str, out_dir: str):
         ok, where = tex_exists(bmp)
         set_rec = arz.sfield(rec, "itemSetName")
         return {
-            "record": db.real_name(key) or key,
+            "record": real or base_db.real_name(key) or key,
             "class": cls,
             "slot": slot_of(cls),
             "craftsRecord": crafts,
@@ -279,30 +438,71 @@ def build(game_dir: str, out_dir: str):
             "isRelic": cls == "ItemArtifact",
             "isSetPiece": bool(set_rec),
             "isEquipment": cls in EQUIP_SLOT,
+            # the KIND mark: a Rare equipment record, a monster infrequent (catalogue_gen.cpp isMi)
+            "isMi": cls in MI_CLASSES and arz.sfield(rec, "itemClassification") == "Rare",
             # On the curated inclusion list, so build_uniq_db.py can page it
             # without re-deriving the rule (it is neither Epic/Legendary nor a relic).
             "isExtra": key.lower() in EXTRA_RECORDS,
+            # Only a mod layer has the record (the groups file's `source = mod`).
+            "fromMod": bool(mod_layer and key not in base_db),
         }
 
     items, mis, faction_rares, rejected = [], [], [], []
     relic_seen = collections.Counter()
     extra_seen = set()
-    for key, src, rec in db.items():
+    unstorable = []
+
+    def walk():
+        """(key, src, rec, real name, mod layer) for every winning record of the view."""
+        for key, src, rec in base_db.items():
+            if any(key in a.entries for a in layers):
+                continue
+            yield key, src, rec, None, False
+        for li, a in enumerate(layers):
+            for key in a.keys():
+                if any(key in b.entries for b in layers[li + 1:]):
+                    continue
+                yield key, a.tag, a.get(key), a.real_name(key), True
+
+    for key, src, rec, real, mod_layer in walk():
         cls = arz.sfield(rec, "Class")
         cla = arz.sfield(rec, "itemClassification")
         low = key.lower()
         if low in EXTRA_EXCLUDE:               # named dev test records, never in
             continue
         is_extra = low in EXTRA_RECORDS        # curated inclusion, bypasses is_shipped
-        if cls not in EQUIP_SLOT and cls not in OTHER_SLOT:
+        known = cls in EQUIP_SLOT or cls in OTHER_SLOT
+        if not known and (not mod_layer or not cls):
             continue
         if cls == "LootRandomizer":            # affixes, not items
             continue
+        if cls in BLUEPRINT_CLASSES and cls != FORMULA_CLASS:   # not recipes (the altar's ...)
+            continue
+        is_relic = (cls == RELIC_CLASS)
+        is_formula = (cls == FORMULA_CLASS)
+        # a mod's own augments and components (no base archive has them: DGD's augments, the
+        # D2 gems and runes of ROT and DGD): every classification, like relics
+        mod_augment = mod_layer and cls in ("ItemEnchantment", "ItemRelic") and key not in base_db
+        if (not is_relic and not is_extra and not mod_augment and not is_formula
+                and cla not in ("Epic", "Legendary", "Rare")):
+            continue
+        if mod_layer:
+            # a mod layer's record: the mod rules, and no Rare lists
+            admit = is_extra or ((is_relic or mod_augment or is_formula or cla in ("Epic", "Legendary")
+                                  or (collect_mi and is_mi_candidate(
+                                      key, cls, cla, arz.sfield(rec, "FileDescription"))))
+                                 and is_shipped(key, rec, cls, tags, db, True))
+            if not admit:
+                continue
+            if not storable(cls, cla):
+                unstorable.append((real or key, cla))
+                continue
+            items.append(entry(key, src, rec, cls, real, True))
+            if is_extra:
+                extra_seen.add(low)
+            continue
         # A relic is in the collection at EVERY classification, so it must not be
         # pre-filtered by the rarity word the way equipment is.
-        is_relic = (cls == RELIC_CLASS)
-        if not is_relic and not is_extra and cla not in ("Epic", "Legendary", "Rare"):
-            continue
         shipped = is_shipped(key, rec, cls, tags, db)
         if is_extra:
             items.append(entry(key, src, rec, cls))
@@ -313,6 +513,13 @@ def build(game_dir: str, out_dir: str):
                 relic_seen[cla] += 1
             else:
                 rejected.append((key, cls, cla))
+        elif is_formula:                       # a blueprint: every classification, like relics
+            if not shipped:
+                rejected.append((key, cls, cla))
+            elif not storable(cls, cla):       # (Quest) catalogue_gen.cpp skips it, never fails
+                unstorable.append((real or key, cla))
+            else:
+                items.append(entry(key, src, rec, cls))
         elif cla in ("Epic", "Legendary"):
             if shipped:
                 items.append(entry(key, src, rec, cls))
@@ -320,8 +527,16 @@ def build(game_dir: str, out_dir: str):
                 rejected.append((key, cls, cla))
         elif cls in EQUIP_SLOT and shipped:    # Rare *record* = MI or unique rare or faction item
             e = entry(key, src, rec, cls)
+            if collect_mi and is_mi_candidate(key, cls, cla, arz.sfield(rec, "FileDescription")):
+                items.append(e)                # collect_mi=1: a monster infrequent is collected
             (faction_rares if key.startswith("records/items/faction/") else mis).append(e)
+    if unstorable:
+        print("warning: %d mod record(s) of a classification the catalogue cannot store are "
+              "skipped: %s" % (len(unstorable), ", ".join("%s (%s)" % u for u in unstorable[:3])),
+              file=sys.stderr)
 
+    if layered or collect_mi:
+        return write_view(out_dir, items, view, tags)
     # ---- relic asserts. These are the collection rule, not decoration.
     stray = [e["record"] for e in items
              if e["class"] == RELIC_CLASS and not e["record"].lower().startswith(RELIC_PATH)]
@@ -376,6 +591,8 @@ def build(game_dir: str, out_dir: str):
                           "name tag resolves in Text_EN", "FileDescription has no BLANK"],
         "collectionRule": "equipment: itemClassification Epic or Legendary; "
                           "relics (Class ItemArtifact): EVERY classification; "
+                          "blueprints (Class ItemArtifactFormula, icon artifactFormulaBitmapName): "
+                          "EVERY classification, the other *Formula classes never; "
                           "plus the EXTRA_RECORDS curated inclusion list",
         "relicsByClassification": dict(sorted(relic_seen.items())),
         "extraRecords": sorted(EXTRA_RECORDS),
@@ -557,15 +774,15 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     A(f"({GRIMTOOLS_TOTALS['monster_infrequent_records']} + {GRIMTOOLS_TOTALS['unique_rare_items']} = {GRIMTOOLS_TOTALS['monster_infrequent_records']+GRIMTOOLS_TOTALS['unique_rare_items']}), and adding the faction bucket overshoots it")
     A(f"({len(mis)+len(faction_rares)}). Two heuristics were tried and rejected:")
     A("names with exactly one record (72 hits, and their slot spread - 9 belts, 8 off-hands, 0 rings -")
-    A("does not match the researcher's unique-rare spread of 10 rings / 4 amulets / 1 medal), and")
+    A("does not match the known unique-rare spread of 10 rings / 4 amulets / 1 medal), and")
     A("`itemStyleTag` (it carries cosmetic style words like Mythical/Empowered/Elite, not a rarity role).")
     A("**`uniqueRares` in catalogue.json is therefore `null`, not a guess.** `monsterInfrequents`")
     A("holds the whole non-faction Rare-record bucket and is a superset of the real MI list.")
-    A("Resolving this properly means walking the monster loot tables, which is out of scope for M3.\n")
+    A("Resolving this properly means walking the monster loot tables, which is out of scope for this census.\n")
     A("## Icons\n")
     miss = [e for e in items if not e["bitmapFound"]]
     nobmp = [e for e in items if not e["bitmap"]]
-    A("Rule (verified, now also in ENGINE-FACTS): a record's bitmap field is a *resource* path whose")
+    A("Rule (verified): a record's bitmap field is a *resource* path whose")
     A("first segment names the archive and is **not** part of the archive entry name -")
     A("`items/gearhead/bitmaps/d026_head.tex` is entry `gearhead/bitmaps/d026_head.tex` in `resources/Items.arc`,")
     A("`ui/caravan/caravan_tabup.tex` is entry `caravan/caravan_tabup.tex` in `resources/UI.arc`.")
@@ -595,12 +812,40 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
         fh.write("\n".join(lines))
 
 
+def write_view(out_dir, items, view, tags):
+    """A view's catalogue.json: the items only (no Rare lists, no stats - those are vanilla's)."""
+    items.sort(key=lambda e: (e["slot"], e["itemClassification"], e["record"]))
+    meta = {"generated": "tools/build_catalogue.py", "view": view.view if view else "vanilla",
+            "layers": [a.path for a, _ in view.layers] if view else [],
+            "skippedArchives": view.skipped if view else [], "textTags": len(tags)}
+    os.makedirs(out_dir, exist_ok=True)
+    cat_path = os.path.join(out_dir, "catalogue.json")
+    with open(cat_path, "w", encoding="utf-8") as fh:
+        fh.write("{\n")
+        fh.write('"meta": ' + json.dumps(meta, indent=1) + ",\n")
+        fh.write('"items": [\n')
+        fh.write(",\n".join(json.dumps(e, sort_keys=True) for e in items))
+        fh.write("\n],\n")
+        fh.write('"monsterInfrequents": [],\n"factionRares": [],\n"uniqueRares": null,\n')
+        fh.write('"itemSets": ' + json.dumps(sorted({e["itemSetName"] for e in items
+                                                       if e["itemSetName"]}), indent=1) + "\n}\n")
+    return cat_path, len(items), 0, 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--game", default=os.environ.get("GD_DIR", DEFAULT_GAME))
     ap.add_argument("--out", default=DEFAULT_OUT)
+    ap.add_argument("--basemods", action="store_true",
+                    help="the view /basemods builds: mods\\database.arz on top of the base game")
+    ap.add_argument("--custom", help="a custom game's folder (a name under <game>\\mods, or a "
+                                     "full path) whose database and resources sit on top")
+    ap.add_argument("--lang", default="EN")
+    ap.add_argument("--collect-mi", action="store_true",
+                    help="uniquetab.ini's collect_mi=1: admit the monster infrequents (every Rare "
+                         "equipment record, faction-store and crafted rares included)")
     a = ap.parse_args()
-    p, n_items, n_mi, n_fac = build(a.game, a.out)
+    p, n_items, n_mi, n_fac = build(a.game, a.out, a.basemods, a.custom, a.lang, a.collect_mi)
     size = os.path.getsize(p)
     print(f"{p}  {size/1048576:.2f} MB")
     print(f"  items (collectible)        {n_items}   (Epic/Legendary equipment + ALL relics"

@@ -3,6 +3,7 @@
 #include "gen/arc_reader.h"
 #include "gen/arz_reader.h"
 #include "gen/catalogue_gen.h"
+#include "ut_layout.h"   // utLatticeFrame: the frame under one cell, the rule the page fits by
 
 #include <algorithm>
 #include <cstdio>
@@ -31,8 +32,7 @@ const char* const kStashCover = "ui/caravan/caravan_transfercoverimage.tex";
 // The vanilla materials plate is drawn at its own bitmapPosition 0,1; the donor rectangle is
 // in PLATE pixels, so the box coordinates are moved by that and grown by the frame's outset.
 const int kPlateDX = 0, kPlateDY = 1;
-const int kOutset = 2;
-const int kRowGap = 2;
+const int kOutset = ut::kUtFrameOutset;
 
 // The vanilla cover image's interior lattice, measured on 1.3.0.8: vertical lines every 32 px
 // from x = 104, horizontal every 32 px from y = 4, all 1 px wide, all inside the grid.
@@ -339,10 +339,33 @@ bool plateReadCover(const GameData& g, const ModView* mods, const std::string& b
     return texDecode(blob, out, why);
 }
 
+std::string plateLeafName(int cellW, int cellH, int plateW, int plateH, const std::string& plateTag,
+                          const std::string& layoutHash) {
+    // THE NAME. A custom view always carries the plate size and its tag, whatever its cover
+    // size: every view's plates share one override folder, and a custom game with the vanilla
+    // cover size would otherwise write the main campaign's names over a different ground. A
+    // start-up view keeps the shipped name on the vanilla cover and carries the plate size on any
+    // other. A user grid's set always carries the cover, the tag and _L<hash>, so it can never
+    // be mistaken for (or overwrite) a derived set. ut_plate.cpp builds the same names.
+    char name[192];
+    const bool vanilla = plateW == 438 && plateH == 627;
+    if (!layoutHash.empty())
+        std::snprintf(name, sizeof name, "uniq_plate_%dx%d_%dx%d%s%s_L%s", cellW, cellH, plateW,
+                      plateH, plateTag.empty() ? "" : "_", plateTag.c_str(), layoutHash.c_str());
+    else if (!plateTag.empty())
+        std::snprintf(name, sizeof name, "uniq_plate_%dx%d_%dx%d_%s", cellW, cellH, plateW,
+                      plateH, plateTag.c_str());
+    else if (vanilla)
+        std::snprintf(name, sizeof name, "uniq_plate_%dx%d", cellW, cellH);
+    else
+        std::snprintf(name, sizeof name, "uniq_plate_%dx%d_%dx%d", cellW, cellH, plateW, plateH);
+    return name;
+}
+
 bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& geo,
                     const std::vector<CellGrid>& cells, const std::string& groundHex,
                     const std::string& plateTag, PlateSink sink, void* ctx, PlateReport& rep,
-                    std::string* error) {
+                    std::string* error, const std::string& layoutHash, int rowGap) {
     if (!g.db || !g.ui) { if (error) *error = "game data not loaded"; return false; }
     auto rec = [&](const std::string& name, ArzRecord& r) {
         return (mods && mods->get(name, r)) || g.db->get(name, r);
@@ -498,6 +521,9 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
     donor.px.shrink_to_fit();
 
     // ---- one plate per cell size ------------------------------------------------------------
+    // Every cell of the grid's cols x rows (utGridFit's, the page's) gets its frame, cut to the
+    // plate where its outset crosses the edge (ut_layout.h utLatticeFrame).
+    if (rowGap < 0) rowGap = ut::kUtRowGap;
     Image img;
     std::vector<std::uint8_t> tex;
     for (const CellGrid& cell : cells) {
@@ -505,30 +531,19 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
         int n = 0;
         for (int r = 0; r < cell.rows; ++r) {
             for (int c = 0; c < cell.cols; ++c) {
-                const int bx = geo.x0 + cell.cellW * c - geo.bmpX;
-                const int by = geo.y0 + (cell.cellH + kRowGap) * r - geo.bmpY;
-                if (bx + cell.cellW + kOutset > img.w || by + cell.cellH + kOutset > img.h)
+                ut::UtRect f;
+                if (!ut::utLatticeFrame(geo.x0, geo.y0, cell.cellW, cell.cellH, rowGap, c, r,
+                                        geo.bmpX, geo.bmpY, img.w, img.h, &f))
                     continue;
-                drawFrame(img, st, bx - kOutset, by - kOutset, cell.cellW + 2 * kOutset,
-                          cell.cellH + 2 * kOutset);
+                drawFrame(img, st, f.x, f.y, f.w, f.h);
                 ++n;
             }
         }
         if (!ornament.empty())                     // the vanilla border always wins
             for (std::size_t i = 0; i < ornament.size(); ++i)
                 if (ornament[i]) std::memcpy(img.px.data() + i * 4, cov.px.data() + i * 4, 4);
-        // THE NAME. The vanilla cover size keeps the shipped name; any other cover carries the
-        // plate size, and a custom view its tag as well - the size alone collides when two mods
-        // have the same one. ut_plate.cpp builds the same name from the live view.
-        char name[160];
-        if (geo.vanillaPlate())
-            std::snprintf(name, sizeof name, "uniq_plate_%dx%d", cell.cellW, cell.cellH);
-        else if (plateTag.empty())
-            std::snprintf(name, sizeof name, "uniq_plate_%dx%d_%dx%d", cell.cellW, cell.cellH,
-                          geo.plateW, geo.plateH);
-        else
-            std::snprintf(name, sizeof name, "uniq_plate_%dx%d_%dx%d_%s", cell.cellW, cell.cellH,
-                          geo.plateW, geo.plateH, plateTag.c_str());
+        const std::string name =
+            plateLeafName(cell.cellW, cell.cellH, geo.plateW, geo.plateH, plateTag, layoutHash);
         texEncode(img, tex);
         if (sink && !sink(name, tex, cell, n, ctx)) {
             if (error) *error = std::string("the plate ") + name + " could not be handed over";

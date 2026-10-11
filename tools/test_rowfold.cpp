@@ -30,6 +30,8 @@
 
 #include "../src/ut_ownedfold.h"
 #include "../src/ut_rowmath.h"
+#include "../src/ut_padmat.h"
+#include "../src/ut_startorder.h"
 #include "../src/ut_textfold.h"
 
 using namespace ut;
@@ -91,7 +93,7 @@ static void testScrollRegression() {
 
     // --- WITHOUT the fix: no relayout is asked for, so cur/want stay at 2 and the page keeps
     // drawing rows that no longer exist. The first wheel event snaps to the top; every one after
-    // it is consumed and changes nothing, which is what the user reported.
+    // it is consumed and changes nothing, so the page cannot be scrolled back.
     {
         int row = wantRow;
         bool changed = false;
@@ -129,7 +131,7 @@ static void testScrollRegression() {
     ok("items back: and scrolling up moves", changed);
     okInt("items back: up one row", row, 1);
 
-    // --- the boundary the user's words name: "the moment there is more than one row".
+    // --- the boundary: "the moment there is more than one row".
     for (int n = 1; n <= 25; ++n) {
         const int mm = utMaxRowOf(n, cols, rows);
         bool ch = false;
@@ -288,13 +290,84 @@ static void testOwnedFold() {
     }
 }
 
+// 3. THE START-UP ORDER (src\ut_startorder.h). The plates are loaded only once a materials window
+//    has been captured in a world - never on the first hooked frame at the main menu, which can
+//    fall in the engine's start-up streaming. And a frame counter that never moved past the first
+//    hooked frame is "no frame yet", not a crash, unless the crash reporter's event exists.
+static void testStartOrder() {
+    using namespace ut;
+    ok("main menu, code resolved, no window: no plate load", !utPlateProbeAllowed(true, false));
+    ok("code not resolved: no plate load", !utPlateProbeAllowed(false, true));
+    ok("nothing yet: no plate load", !utPlateProbeAllowed(false, false));
+    ok("a captured materials window with the code resolved: the plates load",
+       utPlateProbeAllowed(true, true));
+    // the fresh-install session: frames=1, CrashReport.dll loaded, no CRASHREPORT event
+    ok("frames=1 with CrashReport.dll loaded is no frame yet",
+       utStallVerdict(false, true, 1) == UT_STALL_NO_FRAME_YET);
+    ok("frames=0 is no frame yet", utStallVerdict(false, false, 0) == UT_STALL_NO_FRAME_YET);
+    ok("the CRASHREPORT event is a crash even before a frame",
+       utStallVerdict(true, true, 1) == UT_STALL_CRASHED);
+    ok("the CRASHREPORT event is a crash", utStallVerdict(true, false, 500) == UT_STALL_CRASHED);
+    ok("frames stopped with the reporter loaded is not called a crash",
+       utStallVerdict(false, true, 500) == UT_STALL_CRASH_DLL);
+    ok("frames stopped without a reporter", utStallVerdict(false, false, 500) == UT_STALL_UNKNOWN);
+    ok("the no-frame text says no frame yet",
+       strstr(utStallVerdictText(UT_STALL_NO_FRAME_YET), "no frame yet") != NULL);
+    ok("only the crash verdict says CRASHED",
+       strstr(utStallVerdictText(UT_STALL_NO_FRAME_YET), "CRASHED") == NULL &&
+           strstr(utStallVerdictText(UT_STALL_CRASH_DLL), "CRASHED") == NULL &&
+           strstr(utStallVerdictText(UT_STALL_UNKNOWN), "CRASHED") == NULL &&
+           strstr(utStallVerdictText(UT_STALL_CRASHED), "CRASHED") != NULL);
+}
+
+// 4. THE PAD ON THE MATERIALS PAGE (src\ut_padmat.h). Vanilla's 24 materials boxes start at
+//    y 76, below the band, so the pad draws as it always did. A page with 15 boxes at y 13..15
+//    (x 33..881, 32 px icons) has boxes under it. utPadReturnCell (phase 0's return-cell choice,
+//    the first cell that meets no box) keeps its arithmetic here only: the materials
+//    page draws the whole pad where it is, over the boxes, and its clicks are the pad's
+//    (utMatPadResolve, test_layout section 7; utPadLeftDown, test_layoutedit section 8).
+static void testPadMat() {
+    using namespace ut;
+    const UtRectF pad = {102.0f, 25.0f, 320.0f, 44.0f};   // the default pad at UI scale 1
+    UtRectF cells[27];
+    for (int c = 0; c < 27; ++c)
+        cells[c] = UtRectF{105.0f + (float)(c % 9) * 35.0f, 25.0f + (float)(c / 9) * 15.0f, 34.0f, 14.0f};
+    // a vanilla-like page: 4 columns of 6 rows from 128,76
+    UtRectF van[24];
+    for (int i = 0; i < 24; ++i)
+        van[i] = UtRectF{128.0f + (float)(i % 4) * 64.0f, 76.0f + (float)(i / 4) * 64.0f, 32.0f, 32.0f};
+    ok("vanilla's boxes leave the pad alone", !utAnyOverlap(pad, van, 24));
+    for (int i = 0; i < 24; ++i) ok("a vanilla box record is clear of the band", utBoxClearOfBand(76 + (i / 4) * 64));
+    // a page with boxes at the top
+    const int topX[15] = {33, 73, 117, 191, 231, 270, 335, 399, 463, 527, 591, 655, 753, 817, 881};
+    const int topY[15] = {15, 15, 15, 15, 15, 15, 13, 13, 13, 13, 13, 13, 13, 13, 13};
+    UtRectF top[15];
+    for (int i = 0; i < 15; ++i) top[i] = UtRectF{(float)topX[i], (float)topY[i], 32.0f, 32.0f};
+    ok("boxes at y 13..15 reach under the pad", utAnyOverlap(pad, top, 15));
+    ok("their records are not clear of the band", !utBoxClearOfBand(13));
+    const int cell = utPadReturnCell(cells, 27, top, 15);
+    okInt("the return button takes the first free cell (row 3, column 1)", cell, 18);
+    ok("that cell meets no box", cell >= 0 && !utAnyOverlap(cells[cell], top, 15));
+    // a page whose boxes cover every cell
+    UtRectF wall[1] = {{100.0f, 20.0f, 330.0f, 60.0f}};
+    okInt("every cell blocked: no free cell (the caller searches the rows, else no button)",
+          utPadReturnCell(cells, 27, wall, 1), -1);
+    UtRectF none[1] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+    ok("a zero-size rect overlaps nothing", !utAnyOverlap(pad, none, 1));
+    ok("rects that only touch do not overlap",
+       !utRectsOverlap(UtRectF{0, 0, 10, 10}, UtRectF{10, 0, 10, 10}));
+}
+
 int main() {
     printf("offline harness - the paging arithmetic and the tier-C case fold\n");
     printf("plus the owned fold's own arithmetic (src\\ut_ownedfold.h)\n");
+    printf("and the start-up order (src\\ut_startorder.h)\n");
     testRows();
     testScrollRegression();
     testFold();
     testOwnedFold();
+    testStartOrder();
+    testPadMat();
     printf("\n%s (%d failure(s) of %d checks)\n", g_fail ? "FAILED" : "PASSED", g_fail, g_run);
     return g_fail ? 1 : 0;
 }

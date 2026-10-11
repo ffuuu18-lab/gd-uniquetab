@@ -1,6 +1,7 @@
 // model_test.cpp - console test for the model (catalogue / collection /
 // layout).  No engine, no DLL, no game process: it only reads
-// data\oracle\catalogue.bin.
+// data\oracle\catalogue.bin (the shipped default, collect_mi=1) and, for the KIND mark, the
+// flag-off cut beside it (data\oracle\nomi\catalogue.bin).
 //
 // Build and run: build_model.bat   (output kept in tests\model_test.out.txt)
 // Optional argument: path to catalogue.bin (default data\oracle\catalogue.bin
@@ -95,7 +96,8 @@ int main(int argc, char** argv) {
                 path, cat.formatVersion(), cat.byteSize(), cat.itemCount(), cat.setCount());
     CHECK_EQ(cat.formatVersion(), Catalogue::kFormatVersion, "format version");
     CHECK(cat.loaded(), "catalogue reports loaded");
-    CHECK_EQ(cat.itemCount(), 4088, "item count");
+    CHECK_EQ(cat.itemCount(), 7301,
+             "item count (4,088 + the 304 Magical/Rare blueprints of 1.2.0 + the 2,909 monster infrequents)");
 
     // -------------------------------------------------------- group breakdown
     rule("items per slot group");
@@ -115,11 +117,11 @@ int main(int argc, char** argv) {
                     g, slotGroupName(group), r.count, r.first, epic, r.count - epic);
     }
     CHECK_EQ(groupTotal, cat.itemCount(), "sum of group ranges");
-    CHECK_EQ(equipmentGroups, 3197, "equipment items (groups Helm..Medal)");
+    CHECK_EQ(equipmentGroups, 6106, "equipment items (groups Helm..Medal: 3,197 uniques + 2,909 MIs)");
     CHECK_EQ(cat.groupRange(SlotGroup::Relic).count, 91, "relic items");
-    CHECK_EQ(cat.equipmentCount(), 3197, "header equipment count");
+    CHECK_EQ(cat.equipmentCount(), 6106, "header equipment count");
     CHECK_EQ(cat.relicCount(), 91, "header relic count");
-    CHECK_EQ(cat.defaultVisibleCount(), 3288, "header default-visible count");
+    CHECK_EQ(cat.defaultVisibleCount(), 6197, "header default-visible count");
 
     std::size_t defaultVisible = 0, legendaryDefault = 0, setPieces = 0, withBitmap = 0;
     for (const ItemView& it : cat.items()) {
@@ -132,7 +134,7 @@ int main(int argc, char** argv) {
     }
     std::printf("  default visible %zu (legendary %zu), set pieces %zu, with bitmap %zu\n",
                 defaultVisible, legendaryDefault, setPieces, withBitmap);
-    CHECK_EQ(defaultVisible, 3288, "items flagged DefaultVisible");
+    CHECK_EQ(defaultVisible, 6197, "items flagged DefaultVisible");
     CHECK_EQ(setPieces, 757, "items flagged SetPiece");
 
     // --------------------------------------------------------- record lookup
@@ -255,9 +257,9 @@ int main(int argc, char** argv) {
     std::printf("  visible items %d, columns %d, rows %d, contentHeight %d, maxScroll %d\n",
                 grid.visibleItemCount(), grid.columns(), grid.rows(),
                 grid.contentHeight(), grid.maxScroll());
-    CHECK_EQ(grid.visibleItemCount(), 3288, "default filter shows equipment + relics");
+    CHECK_EQ(grid.visibleItemCount(), 6197, "default filter shows equipment + relics");
     CHECK_EQ(grid.columns(), 7, "columns in a 320 px wide grid");
-    CHECK_EQ(grid.rows(), (3288 + 6) / 7, "rows");
+    CHECK_EQ(grid.rows(), (6197 + 6) / 7, "rows");
     CHECK_EQ(grid.contentHeight(), grid.rows() * 42 - 2, "content height");
     CHECK_EQ(grid.maxScroll(), grid.contentHeight() - 608, "max scroll");
     CHECK_EQ(grid.scrollOffset(), 0, "initial scroll");
@@ -480,7 +482,7 @@ int main(int argc, char** argv) {
     missingOnly.owned = OwnedFilter::MissingOnly;
     grid.relayout(transferGrid, missingOnly, &owned);
     std::printf("  missing-only: %d items\n", grid.visibleItemCount());
-    CHECK_EQ(grid.visibleItemCount(), 3288 - 5, "missing-only filter");
+    CHECK_EQ(grid.visibleItemCount(), 6197 - 5, "missing-only filter");
 
     Filters legendaryOnly = filters;
     legendaryOnly.classificationMask = 1u << static_cast<int>(Classification::Legendary);
@@ -518,6 +520,64 @@ int main(int argc, char** argv) {
     grid.relayout(transferGrid, everything);
     std::printf("  no filters at all: %d items\n", grid.visibleItemCount());
     CHECK_EQ(grid.visibleItemCount(), cat.itemCount(), "unfiltered layout shows everything");
+
+    // ------------------------------------------- the KIND mark (catIsMi, collect_mi)
+    rule("monster infrequents: the KIND mark");
+    {
+        // cat is the flag-on catalogue (the shipped default, 2,909 MIs); the flag-off cut beside it
+        // is data\oracle\nomi\catalogue.bin (no MI)
+        const Catalogue& on = cat;
+        std::string offPath(path);
+        const std::size_t cut = offPath.find_last_of("\\/");
+        offPath = (cut == std::string::npos ? std::string() : offPath.substr(0, cut + 1)) + "nomi/catalogue.bin";
+        Catalogue off;
+        std::string e2;
+        if (!off.loadFromFile(offPath, &e2)) {
+            std::printf("  %s: not loaded (%s) - the KIND half is SKIPPED\n", offPath.c_str(), e2.c_str());
+        } else {
+            std::size_t offMi = 0;
+            for (const ItemView& it : off.items()) if (catIsMi(it)) ++offMi;
+            std::printf("  %s: %zu items, %zu monster infrequents\n", offPath.c_str(), off.itemCount(), offMi);
+            CHECK_EQ(offMi, 0, "the flag-off catalogue marks no entry MI");
+            CHECK_EQ(off.itemCount(), 4392, "the flag-off catalogue: 4,392 items");
+            std::size_t onMi = 0, rareMi = 0, misplaced = 0;
+            for (int g = 0; g < kSlotGroupCount; ++g) {
+                const GroupRange r = on.groupRange(static_cast<SlotGroup>(g));
+                bool seen = false;
+                for (std::uint32_t i = r.first; i < r.first + r.count; ++i) {
+                    const ItemView& it = on.item(i);
+                    if (catIsMi(it)) {
+                        seen = true;
+                        ++onMi;
+                        if (it.has(ItemFlag::Equipment) && g < static_cast<int>(SlotGroup::Relic)) ++rareMi;
+                    } else if (seen) {
+                        ++misplaced;
+                    }
+                }
+            }
+            std::printf("  %s: %zu items, %zu monster infrequents\n", path, on.itemCount(), onMi);
+            CHECK_EQ(off.formatVersion(), Catalogue::kFormatVersion, "the flag-off catalogue is format 1 too");
+            CHECK_EQ(onMi, 2909, "the flag-on catalogue marks every Rare equipment record: 2,909 MIs "
+                                 "(the census's 2,393 + 466 faction + 50 crafted)");
+            CHECK_EQ(rareMi, onMi, "every MI is equipment in a slot group (Helm..Medal)");
+            CHECK_EQ(misplaced, 0, "inside each group the MIs come after the uniques");
+            CHECK_EQ(on.itemCount(), off.itemCount() + onMi, "the flag-off items + the MIs");
+            CHECK(catIsMi(on, "records/items/faction/head/f011a_head.dbr") &&
+                      catIsMi(on, "records/items/gearhead/b008_head.dbr") &&
+                      off.indexOfRecord("records/items/faction/head/f011a_head.dbr") < 0 &&
+                      off.indexOfRecord("records/items/gearhead/b008_head.dbr") < 0,
+                  "a faction-store rare (Chosen Cowl f011a) and a crafted one (Ranger's Helm b008) are "
+                  "MIs now; the flag-off catalogue has neither");
+            const int b = on.indexOfRecord("records/items/gearhead/b002f_head.dbr");
+            CHECK(b >= 0 && catIsMi(on.item(static_cast<std::size_t>(b))) &&
+                      on.item(static_cast<std::size_t>(b)).classification == Classification::Epic,
+                  "Incendiary Casque b002f: marked MI, its Rare packed as Epic like a Rare relic");
+            CHECK(catIsMi(on, "records/items/gearhead/b002f_head.dbr") && !catIsMi(on, on.item(0).record) &&
+                      !catIsMi(on, "records/items/no/such_record.dbr") &&
+                      !catIsMi(off, "records/items/gearhead/b002f_head.dbr"),
+                  "catIsMi(catalogue, record): the MI yes; a unique, an unknown record, the flag-off catalogue no");
+        }
+    }
 
     std::printf("\n%d checks passed\n", g_checks);
     std::printf("MODEL TESTS PASSED\n");

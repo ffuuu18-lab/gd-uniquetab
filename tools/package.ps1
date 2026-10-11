@@ -1,6 +1,7 @@
 # package.ps1 - builds the release zip from a built tree.
-#   powershell -ExecutionPolicy Bypass -File tools\package.ps1 [-Version 1.1.0] [-Out out\]
-# Stages exactly what a player installs and zips it: x64\uniquetab.asi and the three documents.
+#   powershell -ExecutionPolicy Bypass -File tools\package.ps1 [-Version 1.2.0] [-Out out\]
+# Stages exactly what a player installs and zips it: x64\uniquetab.asi and the four documents
+# (README.md, CHANGELOG.md, LICENSE, THIRD_PARTY.md).
 # Nothing generated or derived from the game ships. The plugin creates x64\uniquetab\ itself and
 # on the first launch generates catalogue.bin, the uniq-*.txt lists and the uniq-pages.arz
 # overlay there, paints the cover plates into <game>\settings\ui\caravan\ and writes its own ini.
@@ -25,7 +26,7 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force "$stage\x64" | Out-Null
 
 Copy-Item $asi "$stage\x64\uniquetab.asi"
-foreach ($doc in "README.md", "LICENSE", "THIRD_PARTY.md") {
+foreach ($doc in "README.md", "CHANGELOG.md", "LICENSE", "THIRD_PARTY.md") {
     $p = Join-Path $root $doc
     if (Test-Path $p) { Copy-Item $p "$stage\$doc" } else { Write-Warning "$doc is missing from the tree" }
 }

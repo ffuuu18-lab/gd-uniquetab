@@ -70,7 +70,7 @@
 // (s s s s s i s s i s i i s s i i i i). So the mapping is not a guess from position alone -
 // it is two independently decoded orders that agree field for field:
 //
-//    itemID <- the journal's `record` (== slot +0x008, "baseRecord", on 357 of the user's 358
+//    itemID <- the journal's `record` (== slot +0x008, "baseRecord", on 357 of a real journal's 358
 //              real entries)            prefixID <- +0x028   suffixID <- +0x048
 //    modifierID <- +0x070               transmuteID <- +0x100 (the journal calls it `illusion`)
 //    seed <- u32 +0x068                 relicID <- +0x090 (`component`)

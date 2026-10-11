@@ -150,6 +150,7 @@ class View:
         self.db = ArzDatabase.load_game(game)
         self.layers = []                 # (ArzArchive, label), last wins
         self.arcs = []                   # mod .arc files, searched before UI.arc
+        self.skipped = []                # unreadable .arc files, "path: reason"
         self.view = "vanilla"
         if basemods:
             self._add_layer(os.path.join(game, "mods", "database.arz"), "/basemods")
@@ -171,8 +172,16 @@ class View:
             self.layers.append((ArzArchive(path, label), label))
 
     def _add_arc(self, path):
-        if os.path.isfile(path):
+        # An unreadable .arc is skipped with one warning, never fatal: a mod can ship a broken
+        # resource archive (DeathGrimDawn's text_ko.arc has a zeroed header) and the engine goes
+        # on with the rest. src\gen\ui_geometry.cpp does the same.
+        if not os.path.isfile(path):
+            return
+        try:
             self.arcs.append(ArcArchive(path, os.path.basename(path)))
+        except (ValueError, OSError, struct.error) as e:
+            self.skipped.append("%s: %s" % (path, e))
+            print("warning: skipping an unreadable archive - %s" % e, file=sys.stderr)
 
     def rec(self, name):
         """(record, source label); a record no layer overrides keeps its vanilla value."""

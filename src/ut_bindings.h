@@ -29,7 +29,7 @@
 //               for and nothing that could drift while the game is still built with MSVC.
 //   LITERAL     a number compiled in. Every one that is left is listed below WITH ITS REASON and
 //               WITH THE RUN-TIME TEST that has to pass before it is used. None of them is a
-//               code address any more; they are field offsets inside objects the mod already
+//               code address; they are field offsets inside objects the mod already
 //               proved it is holding (the window whose vtable slot +0x18 is the function the
 //               signature scan found, and so on).
 //
@@ -44,8 +44,8 @@
 //   every Game.dll / Engine.dll function and the static data exports.
 //     obtained    GetProcAddress(module, "<decorated name>")
 //     confirmed   a non-null address inside the module that was asked; a REQUIRED symbol that
-//                 comes back null already turns the mod off (gd_runtime.cpp), and that rule is
-//                 now folded into this gate so the count is reported with the others.
+//                 comes back null already turns the mod off (gd_runtime.cpp), and this gate
+//                 reports that count with the others.
 //
 // == SIGNATURE (exe .text; the exe is Steam-DRM encrypted until its stub has run, so every one
 //               of these is scanned from the GAME THREAD, retried, never from DllMain) ==
@@ -61,28 +61,27 @@
 //   exe.reagent-take replica pair      1.3.0.8 rva 0x132B4F and 0x132CC1   ut_reagent.cpp
 //     obtained    the `mov rax,[rsi]; lea rdx,[rbp-0x30]; mov rcx,rsi; call [rax+0x590]` shape
 //     confirmed   exactly TWO matches, less than 0x400 bytes apart (one handler)
-//   exe.deposit site A                 1.3.0.8 rva 0x1EAB2A   ut_reagent.cpp   ** WAS LITERAL **
+//   exe.deposit site A                 1.3.0.8 rva 0x1EAB2A   ut_reagent.cpp
 //     obtained    42 bytes with the four call displacements wildcarded; the accepted return
-//                 window is sig+6 .. sig+0x1B, which is the byte range that used to be written
-//                 as 0x1EAB30..45
+//                 window is sig+6 .. sig+0x1B, which is the byte range 0x1EAB30..45 on
+//                 1.3.0.8
 //     confirmed   exactly one match in .text
-//   exe.deposit site B                 1.3.0.8 rva 0x1EC64F   ut_reagent.cpp   ** WAS LITERAL **
+//   exe.deposit site B                 1.3.0.8 rva 0x1EC64F   ut_reagent.cpp
 //     obtained    the same shape with `mov edx,r14d` instead of `mov edx,[rbp+0x208]`, which is
 //                 what makes the two distinguishable; window sig+1 .. sig+0x16 (= 0x1EC650..65)
 //     confirmed   exactly one match in .text; label only - site B is the EQUIPMENT quick-move
 //                 and the table gate refuses it whatever this says
-//   gamedll.dragSite                   1.3.0.8 Game.dll rva 0x173960   ut_reagent.cpp  ** WAS
-//                                                                                    LITERAL **
+//   gamedll.dragSite                   1.3.0.8 Game.dll rva 0x173960   ut_reagent.cpp
 //     obtained    61 bytes with the three call displacements wildcarded, ending on the
 //                 `mov [rdi+0x30],ebp` that clears the cursor slot - which is the instruction
 //                 that makes the drag's removal unconditional and so belongs inside the proof.
-//                 The accepted return window is sig+0x0D .. sig+0x20, the byte range that used
-//                 to be written as 0x17396D..0x173980.
+//                 The accepted return window is sig+0x0D .. sig+0x20, the byte range
+//                 0x17396D..0x173980 on 1.3.0.8.
 //     confirmed   exactly one match in Game.dll's .text. THIS ONE IS EARLY: Game.dll is plain on
 //                 disk, so it is resolved before any hook is installed and the all-or-nothing
 //                 gate covers it - no drag deposit is possible at all unless it was found.
 //
-//   With those three converted, NO EXE OR DLL CODE ADDRESS IS COMPILED INTO THE MOD ANY MORE.
+//   With those three found by signature, NO EXE OR DLL CODE ADDRESS IS COMPILED INTO THE MOD.
 //
 // == DECODED (out of an exported function's own bytes, at export-resolution time) ==
 //   Item + craftingMaterial   0xC64   from Item::IsReagentCompatible  `0F B6 81 <d32> C3`
@@ -139,7 +138,7 @@
 //   ReagentWindow + 0x380 box vector, + 0x40 origin, + 0x480 plate widget, + 0x4B0 texture,
 //                  + 0x4C0/+0x4C4 destination size, + 0x4E8/+0x4F0 the search match range
 //   UIReagentItem + 0x30 prototype id, + 0x6C local position, + 0x80 parent origin
-//     why literal  measured from the exe's own code in the DIGs; the only functions that touch
+//     why literal  measured from the exe's own disassembly; the only functions that touch
 //                  them are exe-internal, so there is no export to decode
 //     confirmed    the vector's (last-first) must be a multiple of the 16-byte stride and under
 //                  the 8192 ceiling; the widget pointers must be readable and carry the vtable
@@ -159,6 +158,47 @@
 //                  route is optional and turns itself off on any inconsistency
 //   the text style class numbers 0x2C / 0x4A - DATA, not code: they are ids in the game's own
 //     text-style table, exactly like a record path, and are left as they are by design.
+//
+// == THE SCREEN PAD'S INPUT (DirectInput.dll; LATE and critical for its own route only) ==
+//   dinput.getMouseEvent  EXPORT  ?GetMouseEvent@DirectInputDevice@GAME@@UEBA?AUMouseEvent@
+//                                 InputDevice@2@H@Z 1.3.0.8 rva 0x4840 and ?Update@DirectInputDevice@
+//                                 GAME@@UEAAXXZ 0x31A0, by name in DirectInput.dll (loaded by name
+//                                 with the engine's input, never imported)   ut_plate.cpp
+//     confirmed   on the game thread, against the LIVE device: Engine::GetInputDevice() (by name in
+//                 Engine.dll, on GAME::gEngine) -> its vtable slot +0x38 must be the export (the
+//                 slot Engine::ProcessUserInput calls) and +0x10 must be Update; the export's own
+//                 `imul r8,rax,0x1C` must name the 0x1C-byte MouseEvent the detour rewrites.
+//                 40 tries 500 ms apart; a refusal turns ONLY the screen pad's input off - the
+//                 phase is LATE because the device does not exist before the engine's input does,
+//                 not because of the DRM
+//
+// == THE TEXT ENGINE (Engine.dll; every row EARLY and ADVISORY: a miss turns only its own route
+//    off - the wide draw, the language font, the live metrics or the language line - and the
+//    mod draws exactly as before through the char* call, GraphicsEngine::LoadFont and the
+//    compiled table. Resolved by ut_bindings.cpp itself at the gate; names in kUtTextExports) ==
+//   text.renderWide     EXPORT  GraphicsCanvas::RenderText2d(.., unsigned short const*, ..)
+//                               1.3.0.8 rva 0x9F930: the same wrapper as the char* one (0x9F800)
+//                               except the layout it calls (0xA5D60, the wide twin of 0xA6140)
+//   text.loadFontDirect EXPORT  Singleton<StyleManager>::Get 0x7B480 + StyleManager::
+//                               LoadFontDirect 0x1C3EE0 (the language copy of a font: the special
+//                               font folder inserted after the path's last '/')
+//   text.fontMetrics    EXPORT  GraphicsFont2::GetStyle 0xB0720 / GetMetric 0xB08E0 /
+//                               GetKerningAmount 0xB0A20
+//   text.localization   EXPORT  LocalizationManager::Instance 0x143500 / GetLanguage 0xDF60 /
+//                               IsEnglish 0x147960 / GetSpecialFontFolder 0x147970 /
+//                               LocalizeWithoutParams 0x143700 / TagFoundInMap 0x145F50
+//     confirmed   a non-null address inside Engine.dll for every name of the row
+//   font.styleSize      DECODED  Style + 0x98 (the style's baked size)
+//     obtained    GetStyle calls the nearest-style finder twice (0xAE550); in it
+//                 `sub eax,[rdi+d32]` (2B 87 d32) subtracts the style's size from the requested
+//                 one, and the next instruction reads the flags beside it (8B 97 d32+4)
+//     confirmed   0x10..0x1000 and 4-aligned; per world the cross-check below proves the sizes
+//   fntMetric.fields    LITERAL  FNTMetric +0x02 xOffset (s16), +0x04 right bearing (s16), +0x06
+//                                w (u16) - the font file's own glyph record
+//     confirmed   per world, before the live measure is used: every style the engine picks for
+//                 sizes 1..64 of the ROOT savapromedium, every ASCII glyph of it, the 26 captions
+//                 and the label lines must equal the compiled table (ut_textmeasure.h), or the
+//                 live measure stays off for that world (one ERROR naming the first difference)
 //
 // ---------------------------------------------------------------------------------------------
 #pragma once
@@ -202,7 +242,7 @@ inline int utBindScan(const unsigned char* lo, const unsigned char* hi, const Ut
     return count;
 }
 
-// The three deposit call sites, converted from RVA literals in this work package. Defined in
+// The three deposit call sites, found by signature scan rather than compiled in as RVAs. Defined in
 // ut_bindings.cpp so the test and the mod share one copy of the bytes.
 extern const UtBindPattern kUtSigDepositSiteA;
 extern const UtBindPattern kUtSigDepositSiteB;
@@ -234,7 +274,8 @@ enum UtBindPhase { UT_BIND_EARLY = 0, UT_BIND_LATE = 1 };
 
 // CRITICAL rows have a consumer: some decision in the mod reads the value, so a failure turns the
 // mod off. ADVISORY rows are decoded, confirmed and reported like the others, but nothing reads
-// them, so a failure is one WARN naming the row and the gate still passes. Orthogonal to the
+// them - or only an optional route that then stays off and leaves the 1.1.0 path in place (the
+// text engine) - so a failure is one WARN naming the row and the gate still passes. Orthogonal to the
 // class and to the phase; the offline test asserts the flag row by row.
 enum UtBindGate { UT_BIND_CRITICAL = 0, UT_BIND_ADVISORY = 1 };
 
@@ -269,5 +310,107 @@ const char* bindingsGateFailure();
 // Returns false when `i` is out of range; any out pointer may be null.
 int bindingsRowCount();
 bool bindingsRowAt(int i, const char** name, int* cls, int* phase, int* gate = nullptr);
+
+// ---- the text engine -------------------------------------------------------------------------
+// The style-size decoder, pure, so tools/test_bindings.cpp runs it over Engine.dll on disk.
+// `at(rva, need)` returns `need` readable bytes at an rva of the module, or null.
+typedef const unsigned char* (*UtBindAtFn)(unsigned long rva, size_t need, void* ctx);
+
+// The offset of a style's baked size, decoded from GraphicsFont2::GetStyle at `getStyleRva`: the
+// E8 target it calls twice is the nearest-style finder; in the finder's first 0x200 bytes the
+// `2B 87 <d32>` immediately followed by `8B 97 <d32+4>` names it. 0 when the shape is not there.
+inline unsigned long utDecodeStyleSizeOffset(unsigned long getStyleRva, UtBindAtFn at, void* ctx,
+                                             unsigned long* finderRva = nullptr) {
+    if (finderRva) *finderRva = 0;
+    const size_t kSpan = 0x180;
+    const unsigned char* p = at ? at(getStyleRva, kSpan + 5, ctx) : nullptr;
+    if (!p) return 0;
+    unsigned long targets[16];
+    int nt = 0;
+    unsigned long finder = 0;
+    for (size_t i = 0; i < kSpan && !finder; ++i) {
+        if (p[i] != 0xE8) continue;
+        const long rel = (long)((unsigned long)p[i + 1] | ((unsigned long)p[i + 2] << 8) |
+                                ((unsigned long)p[i + 3] << 16) | ((unsigned long)p[i + 4] << 24));
+        const unsigned long t = (unsigned long)((long)getStyleRva + (long)i + 5 + rel);
+        for (int k = 0; k < nt; ++k) {
+            if (targets[k] == t) finder = t;
+        }
+        if (nt < 16) targets[nt++] = t;
+    }
+    if (!finder) return 0;
+    const size_t kFinderSpan = 0x200;
+    const unsigned char* q = at(finder, kFinderSpan + 12, ctx);
+    if (!q) return 0;
+    for (size_t i = 0; i < kFinderSpan; ++i) {
+        if (q[i] != 0x2B || q[i + 1] != 0x87 || q[i + 6] != 0x8B || q[i + 7] != 0x97) continue;
+        const unsigned long d = (unsigned long)q[i + 2] | ((unsigned long)q[i + 3] << 8) |
+                                ((unsigned long)q[i + 4] << 16) | ((unsigned long)q[i + 5] << 24);
+        const unsigned long f = (unsigned long)q[i + 8] | ((unsigned long)q[i + 9] << 8) |
+                                ((unsigned long)q[i + 10] << 16) | ((unsigned long)q[i + 11] << 24);
+        if (f != d + 4 || d < 0x10 || d > 0x1000 || (d & 3) != 0) continue;
+        if (finderRva) *finderRva = finder;
+        return d;
+    }
+    return 0;
+}
+
+// One export of the text engine: the row it belongs to, its decorated name, a readable name and
+// the 1.3.0.8 rva (evidence for the offline test only).
+struct UtTextExport {
+    const char* row;
+    const char* mangled;
+    const char* pretty;
+    unsigned long rva1308;
+};
+extern const UtTextExport kUtTextExports[];
+extern const int kUtTextExportCount;
+
+// What the gate resolved. A pointer is null when its row failed; each route flag covers the whole
+// route (every export of it, and for `metrics` the decoded style size too).
+struct UtTextApi {
+    void* renderText2dW;     // RenderText2d(int,int,Color const&,u16 const*,GraphicsFont2 const*,
+                             //   int,GraphicsXAlign,GraphicsYAlign,FontStyleFlag,FontLayout)
+    void* styleManagerGet;   // Singleton<StyleManager>::Get()
+    void* loadFontDirect;    // StyleManager::LoadFontDirect(std::string const&)
+    void* fontGetStyle;      // GraphicsFont2::GetStyle(unsigned, FontStyleFlag) const
+    void* fontGetMetric;     // GraphicsFont2::GetMetric(Style const*, u16) const
+    void* fontGetKerning;    // GraphicsFont2::GetKerningAmount(Style const*, u16, u16) const
+    void* locInstance;       // LocalizationManager::Instance()
+    void* locGetLanguage;    // ...::GetLanguage() const -> std::string const&
+    void* locIsEnglish;      // ...::IsEnglish() const
+    void* locSpecialFolder;  // ...::GetSpecialFontFolder() const -> std::string const&
+    void* locLocalize;       // ...::LocalizeWithoutParams(char const*) -> u16 const*
+    void* locTagFound;       // ...::TagFoundInMap(char const*)
+    unsigned long styleSizeOff;  // Style + this = the baked size; 0 = not decoded
+    bool draw, font, metrics, loc;
+};
+const UtTextApi& bindingsText();
+
+// The calls, each SEH-guarded (a fault returns the failure value). Call them from the thread that
+// already loads and draws the mod's fonts.
+// The language copy of `path` through StyleManager::LoadFontDirect; null when the route is off,
+// the engine returned null, or it faulted.
+const void* bindingsTextLoadFontDirect(const char* path);
+// The style the engine draws `size` with, and its baked size (1..400). False on any failure.
+bool bindingsTextStyle(const void* font, int size, const void** style, int* styleSize);
+// One glyph's metric in a style: false when the font has none (GetMetric returned null).
+bool bindingsTextGlyph(const void* font, const void* style, unsigned cp, int* xOff, int* rb,
+                       int* w);
+
+// The game's language, read once (call it from a world: LocalizationManager is the game's own
+// singleton and is not touched before then). `known` = 0 while the route is off or a read failed.
+struct UtTextLanguage {
+    int known;
+    int english;         // IsEnglish(); -1 = not read
+    char language[40];   // GetLanguage(), as the engine has it
+    char folder[40];     // GetSpecialFontFolder(), "" for the root fonts
+};
+const UtTextLanguage& bindingsTextLanguage();
+
+// The game's own text for a tag in its current language, as UTF-8 into out[cap]: false when the
+// route is off, the tag is not in the map (TagFoundInMap), the call faulted or the text is empty.
+// The same rule as the language: from a world, on the thread that loads the mod's fonts.
+bool bindingsTextLocalize(const char* tag, char* out, size_t cap);
 
 }  // namespace ut

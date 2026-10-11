@@ -11,6 +11,13 @@
 // Seven detours: Engine::PresentSurface, GameEngine::Update, GameEngine::SetTransferOpen,
 // InventorySack::AddItem x2, InventorySack::RemoveItem, WinWindow::WindowProc.
 // GraphicsCanvas::EndFrame is NOT hooked: it is never called on 1.3.0.8.
+//
+// Not here, and outside the tally below: the detours installed LATE from the game thread by
+// ut_plate.cpp once the live object proves its address - ReagentWindow::Load / Draw / mouse
+// (+0x38) / search (+0x118), and the screen pad's input, DirectInputDevice::GetMouseEvent and
+// ::Update (DirectInput.dll, by name, cross-checked against Engine::GetInputDevice()'s vtable;
+// inert until the screen pad publishes its rectangles). hookFrameCount() below is the screen
+// pad's freshness clock.
 
 #include "hooks.h"
 

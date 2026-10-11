@@ -36,7 +36,7 @@ if errorlevel 1 set RC=1
 "%OUT%\test_store.exe" --reread
 if errorlevel 1 set RC=1
 
-rem ---- pass 3: a FORMAT-3 file - the one on the user's disk right now --------------------------
+rem ---- pass 3: a FORMAT-3 file, as an installed mod writes it -------------------------------
 set "SLEG=%OUT%\store-legacy"
 if exist "%SLEG%" rd /s /q "%SLEG%"
 mkdir "%SLEG%"
@@ -98,13 +98,30 @@ set "UNIQUETAB_OUT=%SMODE%"
 if errorlevel 1 set RC=1
 
 rem ---- pass 9: one collection per custom game ---------------------------------------------------
-rem A custom game's journal set lives under views\custom-<name>\ beside the start-up one, keyed by
+rem A custom game's journal set lives under mods\<name>\ beside the start-up one, keyed by
 rem the custom mod's name. Rows on both sides of a switch made mid-process; both files read back.
 set "SVIEW=%OUT%\store-views"
 if exist "%SVIEW%" rd /s /q "%SVIEW%"
 mkdir "%SVIEW%"
 set "UNIQUETAB_OUT=%SVIEW%"
 "%OUT%\test_store.exe" --views
+if errorlevel 1 set RC=1
+
+rem ---- pass 10: the database follows the view ------------------------------------------------------
+rem Rows on both sides of a view change; a record the active database cannot build is skipped by
+rem the rescue's plan and keeps its count, through a deposit of another record and the export.
+set "SDBV=%OUT%\store-dbviews"
+if exist "%SDBV%" rd /s /q "%SDBV%"
+mkdir "%SDBV%"
+set "UNIQUETAB_OUT=%SDBV%"
+"%OUT%\test_store.exe" --dbviews
+if errorlevel 1 set RC=1
+
+set "SMI=%OUT%\store-mi"
+if exist "%SMI%" rd /s /q "%SMI%"
+mkdir "%SMI%"
+set "UNIQUETAB_OUT=%SMI%"
+"%OUT%\test_store.exe" --mi
 if errorlevel 1 set RC=1
 set "UNIQUETAB_OUT=%SOUT%"
 

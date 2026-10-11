@@ -24,16 +24,20 @@
 #include "gd_exports.h"
 #include "gd_exports_reagent.h"
 #include "gd_runtime.h"
+#include "hooks.h"         // hookFrameCount - the screen pad's freshness clock
 #include "ut_config.h"
 #include "ut_live.h"
 #include "ut_bindings.h"
 #include "ut_log.h"
 #include "ut_paths.h"
 #include "ut_ownedfold.h"  // the owned fold's arithmetic, tested offline
+#include "ut_padmat.h"     // the pad's click rule (utPadLeftDown), tested offline
+#include "ut_screendraw.h" // the screen pad's draw site proof and its frame, tested offline
 #include "ut_panel.h"
 #include "ut_reagent.h"
 #include "ut_rescue.h"   // journalItemName, for tier C
 #include "ut_store.h"    // storeTableOwns() - the ONE gate
+#include "ut_startorder.h" // when the plates may be loaded, tested offline
 #include "ut_textfold.h" // the shared case fold, tested offline
 
 namespace ut {
@@ -70,7 +74,7 @@ const size_t kPlateHOff = 0x4C4;       // + 0x44 : destination height
 // at offset 0, and there are (last - first) / 16 of them.
 const size_t kBoxVecOff = 0x380;
 const size_t kBoxVecStride = 16;
-const int kMaxBoxes = 8192;            // sanity ceiling for that vector (the frame builds 160)
+const int kMaxBoxes = 8192;            // sanity ceiling for that vector (the frame builds N, 160..512)
 
 // The CaravanWindow. Pages are pointers at caravan+0x13C8[4]
 // and caravan+0x1728 is the visible page index; the material ReagentWindow is page 3.
@@ -133,7 +137,7 @@ volatile LONG g_faults = 0;
 // each other; MinHook answers the second with MH_ERROR_ALREADY_CREATED (3), which must not be
 // treated as a hard failure (a hook that IS live would be declared dead and the whole feature
 // disabled).  These two flags make the call
-// idempotent, and MH_ERROR_ALREADY_CREATED / MH_ERROR_ENABLED are now benign by name.
+// idempotent, and MH_ERROR_ALREADY_CREATED / MH_ERROR_ENABLED are benign by name.
 volatile LONG g_hookOn = 0;     // the detour is created AND enabled
 volatile LONG g_deferLogged = 0;
 const char* g_why = "not initialised";
@@ -164,6 +168,7 @@ volatile LONG g_btnSpaceProven = 0;    // a probe showed |delta| <= 2 px on both
 volatile LONG g_btnSpaceLogged = 0;    // the ENABLED / REFUSED line, once per world
 volatile LONG g_btnPassLogged = 0;     // bitmask: which straight-through reason was logged
 volatile LONG g_drawOriginOk = 0;      // the draw origin below has been computed this world
+volatile LONG g_matKeepLogged = 0;     // bitmask: the once-per-world "kept from the box" lines
 float g_lastDrawOx = 0.0f;             // the origin the engine's own Draw computed, game thread
 float g_lastDrawOy = 0.0f;
 
@@ -454,15 +459,30 @@ bool shapeProbe(void* window, const unsigned char* tlo, const unsigned char* thi
     }
 }
 
+// Every box the last material ReagentWindow::Load captured, however many the view's frame carries
+// (160..512, the F line): the count is asked first and the copy sized to it, so no box past a
+// fixed array is ever left out of a hit test. Returns how many `out` holds.
+int capturedBoxesAll(std::vector<void*>& out) {
+    out.clear();
+    const int want = liveCapturedBoxes(nullptr, 0);
+    if (want <= 0) return 0;
+    out.resize((size_t)want);
+    int n = liveCapturedBoxes(out.data(), want);
+    if (n > want) n = want;
+    if (n < 0) n = 0;
+    out.resize((size_t)n);
+    return n;
+}
+
 bool checkWindowShape(void* window) {
     const unsigned char *tlo = nullptr, *thi = nullptr, *ilo = nullptr, *ihi = nullptr;
     if (!textRange(&tlo, &thi) || !imageRange(&ilo, &ihi)) {
         logD("plate: cannot read the exe section table - the structural check is inconclusive");
         return false;
     }
-    void* boxes[256];
-    int captured = liveCapturedBoxes(boxes, 256);
-    if (captured > 256) captured = 256;
+    std::vector<void*> boxVec;
+    const int captured = capturedBoxesAll(boxVec);
+    void* const* boxes = boxVec.data();
 
     WindowShape s;
     s.widgetVt = nullptr;
@@ -755,42 +775,83 @@ const GdTexture* fallbackPlate() {
     return g_fallback;
 }
 
+// The live layout's grid as the plate set reads it (utPlateSetChoice): -1 = not resolved yet (no
+// UI scale), 0 = the derived grid, 1 = the user's grid_ line. Game thread (the plate probe and the
+// relayout), like every other liveLayoutGet caller there.
+int plateLiveGrid() {
+    ut::LiveGeometry g;
+    liveGeometry(&g);
+    if (g.plateW <= 0 || g.plateH <= 0) return -1;   // no P line loaded: no cover, no grid yet
+    LiveLayout lay;
+    if (!liveLayoutGet(&lay)) return -1;
+    return lay.L.user[kUtLayGrid] ? 1 : 0;
+}
+
+// Which set the page shows now: the layout-plates thread's published set (layoutPlatesState)
+// compared with the live layout's grid. `suffix` gets "_L<hash>" for the layout plates, else "".
+int plateSetNow(char* suffix, size_t cap) {
+    const int pw = platePlateW(), ph = platePlateH();
+    char lay[16];
+    bool ready = true;
+    layoutPlatesState(pw, ph, lay, sizeof(lay), &ready);
+    const int set = utPlateSetChoice(lay[0] ? 1 : 0, ready ? 1 : 0, plateLiveGrid());
+    if (suffix && cap) _snprintf_s(suffix, cap, _TRUNCATE, "%s", set == kUtPlateSetLayout ? lay : "");
+    return set;
+}
+
 // The two candidate names of one plate, from its cell size and the LIVE view. Rebuilt in
 // place on a view change: the draw path may hold a pointer into g_plates, so the vector
 // itself must not be reallocated.
 void plateNames(PlateTex& p) {
-    // THE NAME. A plate painted for a 438x627 cover keeps the vanilla name, so the set that
-    // ships today goes on being found; any other cover gets the plate size in the name, because
-    // the same cell size on a bigger caravan is a different picture.
+    // THE NAME. A start-up view's plate for a 438x627 cover keeps the vanilla name, so the set
+    // that ships today goes on being found; any other cover gets the plate size in the name,
+    // because the same cell size on a bigger caravan is a different picture.
     const int pw = platePlateW(), ph = platePlateH();
     const bool vanillaPlate = pw == kPlateW && ph == kPlateH;
-    // A custom game's view adds its tag: the cover size alone collides when two mods share one,
-    // and every view's plates live in the same override folder. src\gen\plate_gen.cpp builds the
-    // same name from the same two pieces.
+    // A custom game's view always adds the size and its tag, whatever its cover size: every
+    // view's plates live in the same override folder, and a custom game with the vanilla cover
+    // size would otherwise share the main campaign's names. src\gen\plate_gen.cpp builds the same
+    // name from the same pieces.
     const char* tag = viewTag();
     char buf[192];
-    if (vanillaPlate)
-        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d.tex", p.cellW, p.cellH);
-    else if (!tag[0])
-        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d_%dx%d.tex",
-                    p.cellW, p.cellH, pw, ph);
-    else
+    // A user grid in force (ut_generate's layout plates): its own set, always with the cover and
+    // the tag, served only from the override root. Not painted yet - or the live page has the user
+    // grid in force but the layout-plates thread has no set for it: no name at all, so the plain
+    // cover is shown instead of frames that do not sit under the boxes. The live page's derived
+    // grid always gets the derived plates, whatever the thread published (utPlateSetChoice).
+    char lay[16];
+    const int set = plateSetNow(lay, sizeof(lay));
+    if (set != kUtPlateSetDerived) {
+        p.modPath.clear();
+        p.path.clear();
+        if (set == kUtPlateSetPlain) return;
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d_%dx%d%s%s%s.tex",
+                    p.cellW, p.cellH, pw, ph, tag[0] ? "_" : "", tag, lay);
+        p.path = buf;
+        return;
+    }
+    if (tag[0])
         _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d_%dx%d_%s.tex",
                     p.cellW, p.cellH, pw, ph, tag);
+    else if (vanillaPlate)
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d.tex", p.cellW, p.cellH);
+    else
+        _snprintf_s(buf, sizeof(buf), _TRUNCATE, "ui/caravan/uniq_plate_%dx%d_%dx%d.tex",
+                    p.cellW, p.cellH, pw, ph);
     p.path = buf;
     // The mod-folder candidate. utModFile is the ONE resolver (it knows about the Documents
     // fallback and about %UNIQUETAB_OUT%), and it answers whether the file is actually there - so
     // a missing plates folder costs no LoadTexture call at all.
     char leaf[192];
     char full[MAX_PATH];
-    if (vanillaPlate)
-        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d.tex", p.cellW, p.cellH);
-    else if (!tag[0])
-        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d_%dx%d.tex",
-                    p.cellW, p.cellH, pw, ph);
-    else
+    if (tag[0])
         _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d_%dx%d_%s.tex",
                     p.cellW, p.cellH, pw, ph, tag);
+    else if (vanillaPlate)
+        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d.tex", p.cellW, p.cellH);
+    else
+        _snprintf_s(leaf, sizeof(leaf), _TRUNCATE, "plates\\uniq_plate_%dx%d_%dx%d.tex",
+                    p.cellW, p.cellH, pw, ph);
     p.modPath.clear();
     if (utModFile(g_self, leaf, full, sizeof(full))) p.modPath = full;
 }
@@ -856,14 +917,113 @@ bool ensurePlate(PlateTex* p, int wantW, int wantH) {
 
 volatile LONG g_probed = 0;
 
-// ORDERING. The plates are written by the generation, which runs once on the start-up worker
-// (dllmain, before panelInit and before any hook exists). This probe cannot run before it:
-// it needs graphics() and the cell sizes out of uniq-groups.txt, both of which only exist
-// during a HUD build on the game thread, long after the worker is done. Nothing regenerates
-// later in the process, so no LoadTexture of ours can hand back a plate from before a
-// regeneration; a world teardown clears g_probed and the cached textures, so the next world
-// re-probes the files that are on disk now.
+// Textures a rename replaced. One the window may still show (installed or about to be) waits for
+// the world teardown's UnloadTexture; any other is released at once. Full: left to the engine.
+const GdTexture* g_superseded[64];
+int g_supersededN = 0;
+
+void plateSupersede(const GdTexture* t, bool unloadNow) {
+    if (!t) return;
+    GdGraphicsEngine* gfx = graphics();
+    bool shown = t == g_curPlate || t == g_wantPlate || t == g_origPlate || t == g_fallback;
+    for (int i = 0; i < g_supersededN && !shown; ++i) shown = g_superseded[i] == t;
+    if (unloadNow && !shown && gfx && p_UnloadTexture && unloadTexSeh(gfx, t)) return;
+    if (g_supersededN < (int)(sizeof(g_superseded) / sizeof(g_superseded[0])))
+        g_superseded[g_supersededN++] = t;
+}
+
+// Every cached plate gets its name again and is probed again on the next use; the textures it
+// held are superseded (released now when `unloadNow` and nothing shows them, else at teardown).
+// `all` = false keeps an entry whose names did not change. Returns how many were renamed.
+int plateRenameAll(bool unloadNow, bool all) {
+    InterlockedExchange(&g_probed, 0);
+    if (!g_plates) return 0;
+    int renamed = 0;
+    for (PlateTex& pt : *g_plates) {
+        if (!all) {
+            PlateTex fresh;
+            fresh.cellW = pt.cellW;
+            fresh.cellH = pt.cellH;
+            plateNames(fresh);
+            if (fresh.path == pt.path && fresh.modPath == pt.modPath) continue;
+        }
+        ++renamed;
+        plateSupersede(pt.tex, unloadNow);
+        plateNames(pt);
+        pt.tex = nullptr;
+        pt.tried = false;
+        pt.ok = false;
+        pt.fromModFolder = false;
+        pt.w = pt.h = pt.wantW = pt.wantH = 0;
+    }
+    return renamed;
+}
+
+// At the world teardown, BEFORE the cached plates are released: every superseded texture but the
+// one the engine's own destructor unloaded, and none that a cached plate, the fallback or an
+// earlier entry still holds (the engine may hand the same object back for a name loaded again) -
+// those are released once, by their other owner, or left to the engine.
+void plateReleaseSuperseded(GdGraphicsEngine* gfx, const void* engineOwns, int* freed, int* kept) {
+    for (int i = 0; i < g_supersededN; ++i) {
+        const GdTexture* t = g_superseded[i];
+        bool held = t == engineOwns || t == g_fallback;
+        for (int j = 0; j < i && !held; ++j) held = g_superseded[j] == t;
+        if (g_plates)
+            for (size_t k = 0; k < g_plates->size() && !held; ++k) held = (*g_plates)[k].tex == t;
+        if (held || !gfx || !p_UnloadTexture) ++*kept;
+        else if (unloadTexSeh(gfx, t)) ++*freed;
+        else { InterlockedIncrement(&g_faults); ++*kept; }
+    }
+    g_supersededN = 0;
+}
+
+// The layout plates changed state (a user grid's set is being painted, is ready, or went), or the
+// live page's grid changed between the derived and the user's (utPlateSetChoice): the cached names
+// are rebuilt and probed again, and the shown group picks its plate again.
+long g_layoutSeen = -1;
+int g_plateSetSeen = -1;   // the utPlateSetChoice the cached names were last checked against
+void plateLayoutEdge() {
+    const long gen = layoutPlatesGen();
+    char lay[16];
+    const int set = plateSetNow(lay, sizeof(lay));
+    if (gen == g_layoutSeen && set == g_plateSetSeen) return;
+    const bool first = g_layoutSeen == -1;
+    g_layoutSeen = gen;
+    g_plateSetSeen = set;
+    if (!g_plates || g_plates->empty()) return;
+    const int n = plateRenameAll(true, false);
+    if (first || n == 0) return;
+    char pub[16];
+    bool ready = true;
+    layoutPlatesState(platePlateW(), platePlateH(), pub, sizeof(pub), &ready);
+    if (set == kUtPlateSetDerived && pub[0])
+        logI("plate: the live page has the derived grid in force - the derived plates are shown, "
+             "not the layout plates %s painted for the user grid; %d plate(s) renamed and probed "
+             "again", pub, n);
+    else if (set == kUtPlateSetDerived)
+        logI("plate: the derived plates are in force again - %d plate(s) renamed and probed again", n);
+    else if (set == kUtPlateSetLayout)
+        logI("plate: the layout plates %s are ready - %d plate(s) renamed and probed again; the "
+             "page switches to them", lay, n);
+    else if (pub[0])
+        logI("plate: a user grid's plates %s are being painted - the plain cover is shown until "
+             "they are ready", pub);
+    else
+        logI("plate: the live page has the user grid in force and no layout plates are published "
+             "for it - the plain cover is shown until they are");
+    liveRelayoutVisible();   // plateApply chooses the shown group's plate again
+}
+
+// ORDERING. The plates are written by the generation, which runs on the start-up worker
+// (dllmain, before panelInit and before any hook exists) or inside a custom game's database
+// load. This probe runs only once a materials window has been captured in a world (plateTick,
+// utPlateProbeAllowed): the HUD build, where the engine loads its own plate through the same
+// LoadTexture. It never runs at the main menu - on a fresh install the first hooked frame fell
+// in the engine's start-up streaming, and the engine's loader thread faulted in its archive
+// decoder right after seven plate loads and the cover load there. A world teardown clears
+// g_probed and the cached textures, so the next world re-probes the files on disk now.
 void probeAllPlates() {
+    plateLayoutEdge();
     if (InterlockedCompareExchange(&g_probed, 0, 0)) return;
     if (!graphics()) return;
     int cw[16], chh[16];
@@ -1333,6 +1493,91 @@ int plateHeldOf(const GdGameEngine* ge, const char* record) {
     return (c < 0 || c > 0x10000) ? 1 : c;
 }
 
+// ---- the SCREEN pad's draw site: its state, used by the Draw tail below -------------------------
+// pad_screen / label_screen put the pad and the label at a corner of the SCREEN. They are drawn
+// from the HEAD of the HUD's item-rollover Draw - after the 19 HUD children drawn after the caravan
+// (whichever of them is the minimap or the quest tracker) and before the item tooltips and every
+// tooltip the UI root draws later: "one level below the tooltips" (ut_screendraw.h: the proof).
+// The Draw tail stays the documented fallback (kUtScreenSiteChosen, no ini key). The site is
+// installed only while a screen key is set; until it works the Draw tail publishes no screen
+// size, so the layout keeps both parts in the window ("cannot be placed yet").
+const size_t kHudRolloverOff = 0xB800;     // LITERAL: the item rollover inside the Hud; confirmed
+                                           // per session by its draw call in the HUD's own Draw
+const size_t kSlotChildDraw = 0x20;        // a HUD child's Draw (the HUD's own Draw too)
+const size_t kHudDrawScanBytes = 0x1C00;   // 1.3.0.8: the child calls end at +0x172F
+typedef void(__cdecl* PfnChildDraw)(void* self, void* canvas, const void* offset, float alpha);
+PfnChildDraw p_RollDraw = nullptr;        // the hooked target (the rollover's Draw)
+PfnChildDraw o_RollDraw = nullptr;        // its trampoline
+void* g_siteTarget = nullptr;             // read and proved, installs on the next game tick
+void* g_siteRollPending = nullptr;
+void* g_siteRoll = nullptr;               // THIS world's item-rollover object (the hook's `self`)
+volatile LONG g_siteOn = 0;               // 1 = the rollover-head detour is installed
+volatile LONG g_siteOff = 0;              // refused or faulted: the screen parts stay in the window
+volatile LONG g_sitePublished = 0;        // 1 = the screen rectangles are published
+volatile LONG64 g_tailFrame = 0;          // hookFrameCount() of the last Draw tail that drew the page
+
+void siteRetract() {
+    if (InterlockedExchange(&g_sitePublished, 0)) plateScreenRectsPublish(nullptr);
+}
+
+// The site that draws the screen parts works (or is the Draw tail itself).
+bool screenSiteUsable() {
+    if constexpr (kUtScreenSiteChosen == kUtScreenSiteDrawTail) {
+        return InterlockedCompareExchange(&g_siteOff, 0, 0) == 0;
+    } else {
+        return InterlockedCompareExchange(&g_siteOn, 0, 0) != 0 &&
+               InterlockedCompareExchange(&g_siteOff, 0, 0) == 0;
+    }
+}
+
+// One WARN: the screen parts stay in the window for the rest of the session.
+void siteOff(const char* why, bool fault) {
+    if (InterlockedExchange(&g_siteOff, 1)) return;
+    liveSetScreenView(0, 0, 0.0f, 0.0f);   // "cannot be placed yet": both parts back in the window
+    siteRetract();
+    if (fault) {
+        logE("buttons: the screen pad's draw site is OFF for this session - %s. The pad and the "
+             "label stay in the caravan window.", why);
+    } else {
+        logW("buttons: the screen pad's draw site could not be installed - %s. pad_screen / "
+             "label_screen are not used this session: the pad and the label stay in the caravan "
+             "window.", why);
+    }
+}
+
+// Draws the screen parts here and publishes what was painted for the screen pad's input.
+void screenDrawHere(GdCanvas* canvas) {
+    // The layout editor open: it draws the parts and publishes its own grounds every frame (ut_panel
+    // editPublishScreen, from the Draw tail earlier in this frame), so the site neither draws nor
+    // publishes nor retracts - either would replace them. The site's last publication is the
+    // editor's to replace (or goes stale); it is not retracted again after the editor closes.
+    if (panelLayoutEditOpen()) {
+        InterlockedExchange(&g_sitePublished, 0);
+        return;
+    }
+    static UtPadScreenRects pub;   // the thread of the Draw tail only (2.6 KB, off the stack)
+    if (panelDrawScreenParts(canvas, &pub) && pub.shown) {
+        plateScreenRectsPublish(&pub);
+        InterlockedExchange(&g_sitePublished, 1);
+    } else {
+        siteRetract();
+        // A fault inside the screen draw (reported by ut_panel, whose own __except consumed it):
+        // the site goes off, the screen size is withdrawn, both parts go back into the window.
+        if (panelScreenDrawFaulted()) siteOff("a fault while drawing the pinned pad / label", true);
+    }
+}
+
+// The Draw tail drew the page this frame: say so (the site draws only then), and publish the
+// screen and the window's origin the screen parts are placed against.
+void screenTailNote(void* canvas, float ox, float oy) {
+    InterlockedExchange64(&g_tailFrame, (LONG64)hookFrameCount());
+    if (!g_cfg.padScreen[0] && !g_cfg.labelScreen[0]) return;   // nothing is placed on the screen
+    if (!screenSiteUsable()) return;
+    const int w = g_gd.CanvasGetWidth ? g_gd.CanvasGetWidth((GdCanvas*)canvas) : 0;
+    const int h = g_gd.CanvasGetHeight ? g_gd.CanvasGetHeight((GdCanvas*)canvas) : 0;
+    liveSetScreenView(w, h, ox, oy);
+}
+
 // ---- the label, drawn at the tail of the engine's own Draw ----------------------------------
 // Called ONLY after the original has returned, so the whole page - plate, boxes, overlay list -
 // is already on the canvas and the tooltip layer is still to come.  No engine memory is written
@@ -1370,6 +1615,7 @@ void drawLabelBody(void* window, void* canvas, const void* offset) {
     g_lastDrawOx = ox;
     g_lastDrawOy = oy;
     InterlockedExchange(&g_drawOriginOk, 1);
+    screenTailNote(canvas, ox, oy);
     // The hover has to be known BEFORE the pad draws (it picks the hover state), so it is
     // computed once, here; the pad is its only consumer.
     // Unconditional: with group_buttons=0 it returns after ONE int store (no GetCursorPos, no
@@ -1382,6 +1628,9 @@ void drawLabelBody(void* window, void* canvas, const void* offset) {
     // Last, so if the two ever collided the buttons would win visually - at y 27..68 against
     // the one-line label's band y 8..24 they cannot.
     if (wantButtons) panelDrawGroupButtons((GdCanvas*)canvas, ox, oy);
+    // The documented fallback site: the screen parts drawn here, under the HUD children drawn
+    // after the caravan. With the rollover head (the site) they are drawn there instead.
+    if constexpr (kUtScreenSiteChosen == kUtScreenSiteDrawTail) screenDrawHere((GdCanvas*)canvas);
 }
 
 void drawLabelGuarded(void* window, void* canvas, const void* offset) {
@@ -1484,6 +1733,153 @@ void installDrawHook() {
          "item tooltips", "ReagentWindow::Draw", target, (void*)o_WndDraw);
 }
 
+// ---- the SCREEN pad's draw site: the head of the HUD's item-rollover Draw ---------------------
+void siteBody(void* canvas) {
+    // The page was drawn THIS frame (its Draw tail ran before the HUD reached the rollover): the
+    // caravan is open on the materials window. Otherwise nothing is drawn and the input is told.
+    const LONG64 tail = InterlockedCompareExchange64(&g_tailFrame, 0, 0);
+    if (tail == 0 || tail != (LONG64)hookFrameCount()) {
+        siteRetract();
+        return;
+    }
+    screenDrawHere((GdCanvas*)canvas);
+}
+
+void siteGuarded(void* canvas) {
+    __try {
+        siteBody(canvas);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_drawFaults);
+        siteOff("a fault at the head of the item rollover's Draw", true);
+    }
+}
+
+// The original ALWAYS runs, after the screen parts: the tooltips are drawn over them.
+void __cdecl hk_RollDraw(void* self, void* canvas, const void* offset, float alpha) {
+    if (self && self == g_siteRoll && !InterlockedCompareExchange(&g_siteOff, 0, 0))
+        siteGuarded(canvas);
+    if (o_RollDraw) o_RollDraw(self, canvas, offset, alpha);
+}
+
+struct SiteRead {
+    void* roll;
+    const void* rollDraw;
+    const void* hudDraw;
+    const void* hudVt;
+    const void* rollVt;
+    size_t codeN;
+};
+unsigned char g_siteCode[kHudDrawScanBytes];   // the HUD Draw's bytes, game thread only
+
+bool siteReadSeh(void* caravan, const unsigned char* thi, SiteRead* o) {
+    __try {
+        unsigned char* hud = (unsigned char*)caravan - kHudCaravanOff;
+        const void* const* hudVt = *(const void* const* const*)hud;
+        unsigned char* roll = hud + kHudRolloverOff;
+        const void* const* rollVt = *(const void* const* const*)roll;
+        if (!hudVt || !rollVt) return false;
+        o->roll = roll;
+        o->hudVt = hudVt;
+        o->rollVt = rollVt;
+        o->hudDraw = hudVt[kSlotChildDraw / 8];
+        o->rollDraw = rollVt[kSlotChildDraw / 8];
+        size_t n = kHudDrawScanBytes;
+        const unsigned char* code = (const unsigned char*)o->hudDraw;
+        if (code < thi && (size_t)(thi - code) < n) n = (size_t)(thi - code);
+        memcpy(g_siteCode, code, n);
+        o->codeN = n;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+// GAME THREAD (plateTick). Finds THIS world's item rollover from the captured caravan (the Hud
+// embeds both), proves the site once per session from the HUD's own Draw, and queues the install.
+void siteNote() {
+    if constexpr (kUtScreenSiteChosen != kUtScreenSiteRollover) return;
+    if (InterlockedCompareExchange(&g_siteOff, 0, 0)) return;
+    if (!g_caravan || g_siteRoll || g_siteTarget) return;
+    if (!g_cfg.padScreen[0] && !g_cfg.labelScreen[0]) return;   // only while a screen key is set
+    const unsigned char *tlo = nullptr, *thi = nullptr, *ilo = nullptr, *ihi = nullptr;
+    if (!textRange(&tlo, &thi) || !imageRange(&ilo, &ihi)) {
+        siteOff("the exe section table could not be read", false);
+        return;
+    }
+    SiteRead r = {};
+    if (!siteReadSeh(g_caravan, thi, &r)) {
+        siteOff("the Hud around the caravan could not be read", false);
+        return;
+    }
+    auto inText = [&](const void* p) {
+        return (const unsigned char*)p >= tlo && (const unsigned char*)p < thi;
+    };
+    auto inData = [&](const void* p) {
+        return (const unsigned char*)p >= ilo && (const unsigned char*)p < ihi && !inText(p);
+    };
+    if (!inData(r.hudVt) || !inData(r.rollVt) || !inText(r.hudDraw) || !inText(r.rollDraw)) {
+        siteOff("the Hud's or the item rollover's vtable / Draw is not where the exe keeps them",
+                false);
+        return;
+    }
+    if (InterlockedCompareExchange(&g_siteOn, 0, 0)) {
+        // installed in an earlier world: only this world's object is new
+        if (r.rollDraw != (const void*)p_RollDraw) {
+            siteOff("this world's item rollover has another Draw than the hooked one", false);
+            return;
+        }
+        g_siteRoll = r.roll;
+        return;
+    }
+    long cAt = -1, rAt = -1;
+    const UtSiteProof pr =
+        utHudSiteProof(g_siteCode, r.codeN, (unsigned)kHudCaravanOff, (unsigned)kHudRolloverOff,
+                       &cAt, &rAt);
+    if (pr != kUtSiteProved) {
+        siteOff(utSiteProofText(pr), false);
+        return;
+    }
+    const unsigned char* base = (const unsigned char*)GetModuleHandleW(nullptr);
+    logD("buttons: the screen site - HUD Draw %p (exe rva 0x%llX) draws the caravan (+0x%llX) at "
+         "+0x%lX and the item rollover (+0x%llX) at +0x%lX, after it; the rollover's Draw %p (exe "
+         "rva 0x%llX, its vtable slot +0x20) installs on the next game tick",
+         r.hudDraw, (unsigned long long)((const unsigned char*)r.hudDraw - base),
+         (unsigned long long)kHudCaravanOff, cAt, (unsigned long long)kHudRolloverOff, rAt,
+         r.rollDraw, (unsigned long long)((const unsigned char*)r.rollDraw - base));
+    g_siteRollPending = r.roll;
+    g_siteTarget = (void*)r.rollDraw;
+}
+
+void siteInstall() {
+    void* target = g_siteTarget;
+    if (!target) return;
+    g_siteTarget = nullptr;
+    if (InterlockedCompareExchange(&g_siteOff, 0, 0)) return;
+    if (InterlockedCompareExchange(&g_siteOn, 0, 0)) return;
+    MH_STATUS s = MH_CreateHook(target, (void*)&hk_RollDraw, (void**)&o_RollDraw);
+    if (s == MH_ERROR_ALREADY_CREATED) s = o_RollDraw ? MH_OK : MH_ERROR_NOT_CREATED;
+    if (s != MH_OK) {
+        logE("  hook %-32s FAILED at MH_CreateHook: %s (%d)", "HUD item rollover::Draw", mhName(s),
+             (int)s);
+        siteOff("the item rollover's Draw detour could not be created", false);
+        return;
+    }
+    MH_STATUS e = MH_EnableHook(target);
+    if (e == MH_ERROR_ENABLED) e = MH_OK;
+    if (e != MH_OK) {
+        logE("  hook %-32s FAILED at MH_EnableHook: %s (%d)", "HUD item rollover::Draw", mhName(e),
+             (int)e);
+        siteOff("the item rollover's Draw detour could not be enabled", false);
+        return;
+    }
+    p_RollDraw = (PfnChildDraw)target;
+    g_siteRoll = g_siteRollPending;
+    InterlockedExchange(&g_siteOn, 1);
+    logD("  hook %-32s installed at %p (trampoline %p) - the pad and the label pinned to the "
+         "screen are drawn at its head, one level below the tooltips",
+         "HUD item rollover::Draw", target, (void*)o_RollDraw);
+}
+
 // ---- the click ------------------------------------------------------------------------------
 // `CaravanWindow`'s own slot +0x38 (exe 0x135B40) rect-tests ITSELF and then
 // calls pages[caravan+0x1728]->vt[+0x38] for EVERY point inside the caravan, box or no box; the
@@ -1520,9 +1916,17 @@ const char* const kPassWhy[PR_MAX] = {
     "the event space is not proven for this world yet (see the buttons(probe) lines)",
     "the live pager refused the target group, so the engine's own handler was called after all",
 };
+// The pure rule (ut_padmat.h utPadLeftDown) names its reasons in this order.
+static_assert(PR_NOT_DRAWN == kUtPadPassNotDrawn && PR_CURSOR_ITEM == kUtPadPassCursorItem &&
+                  PR_CURSOR_FAULT == kUtPadPassCursorFault && PR_NO_BUTTON == kUtPadPassNoButton &&
+                  PR_IN_BOX == kUtPadPassInBox && PR_BOX_FAULT == kUtPadPassBoxFault &&
+                  PR_NOT_PROVEN == kUtPadPassNotProven,
+              "PassReason and ut_padmat.h UtPadPass must agree");
 
 struct MouseAct {
     bool consume;
+    bool keep;           // consumed with no action: a point of the materials page's pad
+    bool matPad;         // the point lies inside the pad on the game's own materials page
     bool probe;
     int reason;          // PassReason
     int button;
@@ -1600,7 +2004,26 @@ void logPassReason(int reason) {
     if (reason <= PR_NONE || reason >= PR_MAX) return;
     const LONG bit = (LONG)(1 << reason);
     if (InterlockedOr(&g_btnPassLogged, bit) & bit) return;
-    logT("buttons: click passed through - %s", kPassWhy[reason]);
+    // DEBUG, once per reason per world: a pad click that reaches this hook and is NOT taken
+    // says why here; a click that leaves no line at all never reached the materials window.
+    logD("buttons: click passed through - %s", kPassWhy[reason]);
+}
+
+// What a click on the pad's logical button `btn` selects, for BOTH pads (the window's mouse slot
+// and the screen input): MAT -> -1, the game's own materials page (the group lookup knows no group
+// for logical 0, so without this rule MAT on the screen pad is "a button that maps to no group");
+// OWN -> kUtButtonFilterTarget; a button of groups and NEXT -> panelButtonTarget's group; < -1 =
+// none.
+int padClickTarget(int btn, const char** label) {
+    LiveLayout lay;
+    const int kind = liveLayoutGet(&lay)
+                         ? utPadButtonKind(btn, lay.pages.groups, lay.pages.pages > 1 ? 1 : 0)
+                         : (btn == 0 ? (int)kUtPadKindMat : (int)kUtPadKindGroup);
+    if (kind == kUtPadKindMat) {
+        if (label) *label = "the game's own materials page";
+        return -1;
+    }
+    return panelButtonTarget(btn, label);
 }
 
 void mouseDecide(void* window, const void* evt, const float* offset, MouseAct* a) {
@@ -1611,14 +2034,22 @@ void mouseDecide(void* window, const void* evt, const float* offset, MouseAct* a
     int type = 0;
     float ex = 0.0f, ey = 0.0f;
     if (!readMouseEvent(evt, &type, &ex, &ey)) return;
-    if (type != kMouseTypeMove && type != kMouseTypeLeftDown) return;   // never touch the rest
     float ofx = 0.0f, ofy = 0.0f, wx = 0.0f, wy = 0.0f;
     if (!readMouseOrigin(window, offset, &ofx, &ofy, &wx, &wy)) return;
     // The three lines the engine itself runs at exe 0x132917..0x13294C.
     const float lx = ex - (ofx + wx);
     const float ly = ey - (ofy + wy);
     const float s = liveUiScale();
-    if (!panelButtonsInBand(lx, ly, s)) return;   // outside the band: nothing to see or consume
+    // On the game's own materials page the pad is drawn over the page's boxes and a point inside
+    // it is the pad's, for every event type: hk_WndMouse puts the hovered-box answer back.
+    a->matPad = panelMatPadAt(lx, ly, s);
+    // never touch the rest - but a RIGHT DOWN on the materials page's pad, which the box under it
+    // would act on (exe 0x132DD9: a box takes its item on type 2 as on type 1)
+    if (type != kMouseTypeMove && type != kMouseTypeLeftDown &&
+        !(type == kUtMouseRightDown && a->matPad))
+        return;
+    // outside the band (and off the materials page's pad): nothing to see or consume
+    if (!a->matPad && !panelButtonsInBand(lx, ly, s)) return;
     if (!InterlockedCompareExchange(&g_drawOriginOk, 0, 0)) return;  // no draw origin yet
 
     bool boxFaulted = false;
@@ -1672,46 +2103,55 @@ void mouseDecide(void* window, const void* evt, const float* offset, MouseAct* a
         }
     }
 
+    if (type == kUtMouseRightDown) {
+        // the materials page's pad: a right-click there is a click on no button - kept from the
+        // box under it (utPadLeftDown with no button), or passed when the cursor holds an item
+        const bool drawnR = panelButtonsDrawnRecently();
+        unsigned int idR = 0;
+        const bool readR = drawnR && readCursorItem(window, &idR);
+        const UtPadClick c = utPadLeftDown(
+            drawnR ? 1 : 0, readR ? 1 : 0, idR != 0 ? 1 : 0, 0, 1, inBox ? 1 : 0,
+            boxFaulted ? 1 : 0, InterlockedCompareExchange(&g_btnSpaceProven, 0, 0) ? 1 : 0);
+        if (c.act == kUtPadClickKeep) {
+            a->consume = true;
+            a->keep = true;
+            if (a->probe) {   // no probe line for a kept click: give the slot back
+                a->probe = false;
+                InterlockedDecrement(&g_btnProbes);
+            }
+        }
+        return;
+    }
     if (type != kMouseTypeLeftDown) return;   // a MOVE is only ever a probe
 
-    if (!panelButtonsDrawnRecently()) {
-        a->reason = PR_NOT_DRAWN;
-        return;
-    }
+    // THE RULE (ut_padmat.h utPadLeftDown, proved by test_layoutedit): drawn, cursor, then on a
+    // collection page button, box, proven; inside the materials page's pad: proven, then the
+    // button acts or the click is kept - the box under the pad never sees it.
+    const bool drawn = panelButtonsDrawnRecently();
     unsigned int cursorId = 0;
-    if (!readCursorItem(window, &cursorId)) {
-        a->reason = PR_CURSOR_FAULT;
+    const bool cursorRead = drawn && readCursorItem(window, &cursorId);
+    const UtPadClick c = utPadLeftDown(
+        drawn ? 1 : 0, cursorRead ? 1 : 0, cursorId != 0 ? 1 : 0, btn >= 0 ? 1 : 0,
+        a->matPad ? 1 : 0, inBox ? 1 : 0, boxFaulted ? 1 : 0,
+        InterlockedCompareExchange(&g_btnSpaceProven, 0, 0) ? 1 : 0);
+    if (c.act == kUtPadClickPass) {
+        a->reason = c.reason;
         return;
     }
-    if (cursorId != 0) {
-        a->reason = PR_CURSOR_ITEM;
-        return;
-    }
-    if (btn < 0) {
-        a->reason = PR_NO_BUTTON;
-        return;
-    }
-    if (boxFaulted) {
-        a->reason = PR_BOX_FAULT;
-        return;
-    }
-    if (inBox) {
-        a->reason = PR_IN_BOX;
-        return;
-    }
-    if (!InterlockedCompareExchange(&g_btnSpaceProven, 0, 0)) {
-        a->reason = PR_NOT_PROVEN;
-        return;
-    }
+    const bool keepIt = c.act == kUtPadClickKeep;
     const char* label = nullptr;
-    const int target = panelButtonTarget(btn, &label);
+    const int target = keepIt ? -2 : padClickTarget(btn, &label);
     // kUtButtonFilterTarget is the OWN button - a legal target that selects no
     // group.  Everything below (-2 and lower) is still an index the table does not know.
-    if (target < -1 && target != kUtButtonFilterTarget) {
-        a->reason = PR_NO_BUTTON;
-        return;
+    if (!keepIt && target < -1 && target != kUtButtonFilterTarget) {
+        if (utPadRefusedAct(a->matPad ? 1 : 0) == kUtPadClickPass) {
+            a->reason = PR_NO_BUTTON;
+            return;
+        }
+        a->keep = true;   // the materials page's pad: nothing acts, the box still never sees it
     }
     a->consume = true;
+    if (keepIt) a->keep = true;
     // The consumed click is reported by its own line, so the probe line is suppressed - and the
     // probe slot is given back, or the suppressed line makes the numbering skip.
     if (a->probe) {
@@ -1720,7 +2160,7 @@ void mouseDecide(void* window, const void* evt, const float* offset, MouseAct* a
     }
     a->button = btn;
     a->target = target;
-    a->btnLabel = label;
+    a->btnLabel = label ? label : "?";
 }
 
 void mouseDecideGuarded(void* window, const void* evt, const float* offset, MouseAct* a) {
@@ -1728,13 +2168,81 @@ void mouseDecideGuarded(void* window, const void* evt, const float* offset, Mous
         mouseDecide(window, evt, offset, a);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         a->consume = false;
+        a->keep = false;
+        a->matPad = false;
         a->probe = false;
         a->reason = PR_NONE;
         panelButtonsOff("the mouse handler's decision path faulted");
     }
 }
 
+// ---- the layout editor's input (ut_panel) ----------------------------------------------------
+// RIGHT DOWN with Ctrl on the pad opens the editor; while it is open LEFT DOWN on its toolbar, a
+// handle or a rectangle is consumed and LEFT UP ends a drag (passed on). Between the two the drag
+// follows the cursor polled from the Draw tail, so it survives the cursor leaving the caravan.
+// Every other event, and every event while the editor is closed and Ctrl is up, is untouched.
+bool editMouse(void* window, const void* evt, const float* offset) {
+    if (window != g_window || !evt || !offset) return false;
+    if (!g_cfg.groupButtons || panelButtonsAreOff()) return false;
+    int type = 0;
+    float ex = 0.0f, ey = 0.0f;
+    if (!readMouseEvent(evt, &type, &ex, &ey)) return false;
+    if (type == kUtMouseRightDown) {
+        if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return false;
+    } else if (type != kUtMouseLeftDown && type != kUtMouseLeftUp) {
+        return false;
+    } else if (!panelLayoutEditOpen()) {
+        return false;
+    }
+    if (!InterlockedCompareExchange(&g_drawOriginOk, 0, 0)) return false;
+    float ofx = 0.0f, ofy = 0.0f, wx = 0.0f, wy = 0.0f;
+    if (!readMouseOrigin(window, offset, &ofx, &ofy, &wx, &wy)) return false;
+    const float lx = ex - (ofx + wx);
+    const float ly = ey - (ofy + wy);
+    bool cursorEmpty = false, inBox = false;
+    if (type != kUtMouseLeftUp) {
+        unsigned int cursorId = 0;
+        cursorEmpty = readCursorItem(window, &cursorId) && cursorId == 0;
+        bool boxFaulted = false;
+        inBox = plateBoxHitLocal(lx, ly, &boxFaulted) || boxFaulted;
+    }
+    const bool proven = InterlockedCompareExchange(&g_btnSpaceProven, 0, 0) != 0;
+    return panelLayoutEditMouse(type, lx, ly, cursorEmpty, inBox, proven);
+}
+
+bool editMouseGuarded(void* window, const void* evt, const float* offset) {
+    __try {
+        return editMouse(window, evt, offset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        panelButtonsOff("the layout editor's mouse path faulted");
+        return false;
+    }
+}
+
+// The hovered-widget answer the caravan reads after the page's handler (`*out`, written by the
+// original at exe 0x133104 only when a box is under the point, read by caravan->vt[0xD0] at
+// 0x135E23 - the tooltip). On the materials page's pad it is put back to what the caravan had
+// before the page ran - exactly the answer for a point on no box - so a box the pad covers shows
+// no tooltip. A fault reads or writes nothing more.
+bool readOutSeh(void** out, void** v) {
+    __try {
+        if (!out) return false;
+        *v = *out;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void writeOutSeh(void** out, void* v) {
+    __try {
+        if (out) *out = v;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
 bool __cdecl hk_WndMouse(void* window, const void* evt, const float* offset, void** out) {
+    if (editMouseGuarded(window, evt, offset)) return false;   // the layout editor took it
     MouseAct a;
     memset(&a, 0, sizeof(a));
     a.reason = PR_NONE;
@@ -1744,14 +2252,22 @@ bool __cdecl hk_WndMouse(void* window, const void* evt, const float* offset, voi
     mouseDecideGuarded(window, evt, offset, &a);
     // The event is consumed only when the write actually happened. liveSelectGroup refuses for
     // `!liveActive()`, an empty group list and an out-of-range index, and panelButtonTarget only
-    // maps a button index onto a group index (a compile-time table of 26 that knows nothing
-    // about how many groups actually loaded) - so a shorter catalogue, or live_pages flipped to
-    // 0 inside the 500 ms "drawn recently" window, must not eat the click and log a group change
-    // that never happened: the engine's own handler runs instead and the reason is logged once.
+    // maps a logical button (ut_padpage.h) onto a group index - so a shorter catalogue, or
+    // live_pages flipped to 0 inside the 500 ms "drawn recently" window, must not eat the click
+    // and log a group change that never happened: the engine's own handler runs instead and the
+    // reason is logged once.
     // The OWN button toggles the owned-only filter instead of selecting a group.
     // Both writes are mod-side ints plus a relayout request - no engine call, nothing allocated -
     // so either is safe from inside this detour body, and either may REFUSE (live paging not
     // armed), in which case the engine's own handler runs after all and the reason is logged.
+    if (a.consume && a.keep) {
+        // The materials page's pad, on no button (or a button whose target is refused): nothing
+        // acts, and the box under the pad never sees the click.
+        if (!(InterlockedOr(&g_matKeepLogged, 1) & 1))
+            logD("buttons: a click on the materials page's pad, on no button, was kept from the "
+                 "box under it");
+        return false;
+    }
     const bool isFilter = a.target == kUtButtonFilterTarget;
     if (a.consume && (isFilter ? liveToggleOwnedOnly() : liveSelectGroup(a.target))) {
         panelButtonsNotePress(a.button);
@@ -1766,13 +2282,24 @@ bool __cdecl hk_WndMouse(void* window, const void* evt, const float* offset, voi
         logD("the click was consumed; the engine's own handler was not called");
         return false;   // the caller discards this either way
     }
+    if (a.consume && a.matPad) {
+        // the pager refused the group: on the materials page's pad the click stays the pad's
+        // (ut_padmat.h utPadRefusedAct), the reason is logged once per world
+        if (!(InterlockedOr(&g_matKeepLogged, 2) & 2))
+            logD("buttons: the live pager refused the group of a click on the materials page's "
+                 "pad - the click was kept from the box under it");
+        return false;
+    }
     if (a.consume) a.reason = PR_SELECT_REFUSED;
+    void* hovered = nullptr;
+    const bool keepHover = a.matPad && readOutSeh(out, &hovered);
     bool r = false;
     if (o_WndMouse) {
         r = o_WndMouse(window, evt, offset, out);
     } else if (p_WndMouse) {
         r = p_WndMouse(window, evt, offset, out);
     }
+    if (keepHover) writeOutSeh(out, hovered);   // the pad's hover, not the covered box's
     if (a.probe) {
         logT("buttons(probe) #%ld type=%d evt=(%.1f,%.1f) offset=(%.1f,%.1f) win=(%.1f,%.1f) "
              "local=(%.1f,%.1f) client=(%.1f,%.1f) delta=(%.1f,%.1f) inStrip=%d inBox=%d "
@@ -1849,6 +2376,406 @@ void installMouseHook() {
          (void*)o_WndMouse);
 }
 
+// ---- the SCREEN pad's input: DirectInputDevice::GetMouseEvent ------------------------------
+// A pad or label drawn OUTSIDE the caravan cannot be clicked through the mouse slot above:
+// CaravanWindow's slot +0x38 rect-tests itself and returns false for every point outside it.
+// Every mouse event of the game is first copied out by ONE exported function - DirectInput.dll's
+// `DirectInputDevice::GetMouseEvent` (the device's vtable slot +0x38; `Engine::ProcessUserInput`
+// at Engine 0x78EC2 is its only caller) - into the pump's own
+// stack copy, which the UI root (exe 0xBEF10: HUD, windows, minimap, tracker) and then the WORLD
+// VIEW (exe 0x21010) read. The detour calls the original and then lets ut_padinput.h decide what
+// that copy says: untouched, REWRITTEN (type -> MOVE, held bytes 0x10..0x11 cleared - the click
+// is consumed for every consumer at once, hover and tooltips keep working) or CLEARED (an event
+// passed on during a press: the world acts on the held bytes of every event type).
+//
+//   binding   `dinput.getMouseEvent` (EXPORT, LATE, critical for this route only): both exports
+//             by decorated name, cross-checked against `Engine::GetInputDevice()`'s live vtable
+//             (slot +0x38 == GetMouseEvent, +0x10 == Update) and the export's own `imul ..,0x1C`
+//             naming the record the detour rewrites. Resolved from the game thread (the device
+//             exists once the engine initialised input; DirectInput.dll is loaded by name), 40
+//             tries 500 ms apart; a refusal turns ONLY this route off.
+//   install   from plateTick, never from a detour body, once a world has captured the materials
+//             window (never at the main menu), both detours or none. `Update` only counts the
+//             device's generations - the idempotence key: the pump asks each index once per
+//             generation, and a repeat of (generation, index) replays the bytes, never the action.
+//   inert     until the screen draw site publishes fresh rectangles (plateScreenRectsPublish) while
+//             the caravan is open AND the event space is proven (a probe agreed with GetCursorPos,
+//             or the in-window pad's proof): with nothing published the body returns after a few
+//             int reads and the event is the original's copy, byte for byte (test_padinput section
+//             3). A press already open runs to its UP (or the polled release) whatever happens.
+//   latch     a fault inside the body = one ERROR and the route off for the session; the detours
+//             stay installed and pass everything through.
+//   actions   padClickTarget (MAT -> the materials page, else panelButtonTarget) -> liveSelectGroup
+//             / liveToggleOwnedOnly, exactly hk_WndMouse's;
+//             mod-side ints plus a relayout request, no engine call. The pump runs on the thread
+//             of the Draw tail and the mouse slot (fact 11); the first detour call logs its id.
+//   MP        nothing network-visible: the detour edits the LOCAL copy of a local input event
+//             before any local consumer reads it; a consumed click simply never becomes a move or
+//             a skill command, exactly as a click on any game window never does. No packet, no
+//             item, no character state is touched.
+typedef void* (*PfnDevGetMouseEvent)(const void* dev, void* out, int idx);
+typedef void (*PfnDevUpdate)(void* dev);
+typedef void* (*PfnEngineGetInputDevice)(void* engine);
+
+const char kExpDevGetMouseEvent[] =
+    "?GetMouseEvent@DirectInputDevice@GAME@@UEBA?AUMouseEvent@InputDevice@2@H@Z";
+const char kExpDevUpdate[] = "?Update@DirectInputDevice@GAME@@UEAAXXZ";
+const char kExpEngineGetInputDevice[] = "?GetInputDevice@Engine@GAME@@QEAAPEAVInputDevice@2@XZ";
+const size_t kSlotDevUpdate = 0x10;
+const size_t kSlotDevGetMouseEvent = 0x38;
+const LONG kScrResolveTries = 40;
+const LONG kScrProbeCap = 20;
+
+PfnDevGetMouseEvent o_DevGetMouseEvent = nullptr;
+PfnDevUpdate o_DevUpdate = nullptr;
+void* g_scrEvtTarget = nullptr;      // GetMouseEvent, resolved AND cross-checked
+void* g_scrUpdTarget = nullptr;      // Update, the same
+volatile LONG g_scrResolved = 0;     // 0 pending, 1 confirmed, -1 refused
+volatile LONG g_scrTries = 0;
+volatile LONG g_scrHookOn = 0;
+volatile LONG g_scrOff = 0;          // the SESSION latch
+volatile LONG64 g_scrGen = 0;        // the device's Update generation
+volatile LONG g_scrFirstCall = 0;
+volatile LONG g_scrReset = 0;        // a world teardown asks the input thread to drop its press
+volatile LONG g_scrProbes = 0;       // per world
+volatile LONG g_scrProven = 0;       // per world
+volatile LONG g_scrLogged = 0;       // bitmask: once-per-world lines
+UtPadInState g_scrState;             // the pump's thread only
+UtPadScreenRects g_scrSnap;             // the pump's thread only (2.6 KB, off the stack)
+// The published rectangles, behind a sequence lock (odd = being written).
+volatile LONG g_scrSeq = 0;
+UtPadScreenRects g_scrRects;
+
+void scrOff(const char* why) {
+    if (InterlockedExchange(&g_scrOff, 1)) return;
+    logE("screen pad input: OFF for this session - %s. The detours stay installed and pass every "
+         "event through untouched; the in-window pad is not affected.", why ? why : "?");
+}
+
+void scrLogOnce(LONG bit, const char* text) {
+    if (InterlockedOr(&g_scrLogged, bit) & bit) return;
+    logD("screen pad input: %s", text);
+}
+
+bool scrSnapshot(UtPadScreenRects* out) {
+    for (int i = 0; i < 4; ++i) {
+        const LONG a = InterlockedCompareExchange(&g_scrSeq, 0, 0);
+        if (a & 1) continue;
+        *out = g_scrRects;
+        if (InterlockedCompareExchange(&g_scrSeq, 0, 0) == a) return true;
+    }
+    return false;
+}
+
+// The event-space proof, the in-window probe's rule: the event's point against the mod's own
+// GetCursorPos + ScreenToClient, within 2 px on both axes. Up to kScrProbeCap MOVEs per world,
+// only while the screen pad is shown.
+void scrProbe(float ex, float ey) {
+    if (InterlockedCompareExchange(&g_scrProven, 0, 0)) return;
+    if (InterlockedCompareExchange(&g_scrProbes, 0, 0) >= kScrProbeCap) return;
+    POINT pt = {0, 0};
+    HWND h = GetActiveWindow();
+    if (!h) h = GetForegroundWindow();
+    if (!h || !GetCursorPos(&pt) || !ScreenToClient(h, &pt)) return;
+    const LONG n = InterlockedIncrement(&g_scrProbes);
+    const float dx = (float)pt.x - ex;
+    const float dy = (float)pt.y - ey;
+    if (dx > -2.0f && dx < 2.0f && dy > -2.0f && dy < 2.0f) {
+        if (!InterlockedExchange(&g_scrProven, 1))
+            logD("screen pad input: consumption ENABLED - the event space is proven (probe %ld, "
+                 "delta=(%.1f,%.1f) px)", n, dx, dy);
+    } else if (n == kScrProbeCap) {
+        logD("screen pad input: consumption NOT PROVEN after %ld probes (last delta=(%.1f,%.1f) "
+             "px) - the screen pad stays draw-only this world unless the in-window pad proves it",
+             n, dx, dy);
+    }
+}
+
+void scrButton(int btn) {
+    const char* label = nullptr;
+    const int target = padClickTarget(btn, &label);
+    const bool isFilter = target == kUtButtonFilterTarget;
+    if (target < -1 && !isFilter) {
+        scrLogOnce(1, "a click on a screen pad button that maps to no group was consumed with no "
+                      "action");
+        return;
+    }
+    if (isFilter ? liveToggleOwnedOnly() : liveSelectGroup(target)) {
+        panelButtonsNotePress(btn);
+        if (isFilter) {
+            logI("button [%s] clicked on the screen pad -> the owned-only filter is now %s",
+                 panelButtonTag(btn),
+                 liveOwnedOnly() ? "ON: only records you own are shown" : "OFF");
+        } else if (target < 0) {
+            logI("button [%s] clicked on the screen pad -> %s", panelButtonTag(btn),
+                 label ? label : "the game's own materials page");
+        } else {
+            logI("button [%s] clicked on the screen pad -> group %d \"%s\"", panelButtonTag(btn),
+                 target, label ? label : "?");
+        }
+        return;
+    }
+    scrLogOnce(2, "the live pager refused the target of a screen pad click - consumed with no "
+                  "action (outside the caravan there is no engine handler to fall back to)");
+}
+
+// The layout editor gets what the in-window editor gets: panelLayoutEditMouse at the point in
+// window-local screen px (the event minus the origin the engine's own Draw computed).
+// kUtEvtEditorNote is the machine's note of a LEFT DOWN it passed untouched inside the caravan
+// window (the window's mouse slot gets that click next and proves its own space against it).
+void scrEditor(int type, float x, float y, bool cursorItem) {
+    if (!InterlockedCompareExchange(&g_drawOriginOk, 0, 0)) return;
+    const float lx = x - g_lastDrawOx;
+    const float ly = y - g_lastDrawOy;
+    bool inBox = false;
+    if (type == kUtEvtLeftDown || type == kUtEvtRightDown) {
+        bool faulted = false;
+        inBox = plateBoxHitLocal(lx, ly, &faulted) || faulted;
+    }
+    panelLayoutEditMouse(type, lx, ly, !cursorItem, inBox, true);
+}
+
+void scrBody(unsigned char* out, int idx) {
+    if (!InterlockedExchange(&g_scrFirstCall, 1))
+        logD("screen pad input: the first event through the GetMouseEvent detour, thread t%lu",
+             GetCurrentThreadId());
+    if (InterlockedExchange(&g_scrReset, 0)) utPadInReset(&g_scrState);
+    const bool pressed = g_scrState.press != kUtPressNone;
+    // Never act while the caravan is closed: the rectangles of a pad that was painted a frame ago
+    // are not trusted once the stash has gone (g_stashOpen is the last IsTransferOpen seen).
+    const bool stashOpen = InterlockedCompareExchange(&g_stashOpen, 0, 0) != 0;
+    // THE ADOPTED DRAG (ut_padinput.h): the layout editor carries a drag that began in the window
+    // - the machine takes it whatever is published (a pad still inside the window publishes no
+    // ground), so no held byte of it reaches the world and its UP reaches the editor.
+    const bool editorDrag = !pressed && panelLayoutEditDragging();
+    if (!pressed && !editorDrag) {
+        // The cheap exit: nothing fresh published = the original's copy, untouched.
+        if (!stashOpen || !g_scrRects.shown) return;
+        const unsigned long long t = g_scrRects.tick;
+        const unsigned long long now = hookFrameCount();
+        if (t == 0 || now < t || now - t > kUtPadScreenStaleTicks) return;
+    }
+    const bool have = scrSnapshot(&g_scrSnap);
+    if (!have) g_scrSnap.shown = 0;
+    const UtPadInEvent e = utPadReadEvent(out);
+    UtPadInGates g;
+    memset(&g, 0, sizeof(g));
+    g.fresh = stashOpen && have && utPadScreenRectsFresh(g_scrSnap, hookFrameCount()) ? 1 : 0;
+    if (g.fresh && e.type == kUtEvtMove) scrProbe(e.x, e.y);
+    g.proven = (InterlockedCompareExchange(&g_scrProven, 0, 0) ||
+                InterlockedCompareExchange(&g_btnSpaceProven, 0, 0))
+                   ? 1
+                   : 0;
+    g.editorOpen = panelLayoutEditOpen() ? 1 : 0;
+    bool cursorItem = false;
+    if (g.fresh && (e.type == kUtEvtLeftDown || e.type == kUtEvtRightDown)) {
+        // Unknown is an item: a fault or no captured window never lets a click through.
+        unsigned int id = 0;
+        cursorItem = !(g_window && readCursorItem(g_window, &id)) || id != 0;
+    }
+    g.cursorItem = cursorItem ? 1 : 0;
+    g.ctrl = e.type == kUtEvtRightDown && (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 1 : 0;
+    g.editorDrag = editorDrag ? 1 : 0;
+    // The open editor's window rect - a point inside it is the window's own (untouched;
+    // a LEFT DOWN there only noted to the editor), whatever the grounds say.
+    g.windowFresh = stashOpen && have && utPadScreenWindowFresh(g_scrSnap, hookFrameCount()) ? 1 : 0;
+    if (pressed || editorDrag) {
+        // GetAsyncKeyState reads the PHYSICAL buttons: with swapped buttons the logical left is
+        // the physical right.
+        const bool sw = GetSystemMetrics(SM_SWAPBUTTON) != 0;
+        g.leftUp = (GetAsyncKeyState(sw ? VK_RBUTTON : VK_LBUTTON) & 0x8000) ? 0 : 1;
+        g.rightUp = (GetAsyncKeyState(sw ? VK_LBUTTON : VK_RBUTTON) & 0x8000) ? 0 : 1;
+    }
+    const UtPadInOut o = utPadInput(
+        &g_scrState, (unsigned long long)InterlockedCompareExchange64(&g_scrGen, 0, 0), idx, e,
+        g_scrSnap, g);
+    utPadApply(out, o);
+    if (o.act == kUtPadActButton) {
+        scrButton(o.button);
+    } else if (o.act == kUtPadActEditor) {
+        scrEditor(o.editorType, e.x, e.y, cursorItem);
+    } else if (o.act == kUtPadActEditorNote) {
+        scrEditor(kUtEvtEditorNote, e.x, e.y, cursorItem);
+    }
+    if (o.repeat) return;
+    if (o.why == kUtPadWhyCursorItem)
+        scrLogOnce(4, "a click with an item on the cursor was consumed - no action, the item "
+                      "stays on the cursor");
+    if (o.why == kUtPadWhyGround)
+        scrLogOnce(8, "a click on the screen pad's ground or the label was consumed - no action");
+    if (o.ended == 2)
+        scrLogOnce(16, "a press ended on the polled release (its UP event never arrived)");
+}
+
+void scrGuarded(unsigned char* out, int idx) {
+    __try {
+        scrBody(out, idx);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        scrOff("the GetMouseEvent detour body faulted");
+    }
+}
+
+// The original ALWAYS runs first with the caller's arguments; only its copy is edited.
+void* hk_DevGetMouseEvent(const void* dev, void* out, int idx) {
+    void* r = o_DevGetMouseEvent(dev, out, idx);
+    if (out && !InterlockedCompareExchange(&g_scrOff, 0, 0)) scrGuarded((unsigned char*)out, idx);
+    return r;
+}
+
+void hk_DevUpdate(void* dev) {
+    o_DevUpdate(dev);
+    InterlockedIncrement64(&g_scrGen);
+}
+
+bool scrReadDevice(PfnEngineGetInputDevice gid, void** dev, void** slotUpd, void** slotEvt) {
+    __try {
+        GdEngine* eng = g_gd.ppEngine ? *g_gd.ppEngine : nullptr;
+        if (!eng) return false;
+        void* d = gid(eng);
+        if (!d) return false;
+        void* const* vt = *(void* const* const*)d;
+        *dev = d;
+        *slotUpd = vt[kSlotDevUpdate / sizeof(void*)];
+        *slotEvt = vt[kSlotDevGetMouseEvent / sizeof(void*)];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+int scrReadStride(const void* fn) {
+    unsigned char b[16];
+    __try {
+        memcpy(b, fn, sizeof(b));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return utPadDecodeEventStride(b, sizeof(b));
+}
+
+// A refused binding is not a fault: the late report names the row (one ERROR, the bindings'
+// own), and this WARN says what it means for the player.
+void scrRefuse(const char* why) {
+    InterlockedExchange(&g_scrResolved, -1);
+    InterlockedExchange(&g_scrOff, 1);
+    bindingsNote("dinput.getMouseEvent", 0, false, why);
+    bindingsLateReport();
+    logW("screen pad input: not installed - %s. A pad or label placed off the caravan is drawn "
+         "but takes no click; the in-window pad is not affected.", why ? why : "?");
+}
+
+// GAME THREAD (plateTick). Reads only: two GetProcAddress, one exported getter, two vtable slots
+// and 16 code bytes.
+void scrResolveTick() {
+    if (InterlockedCompareExchange(&g_scrResolved, 0, 0) != 0) return;
+    static DWORD last = 0;
+    const DWORD now = GetTickCount();
+    if (now - last < 500) return;
+    last = now;
+    const LONG tries = InterlockedIncrement(&g_scrTries);
+    HMODULE di = GetModuleHandleW(L"DirectInput.dll");
+    HMODULE en = GetModuleHandleW(L"Engine.dll");
+    void* fe = di ? (void*)GetProcAddress(di, kExpDevGetMouseEvent) : nullptr;
+    void* fu = di ? (void*)GetProcAddress(di, kExpDevUpdate) : nullptr;
+    const PfnEngineGetInputDevice gid =
+        en ? (PfnEngineGetInputDevice)(void*)GetProcAddress(en, kExpEngineGetInputDevice) : nullptr;
+    void *dev = nullptr, *su = nullptr, *se = nullptr;
+    const char* why = nullptr;
+    if (!di) {
+        why = "DirectInput.dll is not loaded";
+    } else if (!fe || !fu) {
+        why = "DirectInputDevice::GetMouseEvent / ::Update are not exported by those names";
+    } else if (!gid) {
+        why = "Engine::GetInputDevice is not exported by that name";
+    } else if (!scrReadDevice(gid, &dev, &su, &se)) {
+        why = "Engine::GetInputDevice() has no device (or its vtable is unreadable)";
+    }
+    if (why) {
+        if (tries < kScrResolveTries) return;   // the device appears once the engine has input
+        scrRefuse(why);
+        return;
+    }
+    const int stride = scrReadStride(fe);
+    if (se != fe) {
+        scrRefuse("Engine::GetInputDevice()'s vtable slot +0x38 is not the exported GetMouseEvent");
+        return;
+    }
+    if (su != fu) {
+        scrRefuse("Engine::GetInputDevice()'s vtable slot +0x10 is not the exported Update");
+        return;
+    }
+    if (stride != (int)kUtMouseEventSize) {
+        scrRefuse("GetMouseEvent's own imul does not name a 0x1C-byte MouseEvent");
+        return;
+    }
+    g_scrEvtTarget = fe;
+    g_scrUpdTarget = fu;
+    InterlockedExchange(&g_scrResolved, 1);
+    const unsigned long long rva =
+        (unsigned long long)((const unsigned char*)fe - (const unsigned char*)di);
+    bindingsNote("dinput.getMouseEvent", rva, true, nullptr);
+    bindingsLateReport();
+    logD("screen pad input: DirectInputDevice::GetMouseEvent %p (DirectInput.dll rva 0x%llX) == "
+         "slot +0x38 and ::Update %p == slot +0x10 of Engine::GetInputDevice() %p; the event "
+         "stride is 0x%X - confirmed on t%lu, the detours install once a world exists",
+         fe, rva, fu, dev, stride, GetCurrentThreadId());
+}
+
+// GAME THREAD (plateTick). Both detours or none; never from inside a detour body.
+void scrInstall() {
+    if (InterlockedCompareExchange(&g_scrResolved, 0, 0) != 1) return;
+    if (InterlockedCompareExchange(&g_scrHookOn, 0, 0)) return;
+    if (InterlockedCompareExchange(&g_scrOff, 0, 0)) return;
+    if (!g_window) return;   // never at the main menu: a world has captured the materials window
+    // Only for a player who pins the pad or the label to the screen, or while the layout
+    // editor is open: a player with no screen key yet who drags a part out of the window
+    // for the first time needs the screen input for the adopted drag, the toolbar that travels
+    // onto the screen and SAVE there. Otherwise there is no DirectInput detour at all. Set
+    // mid-session (a key, or the editor opened), it installs on the next tick; once installed it
+    // stays for the session, inert while nothing is published (scrBody's cheap exit).
+    if (!g_cfg.padScreen[0] && !g_cfg.labelScreen[0] && !panelLayoutEditOpen()) return;
+    utPadInReset(&g_scrState);
+    MH_STATUS s = MH_CreateHook(g_scrUpdTarget, (void*)&hk_DevUpdate, (void**)&o_DevUpdate);
+    if (s == MH_ERROR_ALREADY_CREATED) s = o_DevUpdate ? MH_OK : MH_ERROR_NOT_CREATED;
+    if (s != MH_OK) {
+        logE("  hook %-32s FAILED at MH_CreateHook: %s (%d)", "DirectInputDevice::Update",
+             mhName(s), (int)s);
+        scrOff("the DirectInputDevice::Update detour could not be created");
+        return;
+    }
+    s = MH_CreateHook(g_scrEvtTarget, (void*)&hk_DevGetMouseEvent, (void**)&o_DevGetMouseEvent);
+    if (s == MH_ERROR_ALREADY_CREATED) s = o_DevGetMouseEvent ? MH_OK : MH_ERROR_NOT_CREATED;
+    if (s != MH_OK) {
+        logE("  hook %-32s FAILED at MH_CreateHook: %s (%d)", "DirectInputDevice::GetMouseEvent",
+             mhName(s), (int)s);
+        scrOff("the DirectInputDevice::GetMouseEvent detour could not be created");
+        return;
+    }
+    // Update first: a generation counter that runs before the first event is harmless.
+    MH_STATUS e = MH_EnableHook(g_scrUpdTarget);
+    if (e == MH_ERROR_ENABLED) e = MH_OK;
+    if (e != MH_OK) {
+        logE("  hook %-32s FAILED at MH_EnableHook: %s (%d)", "DirectInputDevice::Update",
+             mhName(e), (int)e);
+        scrOff("the DirectInputDevice::Update detour could not be enabled");
+        return;
+    }
+    e = MH_EnableHook(g_scrEvtTarget);
+    if (e == MH_ERROR_ENABLED) e = MH_OK;
+    if (e != MH_OK) {
+        MH_DisableHook(g_scrUpdTarget);
+        logE("  hook %-32s FAILED at MH_EnableHook: %s (%d)", "DirectInputDevice::GetMouseEvent",
+             mhName(e), (int)e);
+        scrOff("the DirectInputDevice::GetMouseEvent detour could not be enabled");
+        return;
+    }
+    InterlockedExchange(&g_scrHookOn, 1);
+    logD("  hook %-32s installed at %p (trampoline %p), ::Update at %p (trampoline %p) on t%lu - "
+         "the screen pad's input, inert until the screen pad publishes its rectangles",
+         "DirectInputDevice::GetMouseEvent", g_scrEvtTarget, (void*)o_DevGetMouseEvent,
+         g_scrUpdTarget, (void*)o_DevUpdate, GetCurrentThreadId());
+}
+
 
 // ---- the caravan search box, and which category buttons it marks ----------------------------
 // The search on the mod's tab is ONE HUNDRED PER CENT the game's own:
@@ -1913,16 +2840,54 @@ volatile LONG g_needleLongLogged = 0;   // the "longer than kNeedleMax" line, on
 
 LONG g_sweepEpoch = -1;             // the epoch the sweep in progress is answering
 int g_sweepAt = 0;
-unsigned int g_sweepMask = 0;
+// The marks as a bitset over the group table, any size: bit i = collection group i.
+struct GroupBits {
+    std::vector<unsigned long long> w;
+    void clear() { w.clear(); }
+    bool test(int i) const {
+        return i >= 0 && (size_t)(i >> 6) < w.size() && ((w[(size_t)(i >> 6)] >> (i & 63)) & 1ull);
+    }
+    void set(int i) {
+        if (i < 0) return;
+        const size_t k = (size_t)(i >> 6);
+        try {
+            if (k >= w.size()) w.resize(k + 1, 0ull);
+        } catch (...) {
+            return;   // a mark lost, never a wrong one
+        }
+        w[k] |= 1ull << (i & 63);
+    }
+    int bits() const { return (int)w.size() * 64; }
+};
+GroupBits g_sweepMask;              // GAME THREAD ONLY
 int g_sweepScanned = 0;
 int g_sweepMatched = 0;
 int g_sweepSkipped = 0;
 int g_sweepTicks = 0;
 DWORD g_sweepStartedAt = 0;
 std::vector<std::string>* g_sweepRecs = nullptr;
-volatile LONG g_maskLive = 0;       // the PUBLISHED mask: bit i = group i holds an owned match
+// The PUBLISHED marks: bit i = group i holds a match. Written by the game thread, read by the
+// draw under the shared lock (no allocation, no engine call).
+SRWLOCK g_maskLock = SRWLOCK_INIT;
+GroupBits g_maskPub;                // under g_maskLock
 volatile LONG g_maskValid = 0;      // 0 until a sweep has completed for the current needle
-volatile LONG g_curHitMask = 0;     // tier B: the group on screen, from the engine's own answer
+volatile LONG g_curHitGroup = -1;   // tier B: the group on screen, from the engine's own answer
+volatile LONG g_maskLive = 0;       // the first 32 groups' published bits - the status lines only
+
+void maskPublish(const GroupBits* b) {
+    AcquireSRWLockExclusive(&g_maskLock);
+    try {
+        if (b) {
+            g_maskPub.w = b->w;
+        } else {
+            g_maskPub.clear();
+        }
+    } catch (...) {
+        g_maskPub.clear();
+    }
+    InterlockedExchange(&g_maskLive, g_maskPub.w.empty() ? 0 : (LONG)(unsigned long)g_maskPub.w[0]);
+    ReleaseSRWLockExclusive(&g_maskLock);
+}
 volatile LONG g_sweeps = 0;
 volatile LONG g_searchInstalledLogged = 0;
 volatile LONG g_unownedNoteLogged = 0;
@@ -1970,7 +2935,8 @@ int g_sweepTableMatched = 0;
 // owning a record halfway through a sweep, so tier A must never read a fold that was made for an
 // earlier needle epoch.
 bool g_sweepFolded = false;
-unsigned int g_sweepMaskA = 0;          // the mask as tier A left it, for the per-tier log line
+GroupBits g_sweepMaskA;                 // the mask as tier A left it, for the per-tier log line
+bool g_sweepADone = false;              // tier A finished for this needle
 std::string* g_needleFolded = nullptr;  // the needle, folded the same way. GAME THREAD ONLY.
 bool g_sweepCDone = true;
 
@@ -2051,9 +3017,9 @@ long g_searchInFlight = 0;
 
 void searchOff(const char* why) {
     if (InterlockedExchange(&g_searchOff, 1)) return;
-    InterlockedExchange(&g_maskLive, 0);
+    maskPublish(nullptr);
     InterlockedExchange(&g_maskValid, 0);
-    InterlockedExchange(&g_curHitMask, 0);
+    InterlockedExchange(&g_curHitGroup, -1);
     logW("search: FAULT - the category-button marks are OFF for this session: %s", why ? why : "?");
     logD("the game's own search on the boxes themselves is untouched");
 }
@@ -2164,8 +3130,8 @@ void searchNoteNeedle(const void* ws) {
             InterlockedExchange(&g_needleChars, 0);
             InterlockedIncrement(&g_needleEpoch);
             InterlockedExchange(&g_maskValid, 0);
-            InterlockedExchange(&g_maskLive, 0);
-            InterlockedExchange(&g_curHitMask, 0);
+            maskPublish(nullptr);
+            InterlockedExchange(&g_curHitGroup, -1);
             if (!InterlockedExchange(&g_needleLongLogged, 1)) {
                 logD("search: the caravan search box holds more than %d characters - the "
                      "category buttons are left UNMARKED while it does (a needle cut down to "
@@ -2189,8 +3155,8 @@ void searchNoteNeedle(const void* ws) {
     InterlockedIncrement(&g_needleEpoch);
     // The buttons must never keep a mark that belongs to an older needle.
     InterlockedExchange(&g_maskValid, 0);
-    InterlockedExchange(&g_maskLive, 0);
-    if (n == 0) InterlockedExchange(&g_curHitMask, 0);
+    maskPublish(nullptr);
+    if (n == 0) InterlockedExchange(&g_curHitGroup, -1);
 }
 
 bool __cdecl hk_WndSearch(void* window, const void* needle, void* outVec) {
@@ -2211,11 +3177,10 @@ bool __cdecl hk_WndSearch(void* window, const void* needle, void* outVec) {
     if (window == g_window && !InterlockedCompareExchange(&g_searchOff, 0, 0)) {
         bool hit = false;
         const int shown = liveShownGroup(nullptr);
-        if (g_needleLen > 0 && shown >= 0 && shown < 24 && readMatchedNotEmpty(window, &hit) &&
-            hit) {
-            InterlockedExchange(&g_curHitMask, (LONG)(1u << (unsigned)shown));
+        if (g_needleLen > 0 && shown >= 0 && readMatchedNotEmpty(window, &hit) && hit) {
+            InterlockedExchange(&g_curHitGroup, (LONG)shown);
         } else {
-            InterlockedExchange(&g_curHitMask, 0);
+            InterlockedExchange(&g_curHitGroup, -1);
         }
     }
     return r;
@@ -2336,7 +3301,7 @@ void searchSweepTick() {
         }
         g_sweepEpoch = epoch;
         g_sweepAt = 0;
-        g_sweepMask = 0;
+        g_sweepMask.clear();
         g_sweepScanned = 0;
         g_sweepMatched = 0;
         g_sweepSkipped = 0;
@@ -2344,10 +3309,11 @@ void searchSweepTick() {
         g_sweepStartedAt = GetTickCount();
         // ---- arm tier C for this needle ----------------------------------------------------
         // Skipped, and the cursor left "done", whenever the key is off, the owned-only filter is
-        // on (the user asked the marks to respect it, and with the filter on there are no
+        // on (the marks respect that filter by design, and with the filter on there are no
         // unowned records on the page to mark), the group file has not loaded, or the needle
         // folded to nothing.
-        g_sweepMaskA = 0xFFFFFFFFu;
+        g_sweepMaskA.clear();
+        g_sweepADone = false;
         g_sweepCGroup = 0;
         g_sweepCIndex = 0;
         g_sweepCExact = 0;
@@ -2383,8 +3349,8 @@ void searchSweepTick() {
     while (budget-- > 0 && g_sweepAt < (int)g_sweepRecs->size()) {
         const std::string& rec = (*g_sweepRecs)[(size_t)g_sweepAt++];
         const int grp = liveGroupOfItem(rec.c_str());
-        if (grp < 0 || grp >= 24) continue;
-        if (g_sweepMask & (1u << (unsigned)grp)) continue;   // that button is already marked
+        if (grp < 0) continue;
+        if (g_sweepMask.test(grp)) continue;   // that button is already marked
         // The engine's own proof that this record's stored prototype exists, IS an Item and has a
         // stack of at least 1 - plus the object id, which it push_backs into the mod's own vector.
         const int held = plateHeldOf(ge, rec.c_str());
@@ -2404,7 +3370,7 @@ void searchSweepTick() {
                 if (nm >= 0) ++g_sweepTableNamed;
             }
             if (nm > 0) {
-                g_sweepMask |= 1u << (unsigned)grp;
+                g_sweepMask.set(grp);
                 ++g_sweepTableMatched;
             } else {
                 ++g_sweepSkipped;
@@ -2428,18 +3394,23 @@ void searchSweepTick() {
         }
         ++g_sweepScanned;
         if (m > 0) {
-            g_sweepMask |= 1u << (unsigned)grp;
+            g_sweepMask.set(grp);
             ++g_sweepMatched;
         }
     }
     if (g_sweepAt < (int)g_sweepRecs->size()) return;   // more tier A next tick - still UNLIT
-    if (g_sweepMaskA == 0xFFFFFFFFu) {
-        g_sweepMaskA = g_sweepMask;
+    if (!g_sweepADone) {
+        g_sweepADone = true;
+        try {
+            g_sweepMaskA = g_sweepMask;
+        } catch (...) {
+            g_sweepMaskA.clear();
+        }
         // Publish the OWNED answer the moment tier A finishes. It is complete on its own, so
         // tier C costs the owned half none of its responsiveness even though it triples the
         // record count. Tier C only ever ADDS groups to the same mask, so the marks grow and
         // never retract, and "never over-report" holds at every instant.
-        InterlockedExchange(&g_maskLive, (LONG)g_sweepMask);
+        maskPublish(&g_sweepMask);
         InterlockedExchange(&g_maskValid, 1);
     }
     // ---- TIER C, on the same 32-per-tick budget as tier A ----------------------------------
@@ -2448,7 +3419,7 @@ void searchSweepTick() {
     if (!g_sweepCDone && g_tierC) {
         while (budget > 0 && g_sweepCGroup < (int)g_tierC->size()) {
             std::vector<TierCRec>& grp = (*g_tierC)[(size_t)g_sweepCGroup];
-            if (g_sweepCGroup >= 24 || (g_sweepMask & (1u << (unsigned)g_sweepCGroup)) ||
+            if (g_sweepMask.test(g_sweepCGroup) ||
                 g_sweepCIndex >= (int)grp.size()) {
                 ++g_sweepCGroup;      // no budget is spent skipping a group, and the cursor
                 g_sweepCIndex = 0;    // always advances, so this loop cannot spin
@@ -2494,34 +3465,33 @@ void searchSweepTick() {
                 ++g_sweepCNamed;
                 matched = strstr(nm->c_str(), g_needleFolded->c_str()) != nullptr;
             }
-            if (matched) g_sweepMask |= 1u << (unsigned)g_sweepCGroup;
+            if (matched) g_sweepMask.set(g_sweepCGroup);
         }
         if (g_sweepCGroup >= (int)g_tierC->size()) g_sweepCDone = true;
         if (!g_sweepCDone) return;   // more tier C next tick - still UNLIT
     }
-    InterlockedExchange(&g_maskLive, (LONG)g_sweepMask);
+    maskPublish(&g_sweepMask);
     InterlockedExchange(&g_maskValid, 1);
     const LONG n = InterlockedIncrement(&g_sweeps);
     int groups = 0;
-    for (int b = 0; b < 24; ++b) {
-        if (g_sweepMask & (1u << (unsigned)b)) ++groups;
+    for (int b = 0; b < g_sweepMask.bits(); ++b) {
+        if (g_sweepMask.test(b)) ++groups;
     }
     // How many groups each tier is responsible for. Tier A is
     // the mask as it stood when the owned pass finished; tier C is everything the unowned pass
-    // added on top; tier B is the separate, free, on-screen bit `plateSearchMask` ORs in.
+    // added on top; tier B is the separate, free, on-screen group `plateSearchMarked` adds.
     int groupsA = 0, groupsC = 0;
-    for (int b = 0; b < 24; ++b) {
-        const unsigned int bit = 1u << (unsigned)b;
-        if (g_sweepMaskA & bit) ++groupsA;
-        else if (g_sweepMask & bit) ++groupsC;
+    for (int b = 0; b < g_sweepMask.bits(); ++b) {
+        if (g_sweepMaskA.test(b)) ++groupsA;
+        else if (g_sweepMask.test(b)) ++groupsC;
     }
     logT("search: sweep #%ld done - %d character(s) typed, %d group(s) marked (tier A owned %d, "
-         "tier C unowned %d, tier B on-screen 0x%06X) | tier A: %zu owned record(s), %d asked of "
+         "tier C unowned %d, tier B on-screen group %d) | tier A: %zu owned record(s), %d asked of "
          "Item::SearchText, %d matched, %d skipped | tier C: %s, %d asked of Item::SearchText "
          "EXACTLY (shown this world), %d matched by catalogue NAME only, %d skipped (owned, or "
          "no name yet); %d record(s) indexed, %ld named | %d tick(s), %lu ms",
          n, (int)InterlockedCompareExchange(&g_needleChars, 0, 0), groups, groupsA, groupsC,
-         (unsigned int)InterlockedCompareExchange(&g_curHitMask, 0, 0), g_sweepRecs->size(),
+         (int)InterlockedCompareExchange(&g_curHitGroup, -1, -1), g_sweepRecs->size(),
          g_sweepScanned, g_sweepMatched, g_sweepSkipped,
          !g_cfg.searchButtonsUnowned
              ? "OFF (search_buttons_unowned=0)"
@@ -2617,6 +3587,42 @@ void __cdecl hk_WndLoad(void* window, const void* str) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------------------------
+void plateScreenRectsPublish(const UtPadScreenRects* r) {
+    InterlockedIncrement(&g_scrSeq);   // odd: being written
+    if (r && r->shown) {
+        g_scrRects = *r;
+        if (g_scrRects.buttonCount < 0) g_scrRects.buttonCount = 0;
+        if (g_scrRects.buttonCount > kUtPadScreenMaxButtons)
+            g_scrRects.buttonCount = kUtPadScreenMaxButtons;
+        const unsigned long long f = hookFrameCount();
+        g_scrRects.tick = f ? f : 1;
+    } else {
+        g_scrRects.shown = 0;
+    }
+    InterlockedIncrement(&g_scrSeq);   // even: whole again
+}
+
+const char* plateScreenSiteName() {
+    if constexpr (kUtScreenSiteChosen == kUtScreenSiteDrawTail) {
+        return "the ReagentWindow::Draw tail (the fallback site, under the HUD drawn after the caravan)";
+    } else {
+        return "the head of the HUD's item-rollover Draw (one level below the tooltips)";
+    }
+}
+
+const char* plateScreenInputState() {
+    if (InterlockedCompareExchange(&g_scrOff, 0, 0)) {
+        return InterlockedCompareExchange(&g_scrResolved, 0, 0) < 0 ? "refused" : "OFF (fault)";
+    }
+    if (InterlockedCompareExchange(&g_scrHookOn, 0, 0)) return "installed";
+    switch (InterlockedCompareExchange(&g_scrResolved, 0, 0)) {
+        case 1: return "resolved";
+        case -1: return "refused";
+        default: return "pending";
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 bool plateInit(HMODULE selfModule) {
@@ -2742,6 +3748,9 @@ int plateInstall(int* total) {
 void plateTick(bool gameThread) {
     if (!gameThread) return;
     installDrawHook();     // never MinHook from inside an engine detour body
+    // The screen parts' draw site: this world's item rollover, the proof, the install.
+    siteNote();
+    siteInstall();
     // The same rule for the +0x38 mouse handler. The slot is re-read here as
     // well as in hk_WndLoad so that turning `group_buttons` on in the ini mid-world still arms
     // the click; both calls are no-ops once the hook is on, the candidate is pending, the key
@@ -2751,6 +3760,11 @@ void plateTick(bool gameThread) {
     // The fourth slot, on exactly the same terms.
     if (g_window) noteSearchSlot(g_window);
     installSearchHook();
+    // The screen pad's input: the binding is resolved and cross-checked at any game-thread tick
+    // (it reports even at the main menu), the two DirectInput detours install once a world has
+    // captured the materials window.
+    scrResolveTick();
+    scrInstall();
     searchSweepTick();
     plateAssertPlate();   // install/restore the plate on the caravan's own edges
     // The map walk runs from here as well as from applyLayout, so a deposit or a take made
@@ -2771,10 +3785,12 @@ void plateTick(bool gameThread) {
         if (g_cfg.groupButtons || g_cfg.plateLabel) liveUiScaleRefresh();
     }
     if (!g_cfg.plateSwap) return;
-    // The probe is pure diagnostics - GraphicsEngine::LoadTexture and a log
-    // line per plate, no write into any engine object - so it runs even if the swap disabled
-    // itself. It is what tells the user (and the menu test) whether install_plates.ps1 worked.
-    if (InterlockedCompareExchange(&g_codeOk, 0, 0)) probeAllPlates();
+    // The probe is diagnostics - GraphicsEngine::LoadTexture and a log line per plate, no write
+    // into any engine object - so it runs even if the swap disabled itself. It waits for a
+    // captured materials window (src\ut_startorder.h): never at the main menu, where the first
+    // hooked frame can fall in the engine's start-up streaming.
+    if (utPlateProbeAllowed(InterlockedCompareExchange(&g_codeOk, 0, 0) != 0, g_window != nullptr))
+        probeAllPlates();
     if (InterlockedCompareExchange(&g_disabled, 0, 0)) return;
     if (InterlockedCompareExchange(&g_codeOk, 0, 0)) return;
     static DWORD lastTry = 0;
@@ -2788,7 +3804,6 @@ void plateTick(bool gameThread) {
             g_why = "armed (late scan)";
             logD("plate: armed by the late scan");
             plateInstall(nullptr);
-            probeAllPlates();   // same tick: the menu test sees the seven lines immediately
         }
     } else if (tries == 40) {
         InterlockedIncrement(&g_scanTries);
@@ -2888,18 +3903,10 @@ void plateApply(int group, const char* label, int cellW, int cellH) {
 }
 
 void plateOnViewChanged() {
-    InterlockedExchange(&g_probed, 0);
-    if (!g_plates) return;
-    // The names carry the view and the plate size, so every entry is renamed and re-probed.
-    // The textures already loaded are left to the engine, exactly as a world teardown that
-    // cannot unload one does.
-    for (PlateTex& pt : *g_plates) {
-        plateNames(pt);
-        pt.tex = nullptr;
-        pt.tried = false;
-        pt.ok = false;
-        pt.w = pt.h = pt.wantW = pt.wantH = 0;
-    }
+    // The names carry the view and the plate size, so every entry is renamed and re-probed. The
+    // textures already loaded are released at the world teardown, with the cached ones.
+    plateRenameAll(false, true);
+    g_layoutSeen = layoutPlatesGen();
 }
 
 void plateOnWorldTeardown() {
@@ -2917,11 +3924,11 @@ void plateOnWorldTeardown() {
     // world sweeps again from the top instead of trusting an answer about dead objects.
     g_sweepEpoch = -1;
     g_sweepAt = 0;
-    g_sweepMask = 0;
+    g_sweepMask.clear();
     if (g_sweepRecs) g_sweepRecs->clear();
-    InterlockedExchange(&g_maskLive, 0);
+    maskPublish(nullptr);
     InterlockedExchange(&g_maskValid, 0);
-    InterlockedExchange(&g_curHitMask, 0);
+    InterlockedExchange(&g_curHitGroup, -1);
     // Still deliberately NO write: this runs when the HUD that owned the window is being rebuilt
     // or has gone, and writing into an object the engine may have freed is exactly the failure
     // the liveness rules exist to prevent.  plateAssertPlate() has already put the vanilla
@@ -2936,6 +3943,7 @@ void plateOnWorldTeardown() {
         (g_curPlate && g_origPlate && g_curPlate != g_origPlate) ? g_curPlate : nullptr;
     int freed = 0, kept = 0;
     GdGraphicsEngine* gfx = graphics();
+    plateReleaseSuperseded(gfx, engineOwns, &freed, &kept);
     if (g_plates) {
         for (size_t i = 0; i < g_plates->size(); ++i) {
             PlateTex& pt = (*g_plates)[i];
@@ -2995,8 +4003,24 @@ void plateOnWorldTeardown() {
     InterlockedExchange(&g_btnSpaceProven, 0);
     InterlockedExchange(&g_btnSpaceLogged, 0);
     InterlockedExchange(&g_btnPassLogged, 0);
+    InterlockedExchange(&g_matKeepLogged, 0);
     InterlockedExchange(&g_drawOriginOk, 0);
     g_lastDrawOx = g_lastDrawOy = 0.0f;
+    // The screen pad's input: its proof and its once-per-world lines go with the world, the
+    // rectangles are retracted, and the pump's thread drops any open press on its next event.
+    InterlockedExchange(&g_scrReset, 1);
+    InterlockedExchange(&g_scrProbes, 0);
+    InterlockedExchange(&g_scrProven, 0);
+    InterlockedExchange(&g_scrLogged, 0);
+    plateScreenRectsPublish(nullptr);
+    // The screen parts' site: the next world has its own item rollover (the hook stays; the last
+    // screen size and origin stay published, so the next world's first frame does not relayout).
+    g_siteRoll = nullptr;
+    g_siteRollPending = nullptr;
+    g_siteTarget = nullptr;
+    InterlockedExchange(&g_sitePublished, 0);
+    InterlockedExchange64(&g_tailFrame, 0);
+    panelScreenWorldReset();
     // Object ids belong to the world that created them, so the map fingerprint of
     // the world that is going away must never be compared with the next one's (that would ask
     // for a repaint of a page nothing has built yet). The owned snapshot goes with it.
@@ -3062,21 +4086,49 @@ bool plateLabelInDraw() {
 
 bool plateCursorInAnyBox(int sx, int sy) {
     if (!g_window) return false;
-    void* boxes[256];
-    int n = liveCapturedBoxes(boxes, 256);
+    std::vector<void*> boxes;
+    const int n = capturedBoxesAll(boxes);
     if (n <= 0) return false;
-    if (n > 256) n = 256;
-    return boxHitSeh(boxes, n, (float)sx, (float)sy);
+    return boxHitSeh(boxes.data(), n, (float)sx, (float)sy);
+}
+
+int boxRectsLocalSeh(void* const* boxes, int n, float* xywh, int cap) {
+    __try {
+        int m = 0;
+        for (int i = 0; i < n && m < cap; ++i) {
+            const unsigned char* b = (const unsigned char*)boxes[i];
+            if (!b) continue;
+            const float* r = (const float*)(b + kWidgetLocalPosOff);
+            const float w = r[2], h = r[3];
+            if (!(w > 0.0f && h > 0.0f) || w > 20000.0f || h > 20000.0f) continue;
+            xywh[4 * m + 0] = r[0];
+            xywh[4 * m + 1] = r[1];
+            xywh[4 * m + 2] = w;
+            xywh[4 * m + 3] = h;
+            ++m;
+        }
+        return m;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_faults);
+        return -1;
+    }
+}
+
+int plateBoxRectsLocal(float* xywh, int cap) {
+    if (!g_window || !xywh || cap <= 0) return 0;
+    std::vector<void*> boxes;
+    const int n = capturedBoxesAll(boxes);
+    if (n <= 0) return 0;
+    return boxRectsLocalSeh(boxes.data(), n, xywh, cap);
 }
 
 bool plateBoxHitLocal(float lx, float ly, bool* faulted) {
     if (faulted) *faulted = false;
     if (!g_window) return false;
-    void* boxes[256];
-    int n = liveCapturedBoxes(boxes, 256);
+    std::vector<void*> boxes;
+    const int n = capturedBoxesAll(boxes);
     if (n <= 0) return false;
-    if (n > 256) n = 256;
-    return boxHitLocalSeh(boxes, n, lx, ly, faulted);
+    return boxHitLocalSeh(boxes.data(), n, lx, ly, faulted);
 }
 
 bool plateUnloadTexture(const GdTexture* tex) {
@@ -3302,15 +4354,15 @@ bool plateOwns(const char* record) {
 // Bit i = "collection group i holds a match for what is typed in the caravan
 // search box". Pure interlocked reads - no engine call, no lock, no allocation - so the strip's
 // draw path stays exactly as call-free as it was.
-unsigned int plateSearchMask() {
-    if (!g_cfg.searchButtons) return 0;
-    if (InterlockedCompareExchange(&g_searchOff, 0, 0)) return 0;
-    unsigned int m = 0;
-    if (InterlockedCompareExchange(&g_maskValid, 0, 0)) {
-        m = (unsigned int)InterlockedCompareExchange(&g_maskLive, 0, 0);
-    }
-    m |= (unsigned int)InterlockedCompareExchange(&g_curHitMask, 0, 0);
-    return m;
+bool plateSearchMarked(int group) {
+    if (group < 0 || !g_cfg.searchButtons) return false;
+    if (InterlockedCompareExchange(&g_searchOff, 0, 0)) return false;
+    if ((int)InterlockedCompareExchange(&g_curHitGroup, -1, -1) == group) return true;
+    if (!InterlockedCompareExchange(&g_maskValid, 0, 0)) return false;
+    AcquireSRWLockShared(&g_maskLock);
+    const bool r = g_maskPub.test(group);
+    ReleaseSRWLockShared(&g_maskLock);
+    return r;
 }
 
 // Re-arm the sweep from OUTSIDE a needle change. `searchSweepTick` decides tier C's fate once,

@@ -15,6 +15,14 @@
 // very same identityBuild() the Item::CreateItem detour calls. That is the whole round trip,
 // with no game anywhere near it.
 //
+// THE AFFIXED MONSTER INFREQUENT. The same round trip in the REAL 1.3.0.8 layout with
+// all ten string slots and every u32 filled, its record, prefix, suffix and seed a real MI's roll
+// decoded from a 1.3.0.8 transfer.gst (ut_miroll.h): captured by the shipped scan, committed
+// through journalDepositCommit, re-read from the file in pass 2, and rebuilt by BOTH the take's
+// identityBuild and the rescue's utBuildSwapOverlay - every slot's text, length and shape and
+// every byte outside the slots compared; the journal line's prefix@028 / suffix@048 keys and the
+// .gds export's prefixID / suffixID / seed read back.
+//
 // Build + run:  tools\build_test_journal.bat      (writes and then deletes out\uniq-items.bin)
 //   pass 1: test_journal.exe             writes the journal, checks the overlay in memory
 //   pass 2: test_journal.exe --verify    re-reads the FILE and checks the overlay again
@@ -28,6 +36,8 @@
 #include "../src/ut_rescue.h"
 
 #include "../src/ut_log.h"  // the flush-rule case drives the real logger
+#include "../src/ut_folders.h"  // the views\ -> mods\ move (--case-folders)
+#include "../src/ut_paths.h"
 
 namespace ut {
 void utModDirA(HMODULE self, char* out, size_t cap);
@@ -47,6 +57,12 @@ static bool slurp(const char* path, std::string* out) {
     while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got) out->append(buf, got);
     CloseHandle(h);
     return true;
+}
+
+static std::string narrowPath(const wchar_t* w) {
+    char buf[MAX_PATH] = {0};
+    WideCharToMultiByte(CP_ACP, 0, w, -1, buf, MAX_PATH, nullptr, nullptr);
+    return buf;
 }
 
 static bool spit(const char* path, const std::string& text) {
@@ -673,6 +689,267 @@ static void relicChecks() {
     printf("      refusal says: %s\n", snost.why);
 }
 
+// ---- THE AFFIXED MONSTER INFREQUENT ------------------------------------------------------------
+// The identity round trip WITH AFFIXES. The blob is laid out the way the engine lays out a real
+// 1.3.0.8 ItemReplicaInfo (ItemReplicaInfo::WriteProperties, Game.dll 0x570810: strings +0x08
+// +0x28 +0x48 +0x70 +0x100 +0x90 +0xB0 +0xD8 +0x120 +0x140, u32 +0x68 +0xD0 +0xF8 +0xFC +0x160
+// +0x178 +0x180 +0x17C) with EVERY slot filled, and its record, prefix, suffix and seed are a REAL
+// monster infrequent's roll decoded out of a 1.3.0.8 transfer.gst (ut_miroll.h has the proof):
+// b305c_ring, prefix b_ar007_ar_b, suffix a030b_off_dmg%fire_05_je, seed 2115467035. The other
+// slots carry records of the right families (synthetic: the SHAPE of each slot is what is under
+// test - heap strings of every length class, one short SSO string, one empty one), and every
+// padding byte outside the slots carries a filler, so "byte for byte" covers the whole blob.
+//
+// Pass 1 runs the SHIPPED capture rule (utScanReplicaSlots) over it, commits it through the
+// table's own deposit (journalDepositCommit at count 1, the file on disk before it returns) and
+// checks the overlay in memory; pass 2 (--verify) reads the same entry back OUT OF THE FILE in a
+// new process and checks it again, then the take's overlay (identityBuild) and the rescue's
+// (utBuildSwapOverlay, the build restoreOneFromTable runs) both reproduce every slot.
+static const char* const kMiRecord = "records/items/gearaccessories/rings/b305c_ring.dbr";
+static const unsigned int kMiSeed = 2115467035u;   // decoded, field 6 of the stash item
+
+struct MiStr {
+    unsigned int off;
+    const char* text;
+    const char* name;
+};
+static const MiStr kMiStrs[] = {
+    {0x008, "records/items/gearaccessories/rings/b305c_ring.dbr", "baseRecord"},
+    {0x028, "records/items/lootaffixes/prefix/b_ar007_ar_b.dbr", "prefix (decoded)"},
+    {0x048, "records/items/lootaffixes/suffix/a030b_off_dmg%fire_05_je.dbr", "suffix (decoded)"},
+    {0x070, "records/items/lootaffixes/crafting/ad05_pierceresist.dbr", "modifier"},
+    {0x090, "records/items/materia/compa_markofthetraveler.dbr", "component"},
+    {0x0B0, "records/items/lootaffixes/completionrelics/anecro_02a.dbr", "completionBonus"},
+    {0x0D8, "records/items/enchants/b01_augment_offense.dbr", "augment"},
+    {0x100, "records/items/gearaccessories/rings/b001a_ring.dbr", "illusion"},
+    {0x120, "asc_01.dbr", "ascendant (short: SSO)"},
+    {0x140, "", "ascendant2H (empty: SSO, capacity 15)"},
+};
+static const int kMiStrCount = (int)(sizeof(kMiStrs) / sizeof(kMiStrs[0]));
+
+static const NumField kMiNums[] = {
+    {0x068, kMiSeed, "seed (decoded)"},
+    {0x0D0, 0x0BADF00Du, "the u32 by the component"},
+    {0x0F8, 2u, "augment level"},
+    {0x0FC, 0x00031337u, "augment seed"},
+    {0x160, 9u, "var1"},
+    {0x17C, 2u, "affixRerolls"},
+    {0x180, 5u, "seedRerolls"},
+};
+static const int kMiNumCount = (int)(sizeof(kMiNums) / sizeof(kMiNums[0]));
+
+static bool inMiSlot(unsigned int j) {
+    for (int i = 0; i < kMiStrCount; ++i) {
+        if (j >= kMiStrs[i].off && j < kMiStrs[i].off + 0x20) return true;
+    }
+    return false;
+}
+
+// The engine's blob, deterministic: pass 2 rebuilds the very same bytes (the heap pointers aside,
+// which no comparison reads) to compare the file's entry against.
+static void miBlob(unsigned char* blob) {
+    static char store[16][160];
+    for (unsigned int i = 0; i < kIdLen; ++i) blob[i] = (unsigned char)(0xC0 + (i & 0x0F));
+    const unsigned int zero = 0, one = 1;
+    memcpy(blob, &zero, 4);                 // captureReplicaRaw zeroes the object id
+    memcpy(blob + kIdStackOff, &one, 4);    // one copy
+    for (int i = 0; i < kMiNumCount; ++i) memcpy(blob + kMiNums[i].off, &kMiNums[i].value, 4);
+    for (int i = 0; i < kMiStrCount; ++i) {
+        const size_t n = strlen(kMiStrs[i].text);
+        if (n == 0) {
+            putEmptySso(blob, kMiStrs[i].off);
+        } else if (n < 16) {
+            unsigned char* p = blob + kMiStrs[i].off;
+            memset(p, 0, 0x20);
+            memcpy(p, kMiStrs[i].text, n);
+            const size_t cap = 15;
+            memcpy(p + 0x10, &n, sizeof(n));
+            memcpy(p + 0x18, &cap, sizeof(cap));
+        } else {
+            _snprintf_s(store[i], sizeof(store[i]), _TRUNCATE, "%s", kMiStrs[i].text);
+            putHeapString(blob, kMiStrs[i].off, store[i], n | 0x0F);
+        }
+    }
+}
+
+// The capture the deposit detour makes of that item: the shipped scan over the blob.
+static bool miCapture(ut::UtReplicaCapture* c) {
+    static unsigned char blob[kIdLen];
+    miBlob(blob);
+    memset(c, 0, sizeof(*c));
+    _snprintf_s(c->record, sizeof(c->record), _TRUNCATE, "%s", kMiRecord);
+    c->stack = 1;
+    c->replicaLen = kIdLen;
+    memcpy(c->replica, blob, kIdLen);
+    TestBlob tb;
+    tb.p = blob;
+    tb.len = kIdLen;
+    ut::UtSlotShape shapes[24];
+    memset(shapes, 0, sizeof(shapes));
+    int faults = 0;
+    c->slotCount = ut::utScanReplicaSlots(&tb, kIdLen, &testProbe, c->slotOff, c->slotText, shapes,
+                                          24, &faults);
+    c->slotFaults = faults;
+    return c->slotCount > 0;
+}
+
+// Every slot of `ov` against the engine blob: the text, its length and its shape class (heap
+// above 15 characters with the buffer INSIDE the overlay, SSO capacity 15 otherwise); and every
+// byte outside the slots equal to the engine blob but `idWant` at +0x000 and `stackWant` at
+// +0x178.
+static void miOverlayChecks(const char* what, const ut::UtIdentityOverlay& ov, unsigned int idWant,
+                            unsigned int stackWant) {
+    unsigned char blob[kIdLen];
+    miBlob(blob);
+    int slotsOk = 0;
+    for (int i = 0; i < kMiStrCount; ++i) {
+        char text[200] = {0};
+        const bool read = ut::utReadMsvcString(ov.replica, kMiStrs[i].off, kIdLen, text,
+                                               sizeof(text));
+        const size_t n = strlen(kMiStrs[i].text);
+        size_t size = 0, cap = 0;
+        memcpy(&size, ov.replica + kMiStrs[i].off + 0x10, sizeof(size));
+        memcpy(&cap, ov.replica + kMiStrs[i].off + 0x18, sizeof(cap));
+        bool shape = size == n && (n > 15 ? cap > 15 : cap == 15);
+        if (n > 15) {
+            const char* ptr = nullptr;
+            memcpy(&ptr, ov.replica + kMiStrs[i].off, sizeof(ptr));
+            const char* lo = (const char*)&ov;
+            shape = shape && ptr >= lo && ptr < lo + sizeof(ov) && !memcmp(ptr, kMiStrs[i].text, n);
+        } else {
+            shape = shape && !memcmp(ov.replica + kMiStrs[i].off, kMiStrs[i].text, n) &&
+                    ov.replica[kMiStrs[i].off + n] == 0;
+        }
+        char line[256];
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "%s: %s +0x%03X reads back \"%.48s\"%s", what,
+                    kMiStrs[i].name, kMiStrs[i].off, kMiStrs[i].text,
+                    n > 15 ? " (heap, inside the overlay)" : " (SSO)");
+        const bool ok = read && !strcmp(text, kMiStrs[i].text) && shape;
+        check(ok, line);
+        if (ok) ++slotsOk;
+    }
+    unsigned int diff = 0, compared = 0, firstDiff = 0xFFFFFFFFu;
+    for (unsigned int j = 0; j < kIdLen; ++j) {
+        if (inMiSlot(j)) continue;
+        unsigned char want = blob[j];
+        if (j < 4) want = (unsigned char)(idWant >> (8 * j));
+        if (j >= kIdStackOff && j < kIdStackOff + 4) {
+            want = (unsigned char)(stackWant >> (8 * (j - kIdStackOff)));
+        }
+        ++compared;
+        if (ov.replica[j] != want) {
+            ++diff;
+            if (firstDiff == 0xFFFFFFFFu) firstDiff = j;
+        }
+    }
+    char line[256];
+    _snprintf_s(line, sizeof(line), _TRUNCATE,
+                "%s: all %u bytes outside the ten slots equal the engine blob (id 0x%X, stack %u)"
+                " - %u differ%s",
+                what, compared, idWant, stackWant, diff, diff ? " (FIRST at +0x" : "");
+    if (diff) {
+        const size_t at = strlen(line);
+        _snprintf_s(line + at, sizeof(line) - at, _TRUNCATE, "%03X)", firstDiff);
+    }
+    check(diff == 0 && compared > 0, line);
+    for (int i = 0; i < kMiNumCount; ++i) {
+        _snprintf_s(line, sizeof(line), _TRUNCATE, "%s: %s at +0x%03X == %u", what, kMiNums[i].name,
+                    kMiNums[i].off, kMiNums[i].value);
+        check(u32At(ov.replica, kMiNums[i].off) == kMiNums[i].value, line);
+    }
+    check(slotsOk == kMiStrCount, "every one of the ten slots came back");
+}
+
+static void miChecks(const char* label) {
+    printf("  --- the affixed monster infrequent (%s) ---\n", label);
+    ut::UtReplicaCapture entry;
+    if (!ut::journalGet(kMiRecord, &entry)) {
+        check(false, "journalGet returns the affixed MI entry");
+        return;
+    }
+    check(true, "journalGet returns the affixed MI entry");
+    check(entry.replicaLen == kIdLen, "the entry carries the 0x190-byte replica");
+    bool offsOk = entry.slotCount == kMiStrCount;
+    for (int i = 0; offsOk && i < kMiStrCount; ++i) {
+        offsOk = entry.slotOff[i] == kMiStrs[i].off && !strcmp(entry.slotText[i], kMiStrs[i].text);
+    }
+    printf("      the entry holds %d slot(s):", entry.slotCount);
+    for (int i = 0; i < entry.slotCount; ++i) printf(" +0x%03X", entry.slotOff[i]);
+    printf("\n");
+    check(offsOk, "the entry holds exactly the ten engine slots, in order, with their texts");
+
+    // THE TAKE: the engine's own replica for the creation, everything else from the journal.
+    unsigned char incoming[0x200];
+    memset(incoming, 0, sizeof(incoming));
+    fillIncoming(incoming);
+    ut::UtIdentityOverlay ov;
+    const bool built = ut::identityBuild(entry, incoming, kIdLen, kIdStackOff, &ov);
+    check(built, "identityBuild (the take) accepts the affixed MI");
+    if (!built) printf("      why: %s\n", ov.why);
+    if (built) {
+        check(ov.slotCount == kMiStrCount && ov.slotsSkipped == 0, "the take rebuilt all ten slots");
+        miOverlayChecks("take", ov, 0x99999999u, 7u);
+    }
+    // THE RESCUE: restoreOneFromTable -> reagentBuildIdentityProto -> utBuildSwapOverlay over the
+    // entry's OWN replica (no engine prototype exists to copy from): id 0, stack 1.
+    ut::UtIdentityOverlay sov;
+    const bool sbuilt = ut::utBuildSwapOverlay(entry, entry.replica, entry.replicaLen, kIdStackOff,
+                                               &sov);
+    check(sbuilt, "utBuildSwapOverlay (the rescue's build) accepts the affixed MI");
+    if (!sbuilt) printf("      why: %s\n", sov.why);
+    if (sbuilt) miOverlayChecks("rescue", sov, 0u, 1u);
+
+    // THE ROLL: what the cap, the tooltip and the rescue report read out of the row.
+    ut::UtRollKey stored;
+    check(ut::journalRollOf(kMiRecord, &stored) && stored.known, "journalRollOf reads the row's roll");
+    check(!strcmp(stored.prefix, kMiStrs[1].text) && !strcmp(stored.suffix, kMiStrs[2].text) &&
+              stored.seed == kMiSeed,
+          "the stored roll is the decoded one: b_ar007_ar_b / a030b_off_dmg%fire_05_je / 2115467035");
+    ut::UtReplicaCapture engine;
+    miCapture(&engine);
+    ut::UtRollKey hovered;
+    ut::utRollFromSlots(engine.slotOff, engine.slotText, engine.slotCount, engine.replica,
+                        engine.replicaLen, &hovered);
+    check(ut::utRollSame(stored, hovered), "the deposited item's own roll matches the stored one");
+    char text[256];
+    check(ut::journalRollText(kMiRecord, text, sizeof(text)), "journalRollText names the roll");
+    printf("      roll: %s\n", text);
+    check(strstr(text, "prefix b_ar007_ar_b") && strstr(text, "suffix a030b_off_dmg%fire_05_je") &&
+              strstr(text, "seed 2115467035"),
+          "in words: prefix b_ar007_ar_b, suffix a030b_off_dmg%fire_05_je, seed 2115467035");
+}
+
+// The FILE side of pass 2: the line, the named slot keys and the GD Stash export of the affixes.
+static void miFileChecks() {
+    printf("  --- the affixed MI in the files ---\n");
+    std::string text;
+    check(slurp(ut::journalPath(), &text), "the journal reads back as text");
+    const size_t at = text.find(std::string("{\"record\":\"") + kMiRecord + "\"");
+    check(at != std::string::npos, "the MI's line is in the file");
+    const std::string line =
+        at == std::string::npos ? std::string() : text.substr(at, text.find('\n', at) - at);
+    check(line.find("\"prefix@028\":\"records/items/lootaffixes/prefix/b_ar007_ar_b.dbr\"") !=
+              std::string::npos,
+          "its prefix is written under prefix@028");
+    check(line.find("\"suffix@048\":\"records/items/lootaffixes/suffix/a030b_off_dmg%fire_05_je.dbr\"") !=
+              std::string::npos,
+          "its suffix is written under suffix@048");
+    check(line.find("\"seed\":2115467035") != std::string::npos, "the seed comment says 2115467035");
+    check(line.find("\"count\":1") != std::string::npos, "it is a table row at count 1");
+    std::string g;
+    std::vector<GdsItem> items;
+    std::string why;
+    const bool parsed = slurp(ut::journalGdsPath(), &g) && gdsParse(g, &items, &why);
+    check(parsed, "uniq-export.gds parses whole");
+    bool found = false;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (items[i].s[0] != kMiRecord) continue;
+        found = items[i].s[1] == kMiStrs[1].text && items[i].s[2] == kMiStrs[2].text &&
+                items[i].s[3] == kMiStrs[3].text && (unsigned int)items[i].i[0] == kMiSeed;
+    }
+    check(found, "the .gds export carries the MI's prefixID, suffixID, modifierID and seed");
+}
+
 static void identityChecks(const char* label) {
     printf("  --- identity overlay (%s) ---\n", label);
     ut::UtReplicaCapture entry;
@@ -837,8 +1114,8 @@ static int caseMain(const char* mode, const char* arg) {
     // (d) a journal that is THERE and cannot be used at all: line 1 is not JSON. A uniq-items.bin
     //     is put next to it, because the dangerous half of the old behaviour was that the ladder
     //     would then MIGRATE that .bin straight over the file it had just failed to read.
-    // (f/g/h): the FORMAT-2 fixture. The harness prefers a COPY of the user's
-    // real 358-entry format-2 journal and only falls back to this synthetic one when that file is
+    // (f/g/h): the FORMAT-2 fixture. The harness prefers a COPY of the
+    // machine's real format-2 journal and only falls back to this synthetic one when that file is
     // not on the machine - so this branch writes nothing if a fixture is already in place, and
     // never touches an original anywhere. The text is written by hand, on purpose: it has to be a
     // genuine format-2 file (sOOO keys, no "stored"), which this build no longer emits.
@@ -858,20 +1135,20 @@ static int caseMain(const char* mode, const char* arg) {
         // used. build_test_journal.bat prints "a COPY of the LIVE ..." from `if exist` alone,
         // before this decides anything - and the moment this build has run for real the live
         // journal is format 3, the copy is overwritten here, and cases f/g/h quietly stop testing
-        // the user's 358-entry file. The substitution is now named in the same output.
+        // the real file. The substitution is now named in the same output.
         if (!have.empty()) {
             printf("  [SUBSTITUTED - the real-file case was NOT run] a fixture was copied in "
                    "(%zu bytes) but it is\n"
                    "  not format 2 any more (the live journal has been upgraded). Cases f/g/h run "
                    "on the\n"
-                   "  SYNTHETIC 4-entry file below, not on the user's real journal. To test the "
+                   "  SYNTHETIC 4-entry file below, not on a real journal. To test the "
                    "real one\n"
                    "  again, freeze a format-2 copy and point LIVEJSONL at it.\n",
                    have.size());
         }
         std::string t =
             "{\"journal\":\"grim dawn uniquetab\",\"format\":2,"
-            "\"written\":\"2026-09-07T22:38:38.1760344Z\",\"entries\":4}\n";
+            "\"written\":\"2000-01-01T00:00:00.0000000Z\",\"entries\":4}\n";
         static const char* const kRec[4] = {"records/items/gearfeet/d101_feet.dbr",
                                             "records/items/gearlegs/c101_legs.dbr",
                                             "records/items/gearrelic/b102_relic.dbr",
@@ -882,7 +1159,7 @@ static int caseMain(const char* mode, const char* arg) {
         for (int i = 0; i < 4; ++i) {
             char line[1024];
             _snprintf_s(line, sizeof(line), _TRUNCATE,
-                        "{\"record\":\"%s\",\"deposited\":\"2026-09-07T22:38:%02u.0000000Z\","
+                        "{\"record\":\"%s\",\"deposited\":\"2000-01-01T00:00:%02u.0000000Z\","
                         "\"stack\":1,\"flags\":0,\"flagsText\":\"none\",\"len\":400,"
                         "\"s008\":\"%s\",\"s028\":\"\",\"s048\":\"\",\"s070\":\"\","
                         "\"s090\":\"%s\",\"s0B0\":\"\",\"s0D8\":\"\",\"s100\":\"\","
@@ -1199,7 +1476,7 @@ static int caseMain(const char* mode, const char* arg) {
     }
 
     // ---- (f): a FORMAT-2 file is upgraded to format 3 WITHOUT LOSS ---------------------------
-    // The fixture the harness drops in is a COPY of the user's real 358-entry format-2 journal
+    // The fixture the harness drops in is a COPY of a real format-2 journal
     // (or, when that is not on this machine, a small synthetic one written by --make-v2). This
     // pass reads it, dumps every field, and forces one write; --case-upgraded re-reads the
     // rewritten file in a SEPARATE PROCESS and compares the dumps byte for byte.
@@ -1385,8 +1662,8 @@ static int caseMain(const char* mode, const char* arg) {
         return g_fail ? 1 : 0;
     }
 
-    // ---- (m): A FORMAT-3 FILE IS THE USER'S LIVE FILE ----------------------------------------
-    // The journal on the user's disk right now is format 3 with 7 entries, and every one of those
+    // ---- (m): A FORMAT-3 FILE AS AN INSTALLED MOD WRITES IT --------------------------------
+    // A live journal is format 3 (the fixture has 7 entries), and every one of those
     // entries describes an item the ENGINE's reagent map is holding. So the upgrade rule this
     // build implements - read it in full, every row at count 0, invent nothing - is not an
     // abstract compatibility case: it is what happens the first time they run this build. The
@@ -1486,7 +1763,7 @@ static int caseMain(const char* mode, const char* arg) {
     }
 
     // ---- (k): export_csv AS A MODE -----------------------------------------------------------
-    // The fixture is the shape the user's own journal has: one entry that IS stored, one that is
+    // The fixture is the shape a real journal has: one entry that IS stored, one that is
     // NOT (the stale history a refund left behind) and one nobody has reconciled yet. The maker
     // writes it to disk with the third entry's "stored" key REMOVED, because that absence is the
     // only way an UNKNOWN entry can exist - journalUpsert is a deposit and always marks yes.
@@ -1588,7 +1865,7 @@ static int caseMain(const char* mode, const char* arg) {
         check(slurp(ut::journalCsvPath(), &coll), "the export_csv=1 file reads back");
         rows.clear();
         check(csvParse(coll, &rows), "it parses as RFC-4180 too");
-        check(rows.size() == 3, "export_csv=1 writes the header and TWO rows - THE USER'S BUG");
+        check(rows.size() == 3, "export_csv=1 writes the header and TWO rows - the not-stored row left out");
         bool collYes = false, collUnknown = false, collNo = false;
         for (size_t r = 1; r < rows.size(); ++r) {
             if (rows[r][0] == kYes) collYes = true;
@@ -1644,7 +1921,7 @@ static int caseMain(const char* mode, const char* arg) {
 
     // Case (l): the FRESH INSTALL. No fixture at all - the folder holds
     // no journal, exactly like a machine on which nothing has ever been deposited. Two claims are
-    // under test here, both of them promises the USER-GUIDE makes to a reader who will test them
+    // under test here, both of them promises the README makes to a reader who will test them
     // on precisely this machine state:
     //   * changing export_csv writes the CSV and NOTHING ELSE - no uniq-items.jsonl is created
     //     (the old code armed g_dirty and had to be guarded against exactly that);
@@ -1727,13 +2004,13 @@ static int caseMain(const char* mode, const char* arg) {
     }
 
     // THE FRESH INSTALL, for the .gds. No fixture at all - a machine on which
-    // nothing has ever been deposited. Two claims, both of them promises the USER-GUIDE makes
+    // nothing has ever been deposited. Two claims, both of them promises the README makes
     // about exactly this machine state: changing export_gds writes the export and NOTHING else
     // (no uniq-items.jsonl is created), and an empty collection really is the 8-byte header on
     // its own - version 3, count 0 - which is a file GD Stash reads as "no items", not a
     // truncated one.
     // ==== ONE JOURNAL SET PER CUSTOM GAME ========================================================
-    // A custom game's collection lives under <journal dir>\views\custom-<name>\. Everything that
+    // A custom game's collection lives under <journal dir>\mods\<name>\. Everything that
     // writes a file on the collection's behalf - the journal, the .gds and .csv exports, the
     // journal_prune copy and the rescue report - must stay inside the ACTIVE view's folder, and
     // the start-up view's files must come out of a custom game byte for byte as they went in.
@@ -1746,7 +2023,7 @@ static int caseMain(const char* mode, const char* arg) {
         static const char* const kKeep = "records/items/gearweapons/b02_sword.dbr";
         static const char* const kGone = "records/items/gearhands/c03_gloves.dbr";
         const std::string base = ut::journalBaseDir();
-        const std::string viewDir = base + "\\views\\custom-lootascension";
+        const std::string viewDir = base + "\\mods\\lootascension";
         check(!ut::journalFollow(0, ""), "the start-up view opens the start-up files");
         ut::UtReplicaCapture c;
         fill(&c, kMain, 1, 1);
@@ -1760,7 +2037,7 @@ static int caseMain(const char* mode, const char* arg) {
               "the view's full name is accepted and keyed by the custom mod");
         check(!strcmp(ut::journalViewKey(), "custom-lootascension"), "the key is custom-lootascension");
         check(std::string(ut::journalPath()) == viewDir + "\\uniq-items.jsonl",
-              "the journal is views\\custom-lootascension\\uniq-items.jsonl");
+              "the journal is mods\\lootascension\\uniq-items.jsonl");
         check(std::string(ut::journalGdsPath()) == viewDir + "\\uniq-export.gds" &&
                   std::string(ut::journalCsvPath()) == viewDir + "\\uniq-export.csv",
               "the exports are beside it");
@@ -1809,6 +2086,171 @@ static int caseMain(const char* mode, const char* arg) {
         ut::logFlush();
         printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail,
                g_fail == 1 ? "" : "s");
+        return g_fail ? 1 : 0;
+    }
+
+    // ==== THE FOLDER MOVE: views\ -> mods\ ====================================================
+    // 1.2.0 kept a custom game's own files in views\custom-<leaf>\ and its /basemods variant's
+    // generated set in views\basemods+custom-<leaf>\. The first start of this build renames them
+    // to mods\<leaf>\ and mods\<leaf>\basemods\ - under the mod folder and under journal_dir -
+    // byte for byte; a target that exists is never merged into; views\ goes only when empty;
+    // nothing else moves; and the collection then reads off its new folder unchanged.
+    if (!strcmp(mode, "--case-folders")) {
+        if (!ut::journalInit(nullptr)) {
+            printf("  [FAIL] journalInit\n");
+            return 1;
+        }
+        static const char* const kKeep = "records/items/gearweapons/b02_sword.dbr";
+        const std::string base = ut::journalBaseDir();
+        const std::wstring baseW = ut::utModDir(nullptr);
+        const std::string jd = base + "\\jd";
+        auto there = [](const std::string& p) { return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES; };
+        auto holds = [](const std::string& p, const char* want) {
+            std::string got;
+            return slurp(p.c_str(), &got) && got == want;
+        };
+        auto logText = [&]() {
+            ut::logFlush();
+            std::string t;
+            slurp(narrowPath(log).c_str(), &t);
+            return t;
+        };
+
+        // the collection, written by THIS build, then put back where 1.2.0 kept it
+        check(ut::journalFollow(0, "custom-alpha"), "a custom game's collection is opened");
+        ut::UtReplicaCapture c;
+        fill(&c, kKeep, 1, 1);
+        check(ut::journalUpsert(c) && ut::journalFlushNow(), "one entry is written");
+        std::string alphaJ;
+        check(slurp(ut::journalPath(), &alphaJ) && !alphaJ.empty(), "its journal is on the disk");
+        check(ut::journalFollow(0, ""), "back to the start-up files");
+        CreateDirectoryA((base + "\\views").c_str(), nullptr);
+        check(MoveFileExA((base + "\\mods\\alpha").c_str(), (base + "\\views\\custom-alpha").c_str(), 0) &&
+                  RemoveDirectoryA((base + "\\mods").c_str()),
+              "the 1.2.0 layout: views\\custom-alpha\\ holds that journal, there is no mods\\");
+        spit((base + "\\views\\custom-alpha\\uniquetab.ini").c_str(), "A-INI");
+        spit((base + "\\views\\custom-alpha\\uniquetab-buttons.ini").c_str(), "A-BTN");
+        CreateDirectoryA((base + "\\views\\basemods+custom-alpha").c_str(), nullptr);
+        spit((base + "\\views\\basemods+custom-alpha\\catalogue.bin").c_str(), "A-CAT");
+        spit((base + "\\views\\basemods+custom-alpha\\uniquetab.state").c_str(), "A-STATE");
+        spit((base + "\\views\\basemods+custom-alpha\\uniquetab.log").c_str(), "A-LOG");
+        CreateDirectoryA((base + "\\views\\basemods+custom-beta").c_str(), nullptr);   // no plain folder
+        spit((base + "\\views\\basemods+custom-beta\\catalogue.bin").c_str(), "B-CAT");
+        // journal_dir with its own old journal folder
+        CreateDirectoryA(jd.c_str(), nullptr);
+        CreateDirectoryA((jd + "\\views").c_str(), nullptr);
+        CreateDirectoryA((jd + "\\views\\custom-alpha").c_str(), nullptr);
+        spit((jd + "\\views\\custom-alpha\\uniq-items.jsonl").c_str(), "J-ALPHA");
+        // what must NOT move: the start-up files and an unrelated folder
+        spit((base + "\\uniquetab.state").c_str(), "ROOT-STATE");
+        CreateDirectoryA((base + "\\other").c_str(), nullptr);
+        spit((base + "\\other\\x.txt").c_str(), "OTHER");
+
+        const size_t before = logText().size();
+        ut::utFoldersMigrate(baseW.c_str(), (jd + "\\").c_str());   // a trailing slash, as typed
+        const std::string after = logText().substr(before);
+        printf("%s", after.c_str());
+        check(!there(base + "\\views"), "views\\ is removed - the moves left it empty");
+        check(holds(base + "\\mods\\alpha\\uniq-items.jsonl", alphaJ.c_str()),
+              "views\\custom-alpha -> mods\\alpha: the journal byte for byte");
+        check(holds(base + "\\mods\\alpha\\uniquetab.ini", "A-INI") &&
+                  holds(base + "\\mods\\alpha\\uniquetab-buttons.ini", "A-BTN"),
+              "... with the game's own settings and buttons");
+        check(holds(base + "\\mods\\alpha\\basemods\\catalogue.bin", "A-CAT") &&
+                  holds(base + "\\mods\\alpha\\basemods\\uniquetab.state", "A-STATE") &&
+                  holds(base + "\\mods\\alpha\\basemods\\uniquetab.log", "A-LOG"),
+              "views\\basemods+custom-alpha -> mods\\alpha\\basemods: the variant's set, state and log");
+        check(holds(base + "\\mods\\beta\\basemods\\catalogue.bin", "B-CAT") &&
+                  !there(base + "\\mods\\beta\\uniquetab.ini"),
+              "a /basemods-only game gets mods\\beta\\ created for its basemods\\ - and nothing else");
+        check(holds(jd + "\\mods\\alpha\\uniq-items.jsonl", "J-ALPHA") && !there(jd + "\\views"),
+              "journal_dir: views\\custom-alpha -> mods\\alpha there too, views\\ removed");
+        check(holds(base + "\\uniquetab.state", "ROOT-STATE") && holds(base + "\\other\\x.txt", "OTHER"),
+              "nothing else moved");
+        check(after.find("files: the custom games' folders moved from views\\ to mods\\ - 3 folder(s): "
+                         "custom-alpha -> mods\\alpha, basemods+custom-alpha -> mods\\alpha\\basemods, "
+                         "basemods+custom-beta -> mods\\beta\\basemods") != std::string::npos,
+              "one INFO line for the mod folder, naming the three moves");
+        check(after.find("(journal_dir \"" + jd + "\") - 1 folder(s): custom-alpha -> mods\\alpha") !=
+                  std::string::npos,
+              "and one for journal_dir");
+        check(after.find(" W]") == std::string::npos, "no WARN");
+
+        check(ut::journalFollow(0, "custom-alpha") &&
+                  std::string(ut::journalPath()) == base + "\\mods\\alpha\\uniq-items.jsonl" &&
+                  ut::journalCount() == 1 && ut::journalHas(kKeep),
+              "the collection reads off mods\\alpha\\ unchanged (1 entry)");
+        check(ut::journalFollow(0, ""), "back to the start-up files");
+
+        // every later start: nothing to do, nothing said
+        const size_t quiet = logText().size();
+        ut::utFoldersMigrate(baseW.c_str(), jd.c_str());
+        check(logText().size() == quiet && !ut::utFoldersMigrateIn(baseW).hadViews,
+              "a second start finds no views\\ and logs nothing");
+
+        // a downgrade wrote views\ again: a target that exists is NEVER merged into or overwritten
+        CreateDirectoryA((base + "\\views").c_str(), nullptr);
+        CreateDirectoryA((base + "\\views\\custom-alpha").c_str(), nullptr);
+        spit((base + "\\views\\custom-alpha\\uniq-items.jsonl").c_str(), "OLD");
+        CreateDirectoryA((base + "\\views\\basemods+custom-alpha").c_str(), nullptr);
+        spit((base + "\\views\\basemods+custom-alpha\\catalogue.bin").c_str(), "OLD-CAT");
+        CreateDirectoryA((base + "\\views\\custom-delta").c_str(), nullptr);
+        spit((base + "\\views\\custom-delta\\uniquetab.ini").c_str(), "D-INI");
+        spit((base + "\\views\\notes.txt").c_str(), "a stray file");
+        const size_t warnFrom = logText().size();
+        ut::utFoldersMigrate(baseW.c_str(), nullptr);
+        const std::string warns = logText().substr(warnFrom);
+        printf("%s", warns.c_str());
+        check(holds(base + "\\views\\custom-alpha\\uniq-items.jsonl", "OLD") &&
+                  holds(base + "\\mods\\alpha\\uniq-items.jsonl", alphaJ.c_str()),
+              "views\\custom-alpha stays where it is and mods\\alpha\\ is untouched");
+        check(holds(base + "\\views\\basemods+custom-alpha\\catalogue.bin", "OLD-CAT") &&
+                  holds(base + "\\mods\\alpha\\basemods\\catalogue.bin", "A-CAT"),
+              "the same for the /basemods folder");
+        check(holds(base + "\\mods\\delta\\uniquetab.ini", "D-INI") && !there(base + "\\views\\custom-delta"),
+              "a folder with a free target still moves");
+        check(warns.find("views\\custom-alpha was NOT moved: mods\\alpha already exists") != std::string::npos &&
+                  warns.find("views\\basemods+custom-alpha was NOT moved: it waits for views\\custom-alpha") !=
+                      std::string::npos,
+              "one WARN per folder left in place, naming the target (the /basemods one waits for its plain one)");
+        check(there(base + "\\views") &&
+                  warns.find("still holds 3 item(s): basemods+custom-alpha, custom-alpha, notes.txt") !=
+                      std::string::npos,
+              "views\\ is kept, with one WARN naming what is left");
+        check(warns.find("- 1 folder(s): custom-delta -> mods\\delta") != std::string::npos,
+              "and the INFO line names the one move");
+
+        // a file held open in the old folder (GD Stash reading its export): the rename fails, the
+        // /basemods folder waits, NO mods\<leaf>\ is created - so the next start moves both
+        const std::string other = base + "\\other-base";
+        CreateDirectoryA(other.c_str(), nullptr);
+        CreateDirectoryA((other + "\\views").c_str(), nullptr);
+        CreateDirectoryA((other + "\\views\\custom-eps").c_str(), nullptr);
+        CreateDirectoryA((other + "\\views\\basemods+custom-eps").c_str(), nullptr);
+        spit((other + "\\views\\custom-eps\\uniq-export.gds").c_str(), "E-GDS");
+        spit((other + "\\views\\basemods+custom-eps\\catalogue.bin").c_str(), "E-CAT");
+        const HANDLE held = CreateFileA((other + "\\views\\custom-eps\\uniq-export.gds").c_str(), GENERIC_READ,
+                                        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        check(held != INVALID_HANDLE_VALUE, "a file in views\\custom-eps is held open");
+        const std::wstring otherW = baseW + L"\\other-base";
+        const ut::UtFolderMigration busy = ut::utFoldersMigrateIn(otherW);
+        printf("  refused: %s | %s\n", busy.refused.empty() ? "-" : busy.refused[0].c_str(),
+               busy.refused.size() > 1 ? busy.refused[1].c_str() : "-");
+        check(busy.moved.empty() && busy.refused.size() == 2 &&
+                  busy.refused[0].find("views\\custom-eps could not be moved to mods\\eps (error ") == 0 &&
+                  busy.refused[1].find("waits for views\\custom-eps") != std::string::npos,
+              "the rename fails with its error, the /basemods folder waits");
+        check(!there(other + "\\mods\\eps") && there(other + "\\views\\basemods+custom-eps\\catalogue.bin") &&
+                  !busy.viewsRemoved,
+              "no mods\\eps\\ was created and nothing moved");
+        if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+        const ut::UtFolderMigration retry = ut::utFoldersMigrateIn(otherW);
+        check(retry.moved.size() == 2 && retry.refused.empty() && retry.viewsRemoved &&
+                  holds(other + "\\mods\\eps\\uniq-export.gds", "E-GDS") &&
+                  holds(other + "\\mods\\eps\\basemods\\catalogue.bin", "E-CAT"),
+              "closed again, the next start moves both and removes views\\");
+        ut::logFlush();
+        printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail, g_fail == 1 ? "" : "s");
         return g_fail ? 1 : 0;
     }
 
@@ -2267,7 +2709,7 @@ static int caseMain(const char* mode, const char* arg) {
     }
 
     // ---- (i): every entry checked and NOT on the page any more -------------------------------
-    // The user's exact state, and the one journal_guard.ps1 used to refuse on: a file full of
+    // A real state, and the one a count of stale lines would refuse on: a file full of
     // history, a page that holds nothing. The harness runs the guard against the folder this
     // leaves behind and expects exit 0.
     if (!strcmp(mode, "--case-allstale")) {
@@ -2392,9 +2834,9 @@ int main(int argc, char** argv) {
          !strcmp(argv[1], "--case-csvmode") || !strcmp(argv[1], "--case-csvempty") ||
          !strcmp(argv[1], "--dump-csv") || !strcmp(argv[1], "--case-gds") ||
          !strcmp(argv[1], "--case-gdsempty") || !strcmp(argv[1], "--dump-gds") ||
-         !strcmp(argv[1], "--case-views") ||
+         !strcmp(argv[1], "--case-views") || !strcmp(argv[1], "--case-folders") ||
          !strcmp(argv[1], "--store-row") ||
-         // (m): the format-3 file the user has on disk right now
+         // (m): a format-3 file as an installed mod writes it
          !strcmp(argv[1], "--case-v3upgrade"))) {
         return caseMain(argv[1], argc > 2 ? argv[2] : nullptr);
     }
@@ -2418,6 +2860,8 @@ int main(int argc, char** argv) {
         check(ut::journalCount() >= 1, "the file survived and was parsed");
         check(ut::journalHas(kIdRecord), "the identity record is in the file");
         identityChecks("after a write + a process restart");
+        miChecks("after a write + a process restart");
+        miFileChecks();
         // Clean up after ourselves wherever the out-dir helper put the file, and put back any
         // real journal pass 1 moved aside. The test must leave the tree exactly as it found it.
         char keep2[MAX_PATH];
@@ -2555,6 +2999,18 @@ int main(int argc, char** argv) {
     fillIdentity(&id);
     check(ut::journalUpsert(id), "upsert the identity entry (every field set)");
     identityChecks("in memory, before the file is written");
+    // ---- the affixed monster infrequent, through the table's own deposit --------------------
+    {
+        ut::UtReplicaCapture mi;
+        check(miCapture(&mi), "the shipped scan captured the affixed MI");
+        printf("      the scan recorded %d slot(s):", mi.slotCount);
+        for (int i = 0; i < mi.slotCount; ++i) printf(" +0x%03X", mi.slotOff[i]);
+        printf("\n");
+        bool rolledBack = false;
+        check(ut::journalDepositCommit(mi, 1, &rolledBack) && !rolledBack,
+              "the affixed MI is committed to the table at count 1 (on disk before it returns)");
+        miChecks("in memory, right after the deposit");
+    }
     ut::journalService();
     ut::logFlush();
 

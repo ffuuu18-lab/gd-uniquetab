@@ -7,7 +7,8 @@
 #
 # This script exits 1 (refuse) when either is true:
 #   * any collection journal (softcore uniq-items.jsonl, hardcore uniq-items-hc.jsonl, and the
-#     same pair of every custom game under views\custom-<name>\) says the mod still holds at
+#     same pair of every custom game under mods\<name>\, and under the old views\custom-<name>\)
+#     says the mod still holds at
 #     least one item, or
 #   * rescue-report.txt is missing or OLDER than the journal (i.e. the last rescue run does
 #     not cover what the journal now contains).
@@ -373,14 +374,23 @@ function Invoke-GuardOne([string]$mode, [string]$journal, [string]$legacy) {
 
 # ---- every collection -------------------------------------------------------------------------
 # softcore first, then hardcore, for the start-up files and then for every custom game's own set
-# under views\custom-<name>\ (ut_rescue.h), each with the rescue report of its own folder. All of
-# them run even when one refuses, so one call lists everything at risk; the verdict is the worst.
+# under mods\<name>\ (ut_rescue.h), each with the rescue report of its own folder. All of them run
+# even when one refuses, so one call lists everything at risk; the verdict is the worst.
+# The OLD layout, views\custom-<name>\ (what older versions wrote; the mod moves it to
+# mods\<name>\ on its first start), is scanned as well - FOREVER: a folder the move refused, or one an older build
+# wrote again after a downgrade, still holds a collection the engine would strip.
 $verdict = 0
 $sets = @(@{ Label = ""; Dir = $JournalDir; Report = $report; Legacy = $true })
+$modsDir = Join-Path $JournalDir "mods"
+if (Test-Path -LiteralPath $modsDir -PathType Container) {
+    Get-ChildItem -LiteralPath $modsDir -Directory | Sort-Object Name | ForEach-Object {
+        $sets += @{ Label = " (mods\$($_.Name))"; Dir = $_.FullName; Report = (Join-Path $_.FullName "rescue-report.txt"); Legacy = $false }
+    }
+}
 $viewsDir = Join-Path $JournalDir "views"
 if (Test-Path -LiteralPath $viewsDir -PathType Container) {
     Get-ChildItem -LiteralPath $viewsDir -Directory -Filter "custom-*" | Sort-Object Name | ForEach-Object {
-        $sets += @{ Label = " ($($_.Name))"; Dir = $_.FullName; Report = (Join-Path $_.FullName "rescue-report.txt"); Legacy = $false }
+        $sets += @{ Label = " (views\$($_.Name))"; Dir = $_.FullName; Report = (Join-Path $_.FullName "rescue-report.txt"); Legacy = $false }
     }
 }
 foreach ($s in $sets) {

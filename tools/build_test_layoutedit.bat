@@ -1,0 +1,25 @@
+@echo off
+rem build_test_layoutedit.bat - the in-game layout editor's pure half, offline. NO GAME NEEDED.
+rem   tools\build_test_layoutedit.bat        (finds vcvars64 itself, like build.bat)
+rem
+rem It compiles the REAL header the mod compiles - src\ut_layoutedit.h (over src\ut_layout.h) - so
+rem every handle, clamp and transition it proves is what the game runs.
+setlocal
+set "ROOT=%~dp0.."
+set "OUT=%ROOT%\build\test"
+if not exist "%OUT%" mkdir "%OUT%"
+
+if "%VSCMD_ARG_TGT_ARCH%"=="x64" goto :have_env
+call "%ROOT%\tools\find_vcvars.bat"
+if errorlevel 1 (echo [test] no x64 C++ toolchain - see the message above & exit /b 1)
+call "%VCVARS%" >nul
+:have_env
+
+cl /nologo /W4 /WX /EHsc /std:c++17 /GR- /MD /DNDEBUG /D_CRT_SECURE_NO_WARNINGS ^
+   /I"%ROOT%\src" ^
+   /Fo"%OUT%\\" /Fe"%OUT%\test_layoutedit.exe" ^
+   "%ROOT%\tools\test_layoutedit.cpp"
+if errorlevel 1 (echo [test] BUILD FAILED & exit /b 1)
+
+"%OUT%\test_layoutedit.exe" "%ROOT%"
+exit /b %ERRORLEVEL%

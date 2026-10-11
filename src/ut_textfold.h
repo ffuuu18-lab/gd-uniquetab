@@ -29,7 +29,7 @@ namespace ut {
 // Restricted to ASCII the promise is provable. The engine's fold is this fold composed with a
 // per-code-point map that leaves ASCII alone; applying the same length-preserving 1:1 map to both
 // sides of a substring relation can only ever REMOVE matches, never add one. So "the mod matched"
-// implies "the engine would have matched the same name", which is exactly what R4 asks.
+// implies "the engine would have matched the same name": the fold can never over-report.
 //
 // Nothing is lost on the shipped data: `catalogue.bin` carries no accented display name at all
 // (measured - zero multi-byte UTF-8 sequences anywhere inside a name), so the Latin-1 rules could

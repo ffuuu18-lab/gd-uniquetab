@@ -31,6 +31,12 @@
 //      (3 advisory) ... all confirmed, exe signatures pending (game thread)"
 //   7  the CLASSIFICATION, row by row against an explicit list: class, phase and CRITICAL /
 //      ADVISORY; a failed ADVISORY row leaves the gate open, a failed CRITICAL row closes it
+//   8  the TOOLTIP exports (needs UNIQUETAB_TEST_GAME_DIR; they are optional, so they are not
+//      binding rows and never reach the gate's count): all seven resolve in Game.dll, none is
+//      folded, ItemArtifactFormula::GetUIDisplayText is at 0x3199B0, and its bytes at 0x31A4B6
+//      are the call of the CRAFTED item's GetUIDisplayText ([this+0x1108], vtable +0x458) with
+//      the SAME line vector the formula was handed (r8 = r13 = the formula's own r8) - the call
+//      whose latch the formula detour suppresses
 
 #include <windows.h>
 
@@ -470,6 +476,175 @@ void runDecoderHalf(const char* gameDir) {
 // is the point of the gate, and it is checked here with the real registry. ut_log writes
 // nothing without logInit, so the gate's own lines go nowhere and the summary is read back with
 // bindingsSummary() instead.
+// `need` bytes at an rva of a PE read from disk, or null.
+const unsigned char* peAt(unsigned long rva, size_t need, void* ctx) {
+    const Pe* pe = (const Pe*)ctx;
+    const size_t f = rva ? pe->toFile(rva) : 0;
+    if (!f || f + need > pe->raw.size()) return nullptr;
+    return &pe->raw[f];
+}
+
+// The style-size decoder on hand-made bytes: the shape it accepts and the ones it refuses.
+struct Buf {
+    std::vector<unsigned char> b;
+};
+const unsigned char* bufAt(unsigned long rva, size_t need, void* ctx) {
+    const Buf* x = (const Buf*)ctx;
+    if ((size_t)rva + need > x->b.size()) return nullptr;
+    return &x->b[rva];
+}
+void putCall(std::vector<unsigned char>& b, size_t at, unsigned long target) {
+    const long rel = (long)target - (long)(at + 5);
+    b[at] = 0xE8;
+    for (int i = 0; i < 4; ++i) b[at + 1 + i] = (unsigned char)(((unsigned long)rel >> (8 * i)) & 0xFF);
+}
+void runTextSynthetic() {
+    const unsigned char pair[] = {0x2B, 0x87, 0x98, 0x00, 0x00, 0x00, 0x8B, 0x97, 0x9C, 0x00, 0x00, 0x00};
+    auto make = [&](int calls, bool flags, unsigned disp) {
+        Buf x;
+        x.b.assign(0x1000, 0x90);
+        putCall(x.b, 0x10, 0x900);            // EnsureAvailable-like, once
+        for (int i = 0; i < calls; ++i) putCall(x.b, 0x40 + 0x20 * (size_t)i, 0x400);
+        memcpy(&x.b[0x400 + 0x90], pair, sizeof(pair));
+        x.b[0x400 + 0x90 + 2] = (unsigned char)(disp & 0xFF);
+        x.b[0x400 + 0x90 + 3] = (unsigned char)(disp >> 8);
+        x.b[0x400 + 0x90 + 8] = (unsigned char)((disp + 4) & 0xFF);
+        x.b[0x400 + 0x90 + 9] = (unsigned char)((disp + 4) >> 8);
+        if (!flags) x.b[0x400 + 0x90 + 7] = 0x87;   // mov eax,[rdi+..] instead of edx
+        return x;
+    };
+    unsigned long finder = 0;
+    Buf a = make(2, true, 0x98);
+    ok(ut::utDecodeStyleSizeOffset(0, bufAt, &a, &finder) == 0x98 && finder == 0x400,
+       "font.styleSize: the twice-called finder's sub/flags pair decodes", "");
+    Buf b = make(1, true, 0x98);
+    ok(ut::utDecodeStyleSizeOffset(0, bufAt, &b) == 0, "font.styleSize: one call is no finder",
+       "");
+    Buf c = make(2, false, 0x98);
+    ok(ut::utDecodeStyleSizeOffset(0, bufAt, &c) == 0,
+       "font.styleSize: without the flags read beside it the sub is refused", "");
+    Buf d = make(2, true, 0x99);
+    ok(ut::utDecodeStyleSizeOffset(0, bufAt, &d) == 0, "font.styleSize: a misaligned offset is refused",
+       "");
+    Buf e = make(2, true, 0x2000);
+    ok(ut::utDecodeStyleSizeOffset(0, bufAt, &e) == 0, "font.styleSize: an offset past 0x1000 is refused",
+       "");
+    ok(ut::utDecodeStyleSizeOffset(0, nullptr, nullptr) == 0, "font.styleSize: no bytes, no offset",
+       "");
+}
+
+// Engine.dll on disk: every text export by name at its 1.3.0.8 rva, and the decoder on GetStyle.
+void runTextHalf(const char* gameDir) {
+    Pe eng;
+    std::string path = std::string(gameDir) + "\\x64\\Engine.dll";
+    if (!eng.load(path.c_str())) {
+        printf("[bindings] ***** Engine.dll could not be read at %s *****\n", path.c_str());
+        ++g_fail;
+        return;
+    }
+    printf("[bindings] Engine.dll: %llu bytes, read only\n", (unsigned long long)eng.raw.size());
+    int missing = 0, moved = 0;
+    char first[200] = "";
+    for (int i = 0; i < ut::kUtTextExportCount; ++i) {
+        const unsigned long rva = eng.fnRva(ut::kUtTextExports[i].mangled);
+        if (!rva) ++missing;
+        if (rva != ut::kUtTextExports[i].rva1308) ++moved;
+        if ((!rva || rva != ut::kUtTextExports[i].rva1308) && !first[0]) {
+            _snprintf_s(first, sizeof(first), _TRUNCATE, "%s at 0x%lX, expected 0x%lX",
+                        ut::kUtTextExports[i].pretty, rva, ut::kUtTextExports[i].rva1308);
+        }
+    }
+    char detail[256];
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%d names, %d missing, %d not at the 1.3.0.8 rva%s%s",
+                ut::kUtTextExportCount, missing, moved, first[0] ? ": " : "", first);
+    ok(missing == 0 && moved == 0 && ut::kUtTextExportCount == 12,
+       "the twelve text-engine names are exported by Engine.dll at their 1.3.0.8 rvas", detail);
+    unsigned long finder = 0;
+    const unsigned long getStyle = eng.fnRva(
+        "?GetStyle@GraphicsFont2@GAME@@QEBAPEBUStyle@12@IW4FontStyleFlag@2@@Z");
+    const unsigned long off = ut::utDecodeStyleSizeOffset(getStyle, peAt, &eng, &finder);
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "decoded Style+0x%lX through the finder at 0x%lX (expected 0x98 / 0xAE550)", off,
+                finder);
+    printf("[bindings] font.styleSize: %s\n", detail);
+    ok(off == 0x98 && finder == 0xAE550, "font.styleSize decodes from GetStyle's bytes", detail);
+}
+
+// Game.dll on disk: the tooltip's seven exports, and the one call inside a blueprint's text that
+// made the blueprint's line describe the item it crafts.
+int exportAliases(const Pe& pe, unsigned long rva) {
+    const size_t e = pe.toFile(pe.exportRva);
+    if (!e || e + 40 > pe.raw.size() || !rva) return -1;
+    const unsigned long nFns = *(const unsigned long*)&pe.raw[e + 20];
+    const size_t fnT = pe.toFile(*(const unsigned long*)&pe.raw[e + 28]);
+    if (!fnT) return -1;
+    int n = 0;
+    for (unsigned long i = 0; i < nFns; ++i) {
+        if (*(const unsigned long*)&pe.raw[fnT + (size_t)i * 4] == rva) ++n;
+    }
+    return n;
+}
+
+void runTooltipHalf(const char* gameDir) {
+    Pe game;
+    std::string gdll = std::string(gameDir) + "\\x64\\Game.dll";
+    if (!game.load(gdll.c_str())) {
+        printf("[bindings] ***** Game.dll could not be read at %s *****\n", gdll.c_str());
+        ++g_fail;
+        return;
+    }
+    struct Want {
+        const char* pretty;
+        const char* mangled;
+        unsigned long rva;   // 0 = not pinned here
+    };
+    const Want want[] = {
+        {"Item::GetUIDisplayText", GD_ITEM_GETUIDISPLAYTEXT, 0x3118A0},
+        {"ItemEquipment::GetUIDisplayText", GD_ITEMEQUIPMENT_GETUIDISPLAYTEXT, 0},
+        {"ItemArtifact::GetUIDisplayText", GD_ITEMARTIFACT_GETUIDISPLAYTEXT, 0x316150},
+        {"ItemRelic::GetUIDisplayText", GD_ITEMRELIC_GETUIDISPLAYTEXT, 0},
+        {"ItemArtifactFormula::GetUIDisplayText", GD_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT, 0x3199B0},
+        {"GameTextLineToString", GD_GAMETEXTLINETOSTRING, 0x302A90},
+        {"GameTextLine::GameTextLine", GD_GAMETEXTLINE_CTOR_W, 0x2FEC10},
+    };
+    const int nWant = (int)(sizeof(want) / sizeof(want[0]));
+    int bad = 0;
+    char first[200] = "";
+    for (int i = 0; i < nWant; ++i) {
+        const unsigned long rva = game.fnRva(want[i].mangled);
+        const int alias = exportAliases(game, rva);
+        const bool good = rva && alias == 1 && (!want[i].rva || rva == want[i].rva);
+        if (!good) {
+            ++bad;
+            if (!first[0]) {
+                _snprintf_s(first, sizeof(first), _TRUNCATE, ": %s at 0x%lX x%d", want[i].pretty,
+                            rva, alias);
+            }
+        }
+    }
+    char detail[256];
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%d names, %d wrong%s", nWant, bad, first);
+    ok(bad == 0 && nWant == 7, "the seven tooltip exports resolve, unfolded", detail);
+
+    // The prologue keeps the arguments: r13 = r8 (the line vector), r15 = rcx (this).
+    const unsigned char* pro = game.at(0x3199E1);
+    const unsigned char wantPro[] = {0x4D, 0x8B, 0xE8, 0x4C, 0x8B, 0xF9};
+    // 0x31A4B6 mov rcx,[r15+0x1108]; mov rax,[rcx]; movzx r9d,byte [rbp+0x88] (detailed);
+    // mov r8,r13 (the SAME vector); mov rdx,[rbp+0x78] (the character); call [rax+0x458].
+    const unsigned char* call = game.at(0x31A4B6);
+    const unsigned char wantCall[] = {0x49, 0x8B, 0x8F, 0x08, 0x11, 0x00, 0x00, 0x48, 0x8B, 0x01,
+                                      0x44, 0x0F, 0xB6, 0x8D, 0x88, 0x00, 0x00, 0x00, 0x4D, 0x8B,
+                                      0xC5, 0x48, 0x8B, 0x55, 0x78, 0xFF, 0x90, 0x58, 0x04, 0x00,
+                                      0x00};
+    const bool proOk = pro && memcmp(pro, wantPro, sizeof(wantPro)) == 0;
+    const bool callOk = call && memcmp(call, wantCall, sizeof(wantCall)) == 0;
+    _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                "prologue r13=r8, r15=rcx at 0x3199E1: %s; crafted item's GetUIDisplayText "
+                "(+0x458) on [this+0x1108] with r8=r13 at 0x31A4CF: %s",
+                proOk ? "yes" : "NO", callOk ? "yes" : "NO");
+    ok(proOk && callOk, "a blueprint's text runs the crafted item's", detail);
+}
+
 void runGateHalf() {
     // 1. nothing has reported yet - every EARLY binding is outstanding, so the gate must refuse.
     ok(!ut::bindingsGate(61, 0), "an unreported binding turns it off",
@@ -489,6 +664,9 @@ void runGateHalf() {
         {"item.incrementStackSlot", 0x5F8}, {"item.stackMirror", 0x5A0},
         {"player.ctrlId", 0x16C0},        {"objectManager.objectFromId", 0x1234},
         {"gamedll.dragSite", 0x173960},
+        {"text.renderWide", 0x9F930},     {"text.loadFontDirect", 0x7B480},
+        {"text.fontMetrics", 0xB0720},    {"text.localization", 0x143500},
+        {"font.styleSize", 0x98},
     };
     for (size_t i = 0; i < sizeof(early) / sizeof(early[0]); ++i) {
         ut::bindingsNote(early[i].name, early[i].value, true, "the offline harness said so");
@@ -496,11 +674,14 @@ void runGateHalf() {
     ok(ut::bindingsGate(61, 0), "it passes once every early binding is confirmed",
        ut::bindingsSummary());
     printf("[bindings] the gate's INFO line reads: %s\n", ut::bindingsSummary());
-    ok(strstr(ut::bindingsSummary(), "13 decoded (3 advisory)") != nullptr &&
-           strstr(ut::bindingsSummary(), "15 literal (1 advisory)") != nullptr &&
+    ok(strstr(ut::bindingsSummary(), "65 by export") != nullptr &&
+           strstr(ut::bindingsSummary(), "14 decoded (4 advisory)") != nullptr &&
+           strstr(ut::bindingsSummary(), "16 literal (2 advisory)") != nullptr &&
            strstr(ut::bindingsSummary(), "all confirmed") != nullptr &&
            strstr(ut::bindingsSummary(), "exe signatures pending (game thread)") != nullptr,
-       "a healthy game reads 13 decoded (3 advisory), all confirmed", ut::bindingsSummary());
+       "a healthy game reads 65 by export, 14 decoded (4 advisory), 16 literal (2 advisory), all "
+       "confirmed",
+       ut::bindingsSummary());
 
     // 2a. THE CLASSIFICATION, row by row. Every row's class, phase and gate flag is written out
     // here by hand; a row that appears, disappears or changes flag fails offline.
@@ -510,7 +691,7 @@ void runGateHalf() {
             int cls, phase, gate;
         };
         const int D = ut::UT_BIND_DECODED, S = ut::UT_BIND_STRUCTURAL, L = ut::UT_BIND_LITERAL,
-                  G = ut::UT_BIND_SIGNATURE;
+                  G = ut::UT_BIND_SIGNATURE, X = ut::UT_BIND_EXPORT;
         const int E = ut::UT_BIND_EARLY, T = ut::UT_BIND_LATE;
         const int C = ut::UT_BIND_CRITICAL, A = ut::UT_BIND_ADVISORY;
         const Want want[] = {
@@ -530,10 +711,15 @@ void runGateHalf() {
             {"box.protoId", L, E, C},           {"box.localPos", L, E, C},
             {"box.parentOrigin", L, E, C},      {"vtable.slotNumbers", L, E, C},
             {"gameEngine.saveVariant", L, E, A}, {"gamedll.dragSite", G, E, C},
-            {"gameTextLine.size", L, E, C},     {"exe.ReagentWindowLoad", G, T, C},
+            {"gameTextLine.size", L, E, C},
+            {"text.renderWide", X, E, A},       {"text.loadFontDirect", X, E, A},
+            {"text.fontMetrics", X, E, A},      {"text.localization", X, E, A},
+            {"font.styleSize", D, E, A},        {"fntMetric.fields", L, E, A},
+            {"exe.ReagentWindowLoad", G, T, C},
             {"exe.UIReagentItemLoad", G, T, C}, {"exe.UIReagentItemSetItem", G, T, C},
             {"exe.UIReagentItemSetPos", G, T, C}, {"exe.takeReplicaPair", G, T, C},
             {"exe.depositSiteA", G, T, C},      {"exe.depositSiteB", G, T, C},
+            {"dinput.getMouseEvent", X, T, C},
         };
         const int nWant = (int)(sizeof(want) / sizeof(want[0]));
         int bad = 0, advisory = 0;
@@ -556,7 +742,7 @@ void runGateHalf() {
         char detail[200];
         _snprintf_s(detail, sizeof(detail), _TRUNCATE, "%d rows, %d advisory, %d mismatch%s%s",
                     ut::bindingsRowCount(), advisory, bad, firstBad[0] ? ": " : "", firstBad);
-        ok(bad == 0 && ut::bindingsRowCount() == nWant && advisory == 4,
+        ok(bad == 0 && ut::bindingsRowCount() == nWant && advisory == 10,
            "the classification is the expected list", detail);
     }
 
@@ -582,8 +768,11 @@ void runGateHalf() {
             }
             if (phase == ut::UT_BIND_LATE) {
                 // Only the exe's own .text needs the game thread: it is DRM-encrypted until the
-                // Steam stub has run. Everything else is readable before the first hook.
-                if (strncmp(name, "exe.", 4) != 0) {
+                // Steam stub has run. Everything else is readable before the first hook - except
+                // the screen pad's DirectInput row, whose cross-check needs the LIVE input device
+                // (it exists once the engine has initialised input) and which turns only its own
+                // route off.
+                if (strncmp(name, "exe.", 4) != 0 && strcmp(name, "dinput.getMouseEvent") != 0) {
                     ++lateNotExe;
                     if (!firstBad[0]) _snprintf_s(firstBad, sizeof(firstBad), _TRUNCATE, "%s", name);
                 }
@@ -612,9 +801,10 @@ void runGateHalf() {
                     "no game thread", decodedLate);
         ok(decodedLate == 0, "every decoder is classified EARLY", detail);
         _snprintf_s(detail, sizeof(detail), _TRUNCATE,
-                    "%d late row(s) that are not exe.* - only the DRM-encrypted exe .text may be "
-                    "late", lateNotExe);
-        ok(lateNotExe == 0, "only exe signatures are classified LATE", detail);
+                    "%d late row(s) that are not exe.* - only the DRM-encrypted exe .text and the "
+                    "live input device may be late", lateNotExe);
+        ok(lateNotExe == 0, "only exe signatures and dinput.getMouseEvent are classified LATE",
+           detail);
     }
 
     // 3a. an ADVISORY row fails - nothing reads it, so the gate stays open and the line says so.
@@ -622,8 +812,16 @@ void runGateHalf() {
     ok(ut::bindingsGate(61, 0) && ut::bindingsGateFailure()[0] == 0,
        "a failed advisory row leaves the gate open", ut::bindingsSummary());
     ok(strstr(ut::bindingsSummary(), "confirmed except 1 advisory") != nullptr &&
-           strstr(ut::bindingsSummary(), "12 decoded (3 advisory)") != nullptr,
+           strstr(ut::bindingsSummary(), "13 decoded (4 advisory)") != nullptr,
        "and the count line says which", ut::bindingsSummary());
+
+    // 3a'. a text-engine row fails - its route stays off, the mod stays on.
+    ut::bindingsNote("text.fontMetrics", 0, false, "GraphicsFont2::GetMetric is not exported");
+    ut::bindingsNote("font.styleSize", 0, false, "the finder's pair was not found");
+    ok(ut::bindingsGate(61, 0) && ut::bindingsGateFailure()[0] == 0,
+       "a missing text export or style-size decode leaves the gate open", ut::bindingsSummary());
+    ut::bindingsNote("text.fontMetrics", 0xB0720, true, "the offline harness said so");
+    ut::bindingsNote("font.styleSize", 0x98, true, "the offline harness said so");
 
     // 3b. a CRITICAL row fails - and the whole mod has to go off, naming it.
     ut::bindingsNote("player.ctrlId", 0, false, "a non-zero offset below 0x20000");
@@ -650,10 +848,13 @@ int main(int argc, char** argv) {
     }
 
     runGateHalf();  // needs no input, so this suite always checks something
+    runTextSynthetic();
 
     const char* dir = getenv("UNIQUETAB_TEST_GAME_DIR");
     if (dir && *dir) {
         runDecoderHalf(dir);
+        runTextHalf(dir);
+        runTooltipHalf(dir);
     } else {
         printf("[bindings] ***** SKIPPED the decoders - set UNIQUETAB_TEST_GAME_DIR to the\n");
         printf("[bindings]       installed game folder to run them. Game.dll is opened READ\n");

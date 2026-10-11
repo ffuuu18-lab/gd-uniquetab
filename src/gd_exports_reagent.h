@@ -258,6 +258,9 @@
 // Game.dll : the other override that does not call the base - cheap, so it is covered too
 #define GD_ITEMRELIC_GETUIDISPLAYTEXT "?GetUIDisplayText@ItemRelic@GAME@@UEBAXPEBVCharacter@2@AEAV?$vector@UGameTextLine@GAME@@@mem@@_N@Z"
 
+// Game.dll : a BLUEPRINT (0x3199B0). It calls the CRAFTED item's GetUIDisplayText (`call [rax+0x458]` on [this+0x1108] at 0x31A4CF) into the same vector, so the detour suppresses that inner latch and latches the blueprint's own record on the way out
+#define GD_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT "?GetUIDisplayText@ItemArtifactFormula@GAME@@UEBAXPEBVCharacter@2@AEAV?$vector@UGameTextLine@GAME@@@mem@@_N@Z"
+
 // Game.dll : THE layout entry point (0x302A90). Reads the vector at [+0] and [+8] only and writes nothing, which is what makes a borrowed N+1 array safe
 #define GD_GAMETEXTLINETOSTRING "?GameTextLineToString@GAME@@YAXAEBV?$vector@UGameTextLine@GAME@@@mem@@AEAV?$list@UGameTextString@GAME@@@3@@Z"
 

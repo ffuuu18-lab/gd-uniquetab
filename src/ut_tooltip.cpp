@@ -54,9 +54,11 @@
 #include "ut_config.h"
 #include "ut_live.h"
 #include "ut_log.h"
+#include "ut_panel.h"    // the buttons file's [tab]: panelTextStartup
 #include "ut_plate.h"
 #include "ut_reagent.h"
 #include "ut_rescue.h"
+#include "ut_textmeasure.h"  // makeWide: UTF-8 to the engine's UTF-16
 
 namespace ut {
 namespace {
@@ -297,6 +299,7 @@ void* r_ItemText = nullptr;
 void* r_EquipText = nullptr;
 void* r_ArtifactText = nullptr;
 void* r_RelicText = nullptr;
+void* r_FormulaText = nullptr;
 void* r_ToString = nullptr;
 void* r_LineCtor = nullptr;
 
@@ -306,6 +309,7 @@ PfnItem_GetUIDisplayText o_ItemText = nullptr;
 PfnItem_GetUIDisplayText o_EquipText = nullptr;
 PfnItem_GetUIDisplayText o_ArtifactText = nullptr;
 PfnItem_GetUIDisplayText o_RelicText = nullptr;
+PfnItem_GetUIDisplayText o_FormulaText = nullptr;
 PfnGameTextLineToString o_ToString = nullptr;
 
 // ---- session state ----------------------------------------------------------------------------
@@ -324,16 +328,34 @@ volatile LONG g_latches = 0;      // collectible items whose tooltip was latched
 volatile LONG g_allocBalance = 0; // borrowed arrays alive right now; 0 at rest, always
 volatile LONG g_faults = 0;
 volatile LONG g_refusedShape = 0; // vectors the swap refused because their shape made no sense
+volatile LONG g_innerSuppressed = 0; // inner (crafted-item) latches a blueprint's tooltip suppressed
 char g_offWhy[192] = "";
 
-// The two prepared lines. Built ONCE per process by the engine's own exported constructor, never
-// destroyed and never freed - one bounded allocation of a few dozen bytes per state, which is not
-// a leak that grows.
-unsigned char g_lineYes[kLineSize];
-unsigned char g_lineNo[kLineSize];
+// The two prepared lines. Built by the engine's own exported constructor at start-up, and again
+// only when the strings file changes their text (tooltipTextRefresh) - into the OTHER buffer of a
+// pair, then published by pointer, so a reader that took the old pointer still copies an intact
+// line. Never destroyed: one bounded allocation of a few dozen bytes per text, not a growing leak.
+unsigned char g_lineBuf[2][2][kLineSize];   // [yes/no][buffer]
+unsigned char* volatile g_lineYes = g_lineBuf[0][0];
+unsigned char* volatile g_lineNo = g_lineBuf[1][0];
 
-char g_textYes[96] = "";
-char g_textNo[96] = "";
+char g_textYes[320] = "";    // UTF-8, up to 96 UTF-16 units
+char g_textNo[320] = "";
+
+// THE THIRD LINE: "In your collection (another roll)". A monster infrequent whose record
+// the collection holds, hovered with a DIFFERENT roll - prefix, suffix or seed - than the stored
+// one (ut_miroll.h: one roll per MI record). Same class as the collected line; its text is the
+// collected line's text plus the [tab] tooltip.roll words (built in kRollSuffix; g_textRollWords
+// holds the ones in force), so a [tab] tooltip.yes carries over. Its own pair of
+// buffers, published by pointer like the other two. Not ready = such an item reads the plain
+// collected line, never nothing.
+const char* const kRollSuffix = " (another roll)";
+unsigned char g_lineRollBuf[2][kLineSize];
+unsigned char* volatile g_lineRoll = g_lineRollBuf[0];
+volatile LONG g_rollReady = 0;
+volatile LONG g_rollLines = 0;   // tooltips that got the "(another roll)" line
+char g_textRollWords[320] = " (another roll)";   // [tab] tooltip.roll, UTF-8, up to 96 UTF-16 units
+char g_textRoll[640] = "";                        // g_textYes + g_textRollWords
 
 // ---- the compare-byte counters (game thread only) ---------------------------------------------
 // "game thread only" is CHECKED, not asserted - `cmpThreadOk()` claims the first thread that touches them and ignores any other,
@@ -361,7 +383,7 @@ void* proc(HMODULE m, const char* name, const char* pretty) {
 // MSVC's identical-COMDAT folding makes hundreds of exports
 // share one address, and detouring such an address changes every one of them. Exactly one entry
 // of the module's own export address table may point at a target we are about to hook. (None of
-// these five is folded on 1.3.0.8; the rule is unconditional, so it is asked anyway.)
+// these seven is folded on 1.3.0.8; the rule is unconditional, so it is asked anyway.)
 int exportAliasCount(HMODULE mod, const void* addr) {
     if (!mod || !addr) return -1;
     __try {
@@ -432,6 +454,52 @@ bool readRecord(const void* item, char* out, size_t cap) {
     reagentProbeEnter();
     const bool ok = readRecordSeh(item, off, out, cap);
     reagentProbeLeave();
+    return ok;
+}
+
+// One std::string window of the hovered item's ItemReplicaInfo; an EMPTY string is a valid "" (no
+// affix) and is never dereferenced. False = the window is not a plausible std::string.
+bool readSlotSeh(const void* item, unsigned int at, char* out, size_t cap) {
+    __try {
+        const MsvcString* s = (const MsvcString*)((const unsigned char*)item + at);
+        out[0] = 0;
+        if (s->size > s->res) return false;
+        if (s->size == 0) return s->res >= 15;
+        if (s->size >= cap) return false;
+        const char* data = (s->res < 16) ? s->bx.buf : s->bx.ptr;
+        if (!data) return false;
+        memcpy(out, data, s->size);
+        out[s->size] = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        out[0] = 0;
+        return false;
+    }
+}
+
+bool readSeedSeh(const void* item, unsigned int at, unsigned int* out) {
+    __try {
+        *out = *(const unsigned int*)((const unsigned char*)item + at);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        *out = 0;
+        return false;
+    }
+}
+
+// The HOVERED item's roll: the prefix +0x28, the suffix +0x48 and the seed +0x68 of the
+// ItemReplicaInfo inside the Item - the same slots the deposit captures (ut_miroll.h has the
+// proof). Pure reads of engine memory, nothing else.
+bool readRoll(const void* item, UtRollKey* out) {
+    utRollClear(out);
+    const unsigned int off = reagentReplicaOffset();
+    if (!item || !off) return false;
+    reagentProbeEnter();
+    const bool ok = readSlotSeh(item, off + kUtRollPrefixOff, out->prefix, sizeof(out->prefix)) &&
+                    readSlotSeh(item, off + kUtRollSuffixOff, out->suffix, sizeof(out->suffix)) &&
+                    readSeedSeh(item, off + kUtRollSeedOff, &out->seed);
+    reagentProbeLeave();
+    out->known = ok;
     return ok;
 }
 
@@ -520,7 +588,9 @@ bool classAt(const unsigned char* first, unsigned int index, unsigned int* out) 
 //     leaves when it calls the base and then appends its own lines - which is why
 //     `ItemEquipment::GetUIDisplayText` is hooked as well (see the note on the job table): with
 //     that hook the equipment collection takes the EXACT tier, and this one is only the safety
-//     net for the chat-link, blueprint and character-window rollovers.
+//     net for the chat-link and character-window rollovers. (A blueprint is not one of
+//     them: its own detour latches on the way out, and the crafted item's latch inside it is
+//     suppressed - see t_formulaDepth.)
 // The one call that could otherwise be decorated by mistake is the vendor buy/sell text at exe
 // 0x1EED3F, which runs between the compare block and GetUIDisplayText: it is one or two lines of
 // GameTextClass 0x2, so neither its count nor its first class can match an item tooltip.
@@ -536,7 +606,7 @@ bool classAt(const unsigned char* first, unsigned int index, unsigned int* out) 
 //       (`ItemEquipment::GetSearchText` at 0x32A0AD and ten more) that never reach
 //       GameTextLineToString, and 16 of the GetUIDisplayText overrides are NOT hooked at all
 //       (ItemNote, QuestItem, the OneShot_* potions/scrolls/dyes, ItemTransmuter(Set),
-//       ItemArtifactFormula, ItemAttributeReset, ItemDevotionReset, ItemDifficultyUnlock,
+//       ItemAttributeReset, ItemDevotionReset, ItemDifficultyUnlock,
 //       ItemFactionBooster/Warrant, ItemSet), so those neither refresh nor clear it. A stale
 //       latch could therefore be claimed by the tooltip of a component hovered a moment after a
 //       unique. Consuming it is safe on the path that matters: on the item-box rollover the only
@@ -546,10 +616,24 @@ struct Latch {
     unsigned int count;
     unsigned int firstClass;
     unsigned int lastClass;
-    int state;  // 0 = none / consumed, 1 = COLLECTED, 2 = NOT COLLECTED
+    int state;  // 0 = none / consumed, 1 = COLLECTED, 2 = NOT COLLECTED,
+                // 3 = COLLECTED, ANOTHER ROLL (an MI whose stored roll differs)
     DWORD tick;
 };
 __declspec(thread) Latch t_latch;
+
+// THE BLUEPRINT LATCH. `ItemArtifactFormula::GetUIDisplayText` (Game.dll 0x3199B0) builds a
+// blueprint's rollover and, part-way through, calls the CRAFTED item's own GetUIDisplayText
+// (`call [rax+0x458]` on `[this+0x1108]` at 0x31A4CF, with the SAME line vector in r8 and the
+// same character / detailed arguments) - so the crafted item's hooked override (ItemEquipment,
+// ItemArtifact, Item ...) ran INSIDE every blueprint tooltip and latched the CRAFTED item's
+// collection state, which the prefix tier then put under the blueprint: "the line on a blueprint
+// described the item it crafts". The formula detour raises this per-thread depth around its
+// trampoline; while it is above zero `latchBody` latches NOTHING (and clears what it finds), and
+// on the way out - the depth back at zero - the formula detour latches the BLUEPRINT'S own record
+// over the complete vector. Lowered in a `__finally`, so an engine C++ exception unwinding
+// through the trampoline cannot leave it raised.
+__declspec(thread) int t_formulaDepth;
 
 void clearLatch() {
     t_latch.state = 0;
@@ -560,7 +644,7 @@ const unsigned char* pendingLine(const void* vec) {
     if (InterlockedCompareExchange(&g_tooltipOff, 0, 0)) return nullptr;
     if (!InterlockedCompareExchange(&g_linesReady, 0, 0)) return nullptr;
     if (!g_cfg.tooltipMark) return nullptr;
-    if (t_latch.state != 1 && t_latch.state != 2) return nullptr;
+    if (t_latch.state < 1 || t_latch.state > 3) return nullptr;
     const Latch cur = t_latch;   // POD copy
     clearLatch();                // ONE-SHOT: consumed here whether it matches below or not
     if (GetTickCount() - cur.tick > kLatchMaxAgeMs) return nullptr;
@@ -576,6 +660,11 @@ const unsigned char* pendingLine(const void* vec) {
                 atPrefixEnd == cur.lastClass;                        // prefix
     }
     if (!match) return nullptr;
+    if (cur.state == 3) {
+        if (!InterlockedCompareExchange(&g_rollReady, 0, 0)) return g_lineYes;
+        InterlockedIncrement(&g_rollLines);
+        return g_lineRoll;
+    }
     return cur.state == 1 ? g_lineYes : g_lineNo;
 }
 
@@ -646,6 +735,8 @@ long tooltipSwapAllocBalance() {
     return InterlockedCompareExchange(&g_allocBalance, 0, 0);
 }
 
+long tooltipInnerSuppressed() { return InterlockedCompareExchange(&g_innerSuppressed, 0, 0); }
+
 namespace {
 
 // ---- "is this record already collected?", MEMOISED ----------------------------------------------
@@ -668,8 +759,10 @@ __declspec(thread) Collected t_collected;
 
 const DWORD kProbeMaxAgeMs = 250;
 
-// THE ONLY TWO LOCKS ON THE TOOLTIP PATH. Called from latchBody OUTSIDE every SEH frame - see the
-// comment there for why that placement is not negotiable.
+// THE ONLY TWO LOCKS ON THE TOOLTIP PATH (plus the journal's once more in rollState, for a
+// monster infrequent the collection holds - the same lock, taken the same way). Called from
+// latchBody OUTSIDE every SEH frame - see the comment there for why that placement is not
+// negotiable.
 int collectedState(const char* record) {
     const DWORD now = GetTickCount();
     if (t_collected.state && (now - t_collected.tick) <= kProbeMaxAgeMs &&
@@ -688,12 +781,44 @@ int collectedState(const char* record) {
     return state;
 }
 
+// ---- "is it the SAME ROLL?", MEMOISED --------------------------------------------------------
+// Only for a record the collection holds (state 1) that the catalogue calls a monster infrequent:
+// the stored row's roll (journalRollOf, a linear scan under the journal lock) is asked at most
+// four times a second per record, exactly like collectedState. The KIND is read without loading
+// the catalogue (`mayLoad` false): this is the game thread, 60-144 times a second while hovering,
+// and an unknown kind simply keeps the plain collected line.
+struct StoredRoll {
+    char record[256];
+    int isMi;          // journalRecordIsMi
+    bool have;         // the row's roll was read
+    UtRollKey roll;
+    DWORD tick;
+    bool valid;
+};
+__declspec(thread) StoredRoll t_stored;
+
+// 1 = the plain collected line, 3 = "(another roll)".
+int rollState(const char* record, const UtRollKey& hovered) {
+    const DWORD now = GetTickCount();
+    if (!(t_stored.valid && (now - t_stored.tick) <= kProbeMaxAgeMs &&
+          _stricmp(t_stored.record, record) == 0)) {
+        _snprintf_s(t_stored.record, sizeof(t_stored.record), _TRUNCATE, "%s", record);
+        t_stored.isMi = journalRecordIsMi(record, false);
+        t_stored.have = t_stored.isMi == 1 && journalRollOf(record, &t_stored.roll);
+        t_stored.tick = now;
+        t_stored.valid = true;
+    }
+    if (t_stored.isMi != 1 || !t_stored.have || !hovered.known) return 1;
+    return utRollSame(hovered, t_stored.roll) ? 1 : 3;
+}
+
 // ---- the detour bodies -------------------------------------------------------------------------
 struct LatchPrep {
     char record[256];
     unsigned int count;
     unsigned int firstClass;
     unsigned int lastClass;
+    UtRollKey roll;   // the HOVERED item's prefix / suffix / seed
 };
 
 // MOD-SIDE READS OF ENGINE MEMORY, and NOTHING ELSE: no lock, no allocation, no logging. That is
@@ -705,6 +830,7 @@ bool latchRead(void* item, void* lines, LatchPrep* p) {
     // tooltip exactly. (`isOurRecordSafe` is a hash probe over a set built at DB load, with its
     // own try/catch and no lock.)
     if (!reagentIsCollectionRecord(p->record)) return false;
+    readRoll(item, &p->roll);   // a failed read leaves it unknown: the plain collected line
     const unsigned char* first = nullptr;
     return readVecShape(lines, &first, &p->count, &p->firstClass, &p->lastClass);
 }
@@ -730,10 +856,16 @@ int latchReadGuarded(void* item, void* lines, LatchPrep* p) {
 // count 1: every logf in the process would have blocked for good. The project's own precedent for
 // the opposite shape is ut_reagent.cpp's `__try/__finally` "so a fault still clears it".
 //
-// So: the SEH frame now covers ONLY the pure reads of engine memory (latchReadGuarded), which
+// So: the SEH frame covers ONLY the pure reads of engine memory (latchReadGuarded), which
 // take no lock at all, and everything that locks happens after it has been left.
 void latchBody(void* item, void* lines) {
     if (InterlockedCompareExchange(&g_tooltipOff, 0, 0)) return;
+    if (t_formulaDepth > 0) {
+        // The crafted item's text inside a blueprint's tooltip: never its own line there.
+        clearLatch();
+        InterlockedIncrement(&g_innerSuppressed);
+        return;
+    }
     if (!g_cfg.tooltipMark) {
         clearLatch();
         return;
@@ -756,6 +888,7 @@ void latchBody(void* item, void* lines) {
         fresh.firstClass = prep.firstClass;
         fresh.lastClass = prep.lastClass;
         fresh.state = collectedState(prep.record);   // takes the journal lock, at most 4 Hz/record
+        if (fresh.state == 1) fresh.state = rollState(prep.record, prep.roll);   // 3 for an MI
         fresh.tick = GetTickCount();
         t_latch = fresh;
         InterlockedIncrement(&g_latches);
@@ -809,6 +942,24 @@ void __cdecl hk_RelicGetUIDisplayText(void* item, const void* character, void* l
     latchBody(item, lines);
 }
 
+// A BLUEPRINT. The crafted item's GetUIDisplayText runs inside this one (0x31A4CF, see
+// t_formulaDepth): its latch is suppressed for the duration, and the blueprint's own record is
+// latched on the way out, over the complete vector - the same "on the way out" shape as
+// ItemEquipment's. Any latch left from before is dropped first, so nothing older can be claimed by
+// a GameTextLineToString the engine might run in between. No C++ object and no swallowing frame
+// here: the `__finally` is cleanup, so an engine C++ exception keeps unwinding.
+void __cdecl hk_FormulaGetUIDisplayText(void* item, const void* character, void* lines,
+                                        bool detailed) {
+    clearLatch();
+    ++t_formulaDepth;
+    __try {
+        if (o_FormulaText) o_FormulaText(item, character, lines, detailed);  // ENGINE CALL
+    } __finally {
+        --t_formulaDepth;
+    }
+    latchBody(item, lines);
+}
+
 // No C++ object and no swallowing frame lives in this function: the `__finally` is CLEANUP, so an
 // engine C++ exception out of the trampoline keeps unwinding to the engine's own handler.
 void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
@@ -841,12 +992,12 @@ void __cdecl hk_GameTextLineToString(const void* lines, void* out) {
 }
 
 // ---- building the two static lines --------------------------------------------------------------
-void makeWide(MsvcWString* s, const char* ascii, unsigned short* storage, size_t storageChars) {
+// `text` is UTF-8 (ut_textmeasure.h utWidenUtf8): a code point above U+FFFF becomes a surrogate
+// pair, a string that is not UTF-8 is widened byte by byte as before, and the cut to
+// storageChars - 1 units never splits a character.
+void makeWide(MsvcWString* s, const char* text, unsigned short* storage, size_t storageChars) {
     memset(s, 0, sizeof(*s));
-    size_t n = strlen(ascii);
-    if (n > storageChars - 1) n = storageChars - 1;
-    for (size_t i = 0; i < n; ++i) storage[i] = (unsigned short)(unsigned char)ascii[i];
-    storage[n] = 0;
+    const size_t n = utWidenUtf8(text, storage, storageChars);
     s->size = n;
     if (n < 8) {
         memcpy(s->bx.buf, storage, (n + 1) * sizeof(unsigned short));
@@ -889,7 +1040,7 @@ bool buildLine(unsigned char* line, unsigned int cls, const char* ascii) {
     p_LineCtor(line, cls, &in, false, nullptr, 1.0f);
     // The verification re-reads the +0x00 GameTextClass word among the rest, checked against the
     // ini-selected class, so
-    // this line is also the proof that the colour the user asked for is the one in the record.
+    // this line is also the proof that the colour the player asked for is the one in the record.
     const bool ok = verifyLineSeh(line, cls, in.size);
     const TextClassInfo* ci = classInfo(cls);
     logD("tooltip: line class 0x%02X = style \"%s\" RGB (%d,%d,%d) - \"%s\" (%zu chars) "
@@ -907,6 +1058,22 @@ const char* textFor(const char* fromIni, const char* fallback) {
     return fallback;
 }
 
+// The "(another roll)" line into `into` (one of g_lineRollBuf), published only once it verifies.
+// A line that does not verify leaves the previous one (or none - such an item then reads the
+// plain collected line); it never turns the whole mark off, the other two lines being fine.
+void buildRollLine(unsigned char* into) {
+    _snprintf_s(g_textRoll, sizeof(g_textRoll), _TRUNCATE, "%s%s", g_textYes, g_textRollWords);
+    if (buildLine(into, g_classYes, g_textRoll)) {
+        g_lineRoll = into;
+        InterlockedExchange(&g_rollReady, 1);
+    } else {
+        logW("tooltip: the \"%s\" line did not verify - a monster infrequent of another roll "
+             "reads the plain collected line",
+             g_textRoll);
+    }
+}
+
+
 // ---- the compare byte ---------------------------------------------------------------------------
 bool writeCompareSeh(void* box, unsigned char value) {
     __try {
@@ -918,7 +1085,7 @@ bool writeCompareSeh(void* box, unsigned char value) {
 }
 
 // The counters above are plain LONGs read-modify-written from two call sites (`applyLayout`'s
-// relayout and the rollover build). Both are the game thread, which is now ASSERTED rather than
+// relayout and the rollover build). Both are the game thread, which is ASSERTED rather than
 // assumed: the first thread to arrive owns them and any other is ignored after one log line.
 bool cmpThreadOk() {
     const LONG me = (LONG)GetCurrentThreadId();
@@ -1029,17 +1196,26 @@ bool tooltipInit(HMODULE selfModule) {
     if (done) return InterlockedCompareExchange(&g_tooltipOff, 0, 0) == 0;
     done = true;
 
-    _snprintf_s(g_textYes, sizeof(g_textYes), _TRUNCATE, "%s",
-                textFor(g_cfg.tooltipTextYes, kDefaultTextYes));
-    _snprintf_s(g_textNo, sizeof(g_textNo), _TRUNCATE, "%s",
-                textFor(g_cfg.tooltipTextNo, kDefaultTextNo));
+    // The two lines: tooltip.yes / tooltip.no under [tab] of the buttons file (uniquetab-buttons.ini)
+    // through the chain, else the built-in English. The first look at the file is made here; the
+    // glyph check follows at the first world (tooltipTextRefresh). (tooltip_text_yes/no of
+    // uniquetab.ini are gone since ini_version 39; their values belong under [tab].)
+    {
+        char fy[320] = "", fn[320] = "", fr[320] = "";
+        bool fileY = false, fileN = false;
+        panelTextStartup(fy, sizeof(fy), fn, sizeof(fn), &fileY, &fileN, fr, sizeof(fr));
+        _snprintf_s(g_textYes, sizeof(g_textYes), _TRUNCATE, "%s", textFor(fy, kDefaultTextYes));
+        _snprintf_s(g_textNo, sizeof(g_textNo), _TRUNCATE, "%s", textFor(fn, kDefaultTextNo));
+        _snprintf_s(g_textRollWords, sizeof(g_textRollWords), _TRUNCATE, "%s", textFor(fr, kRollSuffix));
+    }
 
     // The policy line - printed whatever the keys say, so the menu test can always see it.
     logD("tooltip: compare_popup=%d tooltip_mark=%d - the compare byte is box+0x%02X and is only "
-         "ever set on COLLECTION boxes (never the vanilla materials page); the mark is five "
+         "ever set on COLLECTION boxes (never the vanilla materials page); the mark is six "
          "exported Game.dll detours that append one GameTextLine and never draw a pixel. "
-         "collected=\"%s\" notCollected=\"%s\"",
-         g_cfg.comparePopup, g_cfg.tooltipMark, kCompareOff, g_textYes, g_textNo);
+         "collected=\"%s\" notCollected=\"%s\" anotherRoll=\"%s%s\"",
+         g_cfg.comparePopup, g_cfg.tooltipMark, kCompareOff, g_textYes, g_textNo, g_textYes,
+         g_textRollWords);
 
     HMODULE game = GetModuleHandleA("Game.dll");
     if (!game) {
@@ -1050,11 +1226,13 @@ bool tooltipInit(HMODULE selfModule) {
     r_EquipText = proc(game, GD_ITEMEQUIPMENT_GETUIDISPLAYTEXT, "ItemEquipment::GetUIDisplayText");
     r_ArtifactText = proc(game, GD_ITEMARTIFACT_GETUIDISPLAYTEXT, "ItemArtifact::GetUIDisplayText");
     r_RelicText = proc(game, GD_ITEMRELIC_GETUIDISPLAYTEXT, "ItemRelic::GetUIDisplayText");
+    r_FormulaText = proc(game, GD_ITEMARTIFACTFORMULA_GETUIDISPLAYTEXT,
+                         "ItemArtifactFormula::GetUIDisplayText");
     r_ToString = proc(game, GD_GAMETEXTLINETOSTRING, "GameTextLineToString");
     r_LineCtor = proc(game, GD_GAMETEXTLINE_CTOR_W, "GameTextLine::GameTextLine");
 
-    if (!r_ItemText || !r_EquipText || !r_ArtifactText || !r_RelicText || !r_ToString ||
-        !r_LineCtor) {
+    if (!r_ItemText || !r_EquipText || !r_ArtifactText || !r_RelicText || !r_FormulaText ||
+        !r_ToString || !r_LineCtor) {
         disable("at least one tooltip export is MISSING");
         return false;
     }
@@ -1064,11 +1242,13 @@ bool tooltipInit(HMODULE selfModule) {
     const int a4 = exportAliasCount(game, r_RelicText);
     const int a5 = exportAliasCount(game, r_ToString);
     const int a6 = exportAliasCount(game, r_LineCtor);
+    const int a7 = exportAliasCount(game, r_FormulaText);
     logD("tooltip: export-alias check - Item %p x%d, ItemEquipment %p x%d, ItemArtifact %p x%d, "
-         "ItemRelic %p x%d, GameTextLineToString %p x%d, GameTextLine ctor %p x%d (1 = not folded)",
-         r_ItemText, a1, r_EquipText, a2, r_ArtifactText, a3, r_RelicText, a4, r_ToString, a5,
-         r_LineCtor, a6);
-    if (a1 != 1 || a2 != 1 || a3 != 1 || a4 != 1 || a5 != 1 || a6 != 1) {
+         "ItemRelic %p x%d, ItemArtifactFormula %p x%d, GameTextLineToString %p x%d, GameTextLine "
+         "ctor %p x%d (1 = not folded)",
+         r_ItemText, a1, r_EquipText, a2, r_ArtifactText, a3, r_RelicText, a4, r_FormulaText, a7,
+         r_ToString, a5, r_LineCtor, a6);
+    if (a1 != 1 || a2 != 1 || a3 != 1 || a4 != 1 || a5 != 1 || a6 != 1 || a7 != 1) {
         disable("a tooltip export is FOLDED across several names - detouring it would change "
                 "every one of them");
         return false;
@@ -1085,6 +1265,7 @@ bool tooltipInit(HMODULE selfModule) {
         disable("a prepared GameTextLine did not verify after the engine's ctor ran");
         return false;
     }
+    buildRollLine(g_lineRollBuf[0]);
     InterlockedExchange(&g_linesReady, 1);
     const TextClassInfo* iy = classInfo(g_classYes);
     const TextClassInfo* in = classInfo(g_classNo);
@@ -1099,7 +1280,54 @@ bool tooltipInit(HMODULE selfModule) {
     return true;
 }
 
-const int kJobs = 5;
+// GAME THREAD (the panel's per-world strings, after ensureFonts). The two lines through the strings
+// file's chain (its [style] language, never the game's) and the glyph check against the game's
+// rollover font. A text that changed is built into the spare
+// buffer of its pair and published; the old line stays intact.
+void tooltipTextRefresh(const char* yes, bool yesFromFile, const char* no, bool noFromFile, const char* roll) {
+    if (InterlockedCompareExchange(&g_tooltipOff, 0, 0)) return;
+    if (!InterlockedCompareExchange(&g_linesReady, 0, 0) || !p_LineCtor) return;
+    (void)yesFromFile;
+    (void)noFromFile;
+    const char* wantYes = textFor(yes, kDefaultTextYes);
+    const char* wantNo = textFor(no, kDefaultTextNo);
+    const char* wantRoll = textFor(roll, kRollSuffix);
+    bool changed = false, yesChanged = false;
+    for (int k = 0; k < 2; ++k) {
+        char* text = k == 0 ? g_textYes : g_textNo;
+        const size_t cap = k == 0 ? sizeof(g_textYes) : sizeof(g_textNo);
+        const char* want = k == 0 ? wantYes : wantNo;
+        if (strcmp(text, want) == 0) continue;
+        unsigned char* cur = k == 0 ? g_lineYes : g_lineNo;
+        unsigned char* spare = (cur == g_lineBuf[k][0]) ? g_lineBuf[k][1] : g_lineBuf[k][0];
+        _snprintf_s(text, cap, _TRUNCATE, "%s", want);
+        if (!buildLine(spare, k == 0 ? g_classYes : g_classNo, text)) {
+            disable("a rebuilt GameTextLine did not verify after the engine's ctor ran");
+            return;
+        }
+        if (k == 0) {
+            g_lineYes = spare;
+            yesChanged = true;
+        } else {
+            g_lineNo = spare;
+        }
+        changed = true;
+    }
+    // The "(another roll)" line follows the collected line's text and the [tab]
+    // tooltip.roll words: rebuilt into its spare buffer when either changed.
+    const bool rollChanged = strcmp(g_textRollWords, wantRoll) != 0;
+    if (rollChanged) _snprintf_s(g_textRollWords, sizeof(g_textRollWords), _TRUNCATE, "%s", wantRoll);
+    if (yesChanged || rollChanged) {
+        unsigned char* rcur = g_lineRoll;
+        buildRollLine(rcur == g_lineRollBuf[0] ? g_lineRollBuf[1] : g_lineRollBuf[0]);
+    }
+    if (changed || rollChanged) {
+        logI("tooltip: the rollover lines now read \"%s\" / \"%s\" / \"%s\"", g_textYes, g_textNo,
+             g_textRoll);
+    }
+}
+
+const int kJobs = 6;
 
 int tooltipInstall(int* total) {
     if (total) *total = kJobs;
@@ -1107,10 +1335,12 @@ int tooltipInstall(int* total) {
         logE("tooltip: no detour is installed - %s", g_offWhy);
         return 0;
     }
-    // ALL-OR-NOTHING. Every hook is CREATED first; only when all five exist are they enabled.
-    // Why FIVE and not the dig's two: `ItemEquipment` calls the base and then appends, so the
+    // ALL-OR-NOTHING. Every hook is CREATED first; only when all six exist are they enabled.
+    // Why SIX and not the dig's two: `ItemEquipment` calls the base and then appends, so the
     // base hook alone latches a partial vector for the bulk of the collection; `ItemArtifact` and
-    // `ItemRelic` do not call the base at all, so they need their own.
+    // `ItemRelic` do not call the base at all, so they need their own; and `ItemArtifactFormula`
+    // (a blueprint) calls the CRAFTED item's override inside its own text, so without it the
+    // blueprint's line was the crafted item's (see t_formulaDepth).
     struct {
         const char* pretty;
         void* target;
@@ -1125,6 +1355,8 @@ int tooltipInstall(int* total) {
          (void**)&o_ArtifactText},
         {"ItemRelic::GetUIDisplayText", r_RelicText, (void*)&hk_RelicGetUIDisplayText,
          (void**)&o_RelicText},
+        {"ItemArtifactFormula::GetUIDisplayText", r_FormulaText,
+         (void*)&hk_FormulaGetUIDisplayText, (void**)&o_FormulaText},
         {"GameTextLineToString", r_ToString, (void*)&hk_GameTextLineToString,
          (void**)&o_ToString},
     };
@@ -1162,16 +1394,58 @@ int tooltipInstall(int* total) {
         return 0;
     }
     InterlockedExchange(&g_hooksOn, 1);
-    logI("tooltip: the collection mark is on (5 of 5 detours installed)");
-    logD("the five are NOT counted in `detours installed: N of N` - a missing tooltip export "
+    logI("tooltip: the collection mark is on (6 of 6 detours installed)");
+    logD("the six are NOT counted in `detours installed: N of N` - a missing tooltip export "
          "turns one feature off and must never fail the whole mod");
     return kJobs;
 }
 
+void tooltipTestArm(const UtTooltipHooks& originals, const unsigned char* lineYes,
+                    const unsigned char* lineNo, UtTooltipHooks* detours) {
+    o_ItemText = originals.item;
+    o_EquipText = originals.equip;
+    o_ArtifactText = originals.artifact;
+    o_RelicText = originals.relic;
+    o_FormulaText = originals.formula;
+    o_ToString = originals.toString;
+    memcpy(g_lineBuf[0][0], lineYes, kLineSize);
+    memcpy(g_lineBuf[1][0], lineNo, kLineSize);
+    g_lineYes = g_lineBuf[0][0];
+    g_lineNo = g_lineBuf[1][0];
+    InterlockedExchange(&g_linesReady, 1);
+    InterlockedExchange(&g_tooltipOff, 0);
+    clearLatch();
+    t_collected.state = 0;
+    t_stored.valid = false;
+    if (detours) {
+        detours->item = &hk_ItemGetUIDisplayText;
+        detours->equip = &hk_EquipGetUIDisplayText;
+        detours->artifact = &hk_ArtifactGetUIDisplayText;
+        detours->relic = &hk_RelicGetUIDisplayText;
+        detours->formula = &hk_FormulaGetUIDisplayText;
+        detours->toString = &hk_GameTextLineToString;
+    }
+}
+
+void tooltipTestArmRoll(const unsigned char* lineRoll) {
+    if (lineRoll) {
+        memcpy(g_lineRollBuf[0], lineRoll, kLineSize);
+        g_lineRoll = g_lineRollBuf[0];
+        InterlockedExchange(&g_rollReady, 1);
+    } else {
+        InterlockedExchange(&g_rollReady, 0);
+    }
+    t_collected.state = 0;
+    t_stored.valid = false;
+}
+
+long tooltipRollLines() { return InterlockedCompareExchange(&g_rollLines, 0, 0); }
+
 const char* tooltipStatus() {
     _snprintf_s(g_status, sizeof(g_status), _TRUNCATE,
                 "tooltip: %s hooks=%ld lines=%ld latches=%ld swaps=%ld refusedShape=%ld "
-                "faults=%ld alloc=%ld | compare: %s set=%ld epoch=%ld",
+                "faults=%ld alloc=%ld innerSuppressed=%ld anotherRoll=%ld | compare: %s set=%ld "
+                "epoch=%ld",
                 InterlockedCompareExchange(&g_tooltipOff, 0, 0) ? "OFF" : "armed",
                 InterlockedCompareExchange(&g_hooksOn, 0, 0),
                 InterlockedCompareExchange(&g_linesReady, 0, 0),
@@ -1180,6 +1454,8 @@ const char* tooltipStatus() {
                 InterlockedCompareExchange(&g_refusedShape, 0, 0),
                 InterlockedCompareExchange(&g_faults, 0, 0),
                 InterlockedCompareExchange(&g_allocBalance, 0, 0),
+                InterlockedCompareExchange(&g_innerSuppressed, 0, 0),
+                InterlockedCompareExchange(&g_rollLines, 0, 0),
                 InterlockedCompareExchange(&g_compareOff, 0, 0) ? "OFF" : "armed",
                 InterlockedCompareExchange(&g_cmpTotal, 0, 0), g_cmpEpoch);
     return g_status;

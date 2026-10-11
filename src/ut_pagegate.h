@@ -62,8 +62,8 @@ inline UtPageDecision pageAction(const UtPageFacts& f) {
 // A record the database does not hold does NOT come back null: the engine returns an EMPTY
 // table, builds the window from it and the page ends up with no boxes at all. So a null test
 // answers "servable" for exactly the case it exists to catch, and the CONTENT is the only real
-// answer: every page record of the mod carries a reagentBoxes array (the frame 160, a collection
-// page 40), and no entries means the record is not in this database.
+// answer: every page record of the mod carries a reagentBoxes array (the frame N - the cover's fit,
+// 160..512 -, a collection page 40), and no entries means the record is not in this database.
 //
 // `boxes` < 0 = the count could not be read at all (the exports are missing, or the table is not
 // a LoadTableBinary). That answers YES: a page wrongly kept shows the empty window this gate was

@@ -17,16 +17,26 @@
 //     type the partner test compares) is a folded stub, so an Aether Crystal could otherwise
 //     acquire a nonsense compare partner.
 //
-//  2. THE "ALREADY COLLECTED" LINE - FIVE exported Game.dll detours over SIX resolved exports,
+//  2. THE "ALREADY COLLECTED" LINE - SIX exported Game.dll detours over SEVEN resolved exports,
 //     all-or-nothing.  `Item::GetUIDisplayText` (+ the `ItemEquipment` override, which calls the
 //     base at Game.dll 0x3299AF and then APPENDS - so the base's latch would otherwise be of a
-//     partial vector - and the `ItemArtifact` / `ItemRelic` overrides, which do not call the base
-//     at all) LATCHES {which state, when} after the original has filled the line vector, and
+//     partial vector - the `ItemArtifact` / `ItemRelic` overrides, which do not call the base
+//     at all, and the `ItemArtifactFormula` override - a blueprint - which calls the CRAFTED
+//     item's GetUIDisplayText into the same vector at Game.dll 0x31A4CF; while it runs the inner
+//     latch is SUPPRESSED, so a blueprint's line is the blueprint's own row, never the crafted
+//     item's) LATCHES {which state, when} after the original has filled the line vector, and
 //     `GameTextLineToString` SWAPS in a borrowed array of N+1 `GameTextLine` records - the
 //     engine's N, byte for byte, plus one mod-owned static line - for the duration of that one
 //     call.  The mod never pushes into the engine's vector (it may be at capacity, and the
 //     engine destroys what it holds) and never draws a pixel: the engine lays the extra line
 //     out exactly as it lays out its own.
+//
+//     THE THIRD LINE: a monster infrequent whose record the collection holds, hovered
+//     with ANOTHER roll than the stored one - its prefix (+0x28), suffix (+0x48) or seed (+0x68)
+//     differs from the row's (journalRollOf, memoised 4 Hz per record) - reads "In your
+//     collection (another roll)": the collected line's text plus " (another roll)", in its
+//     class. Only an MI (the catalogue's KIND, `catIsMi`); a unique, an unknown kind, an
+//     unreadable roll or a third line that did not verify keep the plain collected line.
 //
 // Both are behind their own ini key (`compare_popup`, `tooltip_mark`, both default 1) and the
 // tooltip half is behind one more session latch: any failure to resolve an export or install a
@@ -40,13 +50,22 @@
 
 namespace ut {
 
-// Worker thread, once, before hooksInstall(). Resolves the SIX Game.dll exports - the four
-// `GetUIDisplayText` overrides that get a detour (Item, ItemEquipment, ItemArtifact, ItemRelic),
-// `GameTextLineToString` (the fifth detour) and the `GameTextLine` constructor, which is CALLED
+// Worker thread, once, before hooksInstall(). Resolves the SEVEN Game.dll exports - the five
+// `GetUIDisplayText` overrides that get a detour (Item, ItemEquipment, ItemArtifact, ItemRelic,
+// ItemArtifactFormula), `GameTextLineToString` (the sixth detour) and the `GameTextLine`
+// constructor, which is CALLED
 // and never hooked - all OPTIONAL (a miss can never fail start-up, it only turns the mark off),
 // checks none of them is a folded stub, and builds the two static GameTextLine records. Safe to
 // call twice.
 bool tooltipInit(HMODULE selfModule);
+
+// GAME THREAD, from ut_panel.cpp's per-world strings: the two lines' text through the strings
+// file's chain (UTF-8; the `fromFile` flags say whether [tab] of the buttons file set it). The
+// legacy ini keys tooltip_text_yes/no are gone (ini_version 39). A changed text rebuilds its line;
+// nothing else moves. `roll` is [tab] tooltip.roll, the words the "(another roll)" line appends to
+// the collected text (empty/null = the built-in " (another roll)"); a change of either rebuilds it.
+void tooltipTextRefresh(const char* yes, bool yesFromFile, const char* no, bool noFromFile,
+                        const char* roll);
 
 // Worker thread, from hooksInstall(). Installs the tooltip detours ALL-OR-NOTHING: every hook is
 // created first, and only if every create succeeded are they enabled; otherwise the created ones
@@ -95,5 +114,36 @@ void tooltipSwapFree(unsigned char* owned);
 
 // Borrowed arrays alive right now. Zero at rest - the harness asserts exactly that.
 long tooltipSwapAllocBalance();
+
+// ---- the detour bodies, exposed so the offline harness drives the SAME code the game drives ---
+typedef void(__cdecl* UtTooltipTextFn)(void* item, const void* character, void* lines,
+                                       bool detailed);
+typedef void(__cdecl* UtTooltipToStringFn)(const void* lines, void* out);
+struct UtTooltipHooks {
+    UtTooltipTextFn item;      // Item::GetUIDisplayText
+    UtTooltipTextFn equip;     // ItemEquipment::
+    UtTooltipTextFn artifact;  // ItemArtifact::
+    UtTooltipTextFn relic;     // ItemRelic::
+    UtTooltipTextFn formula;   // ItemArtifactFormula:: (a blueprint)
+    UtTooltipToStringFn toString;
+};
+
+// TEST ONLY - tools/test_tooltip.cpp; the mod never calls it. Plants `originals` where MinHook
+// would have put the trampolines, copies the two prepared 0x40-byte lines in, arms the mark (the
+// off latch cleared, the lines ready) and hands back the six detour bodies in `detours`.
+void tooltipTestArm(const UtTooltipHooks& originals, const unsigned char* lineYes,
+                    const unsigned char* lineNo, UtTooltipHooks* detours);
+
+// TEST ONLY, after tooltipTestArm: plants the "(another roll)" line - null = not ready,
+// so such an item reads the plain collected line - and forgets the memoised rows.
+void tooltipTestArmRoll(const unsigned char* lineRoll);
+
+// Rollovers that got the "(another roll)" line: a monster infrequent the collection holds,
+// hovered with a different prefix, suffix or seed than its stored roll. Process-wide.
+long tooltipRollLines();
+
+// Inner GetUIDisplayText calls whose latch was suppressed because a blueprint's tooltip was being
+// built around them (the crafted item's). Process-wide; the harness reads it.
+long tooltipInnerSuppressed();
 
 }  // namespace ut

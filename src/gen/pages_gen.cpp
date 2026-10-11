@@ -5,6 +5,9 @@
 #include "gen/arz_writer.h"
 #include "gen/catalogue_gen.h"
 #include "gen/ui_geometry.h"
+#include "gen/ut_groups.h"
+#include "gen/ut_groups_default.h"
+#include "ut_layout.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -24,33 +27,34 @@ const char* const kBoxFmt = "records/ui/caravan/reagents/uniq/p%02d/box_%02d.dbr
 const char* const kHideFmt = "records/ui/caravan/reagents/uniq/hide_%03d.dbr";
 
 // THE CAP. The frame is the one window the engine ever builds for the tab; its boxes are then
-// re-pointed in place, so no page can show more boxes than the frame carries. 160 is the count
-// the shipped frame has always had and the only count seen working in the engine, so it stays
-// the ceiling: a rectangle big enough for more boxes is capped here and the group paginates
-// further instead.
-const int kFrameBoxCap = 160;
+// re-pointed in place, so no page can show more boxes than the frame carries. The count is the
+// view's own (ut::utFrameBoxes): the most boxes any grid on the cover can show at the view's
+// cell sizes, 160..512 - so neither the derived grid nor a user grid anywhere on the cover is
+// capped below the ceiling, and only a cover bigger than 512 cells paginates further instead.
+// The frame ALWAYS carries all of them, whatever the layout needs today, so a live layout change
+// never needs a regeneration of the overlay.
 const int kRowGap = 2;             // the vanilla 64 px rows sit on a 66 px pitch
 const int kHideXY = -4000;         // record pixels, scaled by the UI scale - always off-screen
 
-struct SlotInfo { const char* slot; const char* label; };
-// Layout order: armour, jewellery, off-hands, weapons, relics.
-const SlotInfo kSlotOrder[] = {
-    {"head", "Helms"}, {"shoulders", "Shoulders"}, {"chest", "Chest"}, {"hands", "Gloves"},
-    {"waist", "Belts"}, {"legs", "Pants"}, {"feet", "Boots"}, {"amulet", "Amulets"},
-    {"medal", "Medals"}, {"ring", "Rings"}, {"offhand", "Off-hands"}, {"shield", "Shields"},
-    {"axe1h", "1H Axes"}, {"dagger", "Daggers"}, {"mace1h", "1H Maces"}, {"scepter", "Scepters"},
-    {"sword1h", "1H Swords"}, {"ranged1h", "Guns"}, {"axe2h", "2H Axes"}, {"mace2h", "2H Maces"},
-    {"spear2h", "Spears"}, {"sword2h", "2H Swords"}, {"ranged2h", "2H Guns"}, {"relic", "Relics"},
-};
-
-int slotOrder(const std::string& slot) {
-    for (int i = 0; i < int(sizeof kSlotOrder / sizeof *kSlotOrder); ++i)
-        if (slot == kSlotOrder[i].slot) return i;
-    return 99;
-}
-std::string slotLabel(const std::string& slot) {
-    for (const SlotInfo& s : kSlotOrder) if (slot == s.slot) return s.label;
-    return slot.empty() ? "?" : slot;
+// What the group rules read of a catalogue record: fromMod = only a mod layer has it; a class
+// the catalogue has no slot for ("other") is unknown, so an auto group can take it.
+utg::Item groupItem(const CatalogueItem& it) {
+    utg::Item g;
+    g.record = it.record;
+    g.cls = it.cls;
+    g.rank = it.classification;
+    if (it.isSetPiece) g.flags |= utg::kFlagSet;
+    if (it.isRelic) g.flags |= utg::kFlagRelic;
+    // an MI of a per-class group's class (a Rare staff / hunting spear) is equipment to the rules
+    // too, so a game's `rank = Rare, flag = equipment` excludes take it like any other MI
+    if (it.isEquipment || it.isMi) g.flags |= utg::kFlagEquipment;
+    if (it.isBlueprint) g.flags |= utg::kFlagBlueprint;
+    if (it.isAugment) g.flags |= utg::kFlagAugment;
+    if (it.isExtra) g.flags |= utg::kFlagExtra;
+    if (utg::normPath(it.record).compare(0, 22, "records/items/faction/") == 0) g.flags |= utg::kFlagFaction;
+    g.fromMod = it.fromMod;
+    g.knownClass = it.slot != "other";
+    return g;
 }
 int rankOf(const std::string& c) {
     if (c == "Legendary") return 0;
@@ -98,10 +102,13 @@ struct Picked {
     std::string lname;
 };
 
-void grid(const UiGeometry& geo, int cw, int ch, int& cols, int& rows) {
-    cols = std::max(1, geo.usableW / cw);
-    rows = std::max(1, geo.usableH / (ch + kRowGap));
-    while (cols * rows > kFrameBoxCap && rows > 1) --rows;
+// The grid of one cell size in the derived rectangle (ut_layout.h's arithmetic, which the
+// live side relayouts with) under the frame's box count. True when the cap took rows away.
+bool grid(const UiGeometry& geo, int cw, int ch, int cap, int& cols, int& rows) {
+    const ut::UtGrid g = ut::utGridFit({0, 0, geo.usableW, geo.usableH}, cw, ch, kRowGap, cap);
+    cols = g.cols;
+    rows = g.rows;
+    return g.capped != 0;
 }
 
 std::string fmt(const char* f, int a, int b = 0) {
@@ -151,10 +158,27 @@ std::vector<ArzOutField> windowFields(const ArzRecord& src, const std::vector<st
 
 } // namespace
 
+const utg::GroupSet* defaultGroupSet(std::string* error) {
+    struct Parsed { utg::GroupSet set; std::string why; bool ok = false; };
+    static const Parsed p = [] {
+        Parsed r;
+        r.ok = utg::parseGroups(utg::defaultGroupsIni(), r.set, &r.why);
+        return r;
+    }();
+    if (!p.ok) {
+        if (error) *error = "the built-in groups template does not parse: " + p.why;
+        return nullptr;
+    }
+    return &p.set;
+}
+
 bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
-                   PagesOutput& out, std::string* error, const ModView* mods) {
+                   PagesOutput& out, std::string* error, const ModView* mods,
+                   const GroupsInput* groupsIn) {
     out = PagesOutput();
     if (!g.db || !g.items) { if (error) *error = "game data not loaded"; return false; }
+    const utg::GroupSet* rules = groupsIn && groupsIn->set ? groupsIn->set : defaultGroupSet(error);
+    if (!rules) return false;
 
     // The grid rectangle and the plate are read out of the merged database, not compiled in.
     if (!(mods ? deriveGeometry(g, *mods, out.geo, error)
@@ -172,7 +196,6 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
     const ArzField* vb = van.find("reagentBoxes");
     if (!vb || vb->strs.empty()) { if (error) *error = "the materials page has no reagentBoxes"; return false; }
     std::vector<std::string> vanBoxes = vb->strs;
-    if (int(vanBoxes.size()) > kFrameBoxCap) { if (error) *error = "more materials boxes than the frame holds"; return false; }
     out.frameX = van.i32("WindowLocationX");
     out.frameY = van.i32("WindowLocationY");
     // The record type and timestamp of the window record, so a generated page looks to the
@@ -190,18 +213,30 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
     if (merged(g, mods, vanBoxes[0].c_str(), vanBox0)) hideItem = vanBox0.str("reagentName");
     if (hideItem.empty()) { if (error) *error = "cannot read reagentName out of " + vanBoxes[0]; return false; }
 
-    // the collection: relics at every classification, curated extras, Epic/Legendary equipment
+    // The collection is what the group rules put on a page. The built-in rules are 1.1.0's:
+    // relics at every classification, curated extras, Epic/Legendary equipment, by slot.
+    std::vector<utg::Item> gitems;
+    gitems.reserve(items.size());
+    for (const CatalogueItem& it : items) gitems.push_back(groupItem(it));
+    utg::Assignment assign;
+    static const std::vector<std::string> kNoKeys;
+    utg::assignGroups(*rules, gitems, groupsIn ? groupsIn->viewKeys : kNoKeys, assign);
     std::vector<Picked> picked;
     std::map<std::string, std::pair<bool, std::pair<int, int>>> sizes;
     std::vector<std::uint8_t> data;
-    for (const CatalogueItem& it : items) {
-        bool in = it.isRelic || it.isExtra
-               || (it.isEquipment && (it.classification == "Epic" || it.classification == "Legendary"));
-        if (!in) continue;
+    for (std::size_t ii = 0; ii < items.size(); ++ii) {
+        const CatalogueItem& it = items[ii];
+        const int grp = assign.groupOf[ii];
+        if (grp < 0) continue;
         auto s = sizes.find(it.bitmap);
         if (s == sizes.end()) {
             std::pair<bool, std::pair<int, int>> v{false, {0, 0}};
-            if (!it.bitmap.empty()) {
+            // the mod's own icon first, as the engine loads it; then the base game's
+            int mw = 0, mh = 0;
+            if (mods && !mods->empty() && mods->texSize(it.bitmap, mw, mh)) {
+                v.first = mw > 0 && mw <= 1024 && mh > 0 && mh <= 1024;
+                v.second = {mw, mh};
+            } else if (!it.bitmap.empty()) {
                 std::string key = ArzArchive::normKey(it.bitmap);
                 // only the 32-byte .tex header is wanted, never the bitmap behind it
                 bool got = g.items->read(key, data, kTexHeader);
@@ -217,8 +252,8 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
             ++out.skipped;                       // an icon too big for the whole band
             continue;
         }
-        Picked p{&it, slotOrder(it.slot), rankOf(it.classification), v.second.first, v.second.second,
-                 lowerName(it.name)};
+        Picked p{&it, grp, rankOf(it.classification), v.second.first, v.second.second,
+                 lowerName(stripColourCodes(it.name))};
         picked.push_back(std::move(p));
     }
     std::sort(picked.begin(), picked.end(), [](const Picked& a, const Picked& b) {
@@ -229,20 +264,33 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
         return a.it->record < b.it->record;
     });
 
-    // groups in first-seen slot order, each with its own grid
-    struct Group { std::string slot; std::vector<const Picked*> items; int cw = 0, ch = 0, cols = 0, rows = 0; };
+    // the groups that received a record, in display order, each with its own grid
+    struct Group { int def = -1; std::vector<const Picked*> items; int cw = 0, ch = 0, cols = 0, rows = 0; };
     std::vector<Group> groups;
     for (const Picked& p : picked) {
-        if (groups.empty() || groups.back().slot != p.it->slot) { groups.push_back(Group()); groups.back().slot = p.it->slot; }
+        if (groups.empty() || groups.back().def != p.order) { groups.push_back(Group()); groups.back().def = p.order; }
         Group& gr = groups.back();
         gr.items.push_back(&p);
         gr.cw = std::max(gr.cw, p.w);
         gr.ch = std::max(gr.ch, p.h);
     }
+    // The frame's box count, from the cover and the groups' distinct cell sizes, before any grid
+    // is fitted under it.
+    {
+        std::vector<int> cws, chs;
+        for (const Group& gr : groups) {
+            bool have = false;
+            for (std::size_t i = 0; i < cws.size(); ++i)
+                if (cws[i] == gr.cw && chs[i] == gr.ch) { have = true; break; }
+            if (!have) { cws.push_back(gr.cw); chs.push_back(gr.ch); }
+        }
+        out.frameBoxes = ut::utFrameBoxes(out.geo.plateW, out.geo.plateH, cws.data(), chs.data(),
+                                          int(cws.size()), kRowGap);
+    }
+    if (int(vanBoxes.size()) > out.frameBoxes) { if (error) *error = "more materials boxes than the frame holds"; return false; }
     for (Group& gr : groups) {
-        grid(out.geo, gr.cw, gr.ch, gr.cols, gr.rows);
         // the rectangle would hold more boxes than the frame carries: the group paginates instead
-        if (gr.cols * std::max(1, out.geo.usableH / (gr.ch + kRowGap)) > kFrameBoxCap) ++out.cappedGroups;
+        if (grid(out.geo, gr.cw, gr.ch, out.frameBoxes, gr.cols, gr.rows)) ++out.cappedGroups;
     }
     // The distinct cell sizes, ascending - one cover plate is painted per entry, and every
     // group of a size shares its grid, so the first one that has it is the whole answer.
@@ -259,12 +307,8 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
         return a.cellW != b.cellW ? a.cellW < b.cellW : a.cellH < b.cellH;
     });
 
-    // The frame carries as many boxes as the biggest page needs, never fewer than the real
-    // materials boxes it opens with and never more than the cap.
-    std::size_t biggest = vanBoxes.size();
-    for (const Group& gr : groups)
-        biggest = std::max(biggest, std::min(std::size_t(gr.cols) * std::size_t(gr.rows), gr.items.size()));
-    out.frameBoxes = int(std::min(biggest, std::size_t(kFrameBoxCap)));
+    // The frame carries the whole count (out.frameBoxes, above), whatever the pages need today:
+    // a layout the user changes in the game then relayouts the same boxes without a new overlay.
 
     // pages, and the three files
     ArzWriter arz;
@@ -278,10 +322,16 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
         Group& gr = groups[gi];
         std::size_t per = std::size_t(gr.cols) * std::size_t(gr.rows);
         std::size_t nPages = (gr.items.size() + per - 1) / per;
-        std::string label = slotLabel(gr.slot);
-        groupsTxt += fmt("G\t%d\t", int(gi)) + label
-                   + fmt("\t%d\t%d", gr.cols, gr.rows) + fmt("\t%d\t%d", gr.cw, gr.ch)
-                   + fmt("\t%d\r\n", int(gr.items.size()));
+        const utg::GroupDef& def = assign.groups[std::size_t(gr.def)];
+        const std::string& label = def.label;
+        utg::GLine gl;
+        gl.index = int(gi);
+        gl.label = label;
+        gl.cols = gr.cols; gl.rows = gr.rows; gl.cellW = gr.cw; gl.cellH = gr.ch;
+        gl.count = int(gr.items.size());
+        gl.id = def.id;
+        gl.tag = def.tag;
+        groupsTxt += utg::formatGLine(gl) + "\r\n";
         for (std::size_t sub = 0; sub < nPages; ++sub, ++page) {
             std::size_t from = sub * per, to = std::min(gr.items.size(), from + per);
             std::string pageRec = fmt(kPageFmt, page);
@@ -306,6 +356,8 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
         }
         PagesOutput::Group og;
         og.label = label;
+        og.id = def.id;
+        og.tag = def.tag;
         og.entries = gr.items.size();
         og.pages = nPages;
         out.groupList.push_back(og);

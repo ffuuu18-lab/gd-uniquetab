@@ -25,12 +25,21 @@ What this script builds, for each distinct cell size used by data/oracle/uniq-gr
   2. new frames drawn on the collection grid (origin 105,76, rowGap 2 - the same numbers
      ut_live.cpp lays the boxes out with) by ALPHA-STAMPING a 9-slice cut from one real
      vanilla frame of the materials plate: only the gold line pixels are transferred, so no
-     foreign ground colour comes with them,
+     foreign ground colour comes with them. EVERY cell of the fit gets one (lattice_frame =
+     ut_layout.h utLatticeFrame): a frame whose 2 px outset crosses the plate's edge is cut to
+     the plate, never dropped, so the lattice has the page's columns and rows,
   3. the vanilla ornament (border, corner flourishes, tab strip) composited back ON TOP,
      so a frame that would run under the bottom border is clipped by it exactly as a
      vanilla frame would be.
 
 Output: data/oracle/plates/uniq_plate_<W>x<H>.tex  (+ a _view.png preview of each).
+
+A USER GRID (--grid x,y,w,h, record px, window-local - uniquetab.ini's grid_<W>x<H>): the frames
+are stamped from that origin, each cell size fitted to that rectangle by the same rule as
+pages_gen.cpp's grid() (cols = w // cw, rows = h // (ch + gap), rows walked back to the frame's
+box count, the F line's), and every name carries the cover, the tag and _L<hash> (--layout-hash, the eight hex digits
+gen::layoutPlateHash computed for the set) - the reference test_catalogue --layout-plates compares
+the DLL's layout plates with, byte for byte.
 Nothing ships from here: the DLL paints the same set at run time (src/gen/plate_gen) into the
 game's own settings\ui\caravan\, one of the engine's texture override roots, and the
 catalogue harness compares its vanilla plates with these byte for byte.
@@ -114,7 +123,31 @@ GROUND_FALLBACK = (6, 6, 6)
 
 # The plate is drawn at the window's (bitmapPositionX, bitmapPositionY) = (0, 1).
 PLATE_DX, PLATE_DY = 0, 1
-FRAME_OUTSET = 2  # a frame is the cell grown by 2 px on every side
+FRAME_OUTSET = 2  # a frame is the cell grown by 2 px on every side (ut_layout.h kUtFrameOutset)
+
+
+def lattice_frame(x0, y0, cw, ch, gap, col, row, dx, dy, w, h):
+    """ut_layout.h utLatticeFrame: the frame under cell (col, row) in PLATE px, the cell grown by
+    FRAME_OUTSET and cut to the w x h plate; None only when the cell itself is not on the plate.
+
+    Every cell of the fit (cols x rows, the page's) is framed: a cell flush with the plate's edge
+    keeps its frame, its outer line on the plate's last pixels. The old rule dropped a cell whose
+    OUTSET did not fit, which left Reign of Terror's 29th column (grid 46,72,928,520) unframed.
+    """
+    gap = max(0, gap)
+    bx = x0 + cw * col - dx
+    by = y0 + (ch + gap) * row - dy
+    if cw < 1 or ch < 1 or bx < 0 or by < 0 or bx + cw > w or by + ch > h:
+        return None
+    fx, fy = bx - FRAME_OUTSET, by - FRAME_OUTSET
+    fw, fh = cw + 2 * FRAME_OUTSET, ch + 2 * FRAME_OUTSET
+    if fx < 0:
+        fw, fx = fw + fx, 0
+    if fy < 0:
+        fh, fy = fh + fy, 0
+    fw = min(fw, w - fx)
+    fh = min(fh, h - fy)
+    return fx, fy, fw, fh
 
 
 # ---------------------------------------------------------------------------- TEX v2
@@ -311,39 +344,62 @@ def extract_sources() -> None:
         print("extracted %s (%d bytes)" % (dst, len(data)))
 
 
-# src/gen/pages_gen.cpp: the frame's box count, and the cap the row count is walked back to.
-FRAME_BOX_CAP = 160
+# src/gen/pages_gen.cpp: the frame's box count, and the cap the row count is walked back to. It is
+# the view's own (ut_layout.h utFrameBoxes, build_uniq_db.py frame_boxes): read_groups() takes it
+# from the F line; regrid() computes it for the derived cover, as pages_gen does.
+FRAME_FLOOR, FRAME_MAX = 160, 512
+FRAME_BOX_CAP = FRAME_FLOOR
+
+
+def frame_boxes(cover_w, cover_h, cells, gap):
+    """ut_layout.h utFrameBoxes: the whole cover's uncapped fit at the largest-count cell size,
+    clamped to FRAME_FLOOR..FRAME_MAX."""
+    best = 0
+    for (cw, ch, _cols, _rows, _labels) in cells:
+        best = max(best, max(1, max(1, cover_w) // max(1, cw)) *
+                   max(1, max(1, cover_h) // (max(1, ch) + gap)))
+    return min(max(best, FRAME_FLOOR), FRAME_MAX)
+
+
+def fit_rect(cells, w, h, gap, cap=None):
+    """ut_layout.h utGridFit over a w x h rectangle, for each cell size, under the frame's count."""
+    cap = FRAME_BOX_CAP if cap is None else cap
+    out = []
+    for (cw, ch, _cols, _rows, labels) in cells:
+        cols = max(1, w // cw)
+        rows = max(1, h // (ch + gap))
+        while cols * rows > cap and rows > 1:
+            rows -= 1
+        out.append((cw, ch, cols, rows, labels))
+    return out
 
 
 def regrid(geo, cells, gap):
     """The cell grid a DERIVED rectangle gives, the way pages_gen.cpp's grid() computes it.
 
     The oracle's cols/rows belong to the vanilla 333x552; a mod's page is a different size, so
-    a set painted with the vanilla counts leaves most of it empty.
+    a set painted with the vanilla counts leaves most of it empty. The cap is the frame that
+    view's generation writes: its own cover's fit (frame_boxes).
     """
-    out = []
-    for (cw, ch, _cols, _rows, labels) in cells:
-        cols = max(1, geo.usableW // cw)
-        rows = max(1, geo.usableH // (ch + gap))
-        while cols * rows > FRAME_BOX_CAP and rows > 1:
-            rows -= 1
-        out.append((cw, ch, cols, rows, labels))
-    return out
+    return fit_rect(cells, geo.usableW, geo.usableH, gap,
+                    frame_boxes(geo.plateW, geo.plateH, cells, gap))
 
 
-def read_groups():
+def read_groups(path=None):
     """-> (x0, y0, rowGap, [(cellW, cellH, cols, rows, [labels...])])
 
     The F line still carries the origin the DLL lays boxes out with; the P line beside it
     carries the plate, and main() reads that through ui_geometry instead.
     """
+    global FRAME_BOX_CAP
     x0, y0, gap = 105, 76, 2
     cells = {}
-    with open(GROUPS, "r", encoding="utf-8", errors="replace") as fh:
+    with open(path or GROUPS, "r", encoding="utf-8", errors="replace") as fh:
         for line in fh:
             f = line.rstrip("\r\n").split("\t")
             if f[0] == "F" and len(f) >= 7:
                 x0, y0, gap = int(f[4]), int(f[5]), int(f[6])
+                FRAME_BOX_CAP = int(f[2]) if int(f[2]) > 0 else FRAME_FLOOR
             elif f[0] == "G" and len(f) >= 8:
                 label, cols, rows, cw, ch = f[2], int(f[3]), int(f[4]), int(f[5]), int(f[6])
                 cells.setdefault((cw, ch), [cols, rows, []])
@@ -512,6 +568,16 @@ def main() -> int:
     # The view tag a custom game's plates carry, so two mods with one cover size cannot
     # collide. Empty for the start-up view, which keeps the shipped names exactly.
     plate_tag = args[args.index("--plate-tag") + 1] if "--plate-tag" in args else ""
+    # A user grid: x,y,w,h in record px, and the hash its set is named with.
+    user_grid = None
+    if "--grid" in args:
+        user_grid = [int(v) for v in args[args.index("--grid") + 1].split(",")]
+        if len(user_grid) != 4 or user_grid[2] < 1 or user_grid[3] < 1:
+            raise SystemExit("--grid wants x,y,w,h")
+    layout_hash = args[args.index("--layout-hash") + 1] if "--layout-hash" in args else ""
+    if user_grid and not layout_hash:
+        raise SystemExit("--grid needs --layout-hash (the eight hex digits of the set)")
+    groups_path = args[args.index("--groups") + 1] if "--groups" in args else None
     os.makedirs(out_dir, exist_ok=True)
 
     sys.path.insert(0, HERE)
@@ -539,7 +605,8 @@ def main() -> int:
         ground = fit(erase_lines(cov, lm), w, h)
         ornament = fit(gold_mask(cov) & ~lattice_mask(cov), w, h)
         cov = fit(cov, w, h)
-        Image.fromarray(ground).save(os.path.join(SRC, "plate_ground.png"))
+        if not user_grid:
+            Image.fromarray(ground).save(os.path.join(SRC, "plate_ground.png"))
         print("erased %d lattice pixels, kept %d ornament pixels"
               % (int(lm.sum()), int(ornament.sum())))
     else:
@@ -561,9 +628,12 @@ def main() -> int:
     donor = (bx - FRAME_OUTSET, by - FRAME_OUTSET, 32 + 2 * FRAME_OUTSET, 32 + 2 * FRAME_OUTSET)
     sl = frame_slices(donor_plate, donor)
 
-    _x0, _y0, gap, cells = read_groups()
+    _x0, _y0, gap, cells = read_groups(groups_path)
     x0, y0 = geo.x0, geo.y0
-    if not vanilla_cover:
+    if user_grid:
+        x0, y0 = user_grid[0], user_grid[1]
+        cells = fit_rect(cells, user_grid[2], user_grid[3], gap)
+    elif not vanilla_cover:
         cells = regrid(geo, cells, gap)
     print("grid origin (%d,%d) rowGap %d, cover at %d,%d; %d distinct cell sizes"
           % (x0, y0, gap, dx, dy, len(cells)))
@@ -574,25 +644,27 @@ def main() -> int:
         n = 0
         for rr in range(rows):
             for cc in range(cols):
-                bxx = x0 + cw * cc - dx
-                byy = y0 + (ch + gap) * rr - dy
-                if bxx + cw + FRAME_OUTSET > w or byy + ch + FRAME_OUTSET > h:
+                f = lattice_frame(x0, y0, cw, ch, gap, cc, rr, dx, dy, w, h)
+                if f is None:
                     continue
-                draw_frame(img, sl, bxx - FRAME_OUTSET, byy - FRAME_OUTSET,
-                           cw + 2 * FRAME_OUTSET, ch + 2 * FRAME_OUTSET)
+                draw_frame(img, sl, f[0], f[1], f[2], f[3])
                 n += 1
         if ornament is not None:
             img[ornament] = cov[ornament]      # the vanilla border always wins
-        # The vanilla cover keeps the plain name, so the set that ships today goes on being
-        # found; any other cover carries its size, the way ut_plate.cpp asks for it.
-        # The name ut_plate.cpp asks for: the shipped set keeps the plain name, any other
-        # cover size carries it, because the same cell on a bigger caravan is a different plate.
-        if geo.is_vanilla_plate():
-            name = "uniq_plate_%dx%d" % (cw, ch)
-        elif not plate_tag:
-            name = "uniq_plate_%dx%d_%dx%d" % (cw, ch, geo.plateW, geo.plateH)
-        else:
+        # The name ut_plate.cpp asks for: a custom view (a plate tag) always carries the cover
+        # size and its tag, whatever the cover size; otherwise the shipped set keeps the plain
+        # name and any other cover size carries it, because the same cell on a bigger caravan
+        # is a different plate.
+        if layout_hash:
+            name = "uniq_plate_%dx%d_%dx%d%s_L%s" % (cw, ch, geo.plateW, geo.plateH,
+                                                     "_" + plate_tag if plate_tag else "",
+                                                     layout_hash)
+        elif plate_tag:
             name = "uniq_plate_%dx%d_%dx%d_%s" % (cw, ch, geo.plateW, geo.plateH, plate_tag)
+        elif geo.is_vanilla_plate():
+            name = "uniq_plate_%dx%d" % (cw, ch)
+        else:
+            name = "uniq_plate_%dx%d_%dx%d" % (cw, ch, geo.plateW, geo.plateH)
         Image.fromarray(img).save(os.path.join(out_dir, name + "_view.png"))
         if not png_only:
             blob = tex_encode(img)

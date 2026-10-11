@@ -43,7 +43,14 @@ public:
     bool loadBasemods(const std::string& gameDir, std::string* error);
     bool loadCustom(const std::string& modDir, std::string* error);
     bool empty() const { return m_arz.empty() && m_arc.empty(); }
+    // The .arc files that could not be read and were skipped ("path: reason"), in load order.
+    const std::vector<std::string>& skipped() const { return m_skipped; }
+    std::size_t arcCount() const { return m_arc.size(); }
     const std::string& label() const { return m_label; }
+    // The layers themselves, in load order (the last .arz that has a record wins): the
+    // catalogue walks the .arz records and reads the mod's text archives through these.
+    const std::vector<ArzArchive>& arzLayers() const { return m_arz; }
+    const std::vector<ArcArchive>& arcLayers() const { return m_arc; }
     // The winning override of a record, or false when no layer has it.
     bool get(const std::string& name, ArzRecord& out) const;
     // Does any layer touch the caravan at all - a records/ui/caravan/* override, or a texture
@@ -61,7 +68,9 @@ public:
 private:
     std::vector<ArzArchive> m_arz;
     std::vector<ArcArchive> m_arc;
+    std::vector<std::string> m_skipped;
     std::string m_label;
+    void addArc(const std::string& path);
 };
 
 // WHICH database the outputs were derived from. The engine builds one in exactly this order:
@@ -126,6 +135,10 @@ struct CellGrid {
 // Reads the merged view out of g and fills out. False with a reason when a record or the
 // cover texture cannot be read; the caller then keeps the vanilla defaults above.
 bool deriveGeometry(const GameData& g, UiGeometry& out, std::string* error);
+// The materials page's reagent box records through the merged view, as (itemBoxX, itemBoxY) in
+// record px. The pad's materials-page rule is checked against these offline.
+bool materialBoxPositions(const GameData& g, const ModView& mods,
+                          std::vector<std::pair<int, int> >& out, std::string* error);
 bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
                     std::string* error);
 

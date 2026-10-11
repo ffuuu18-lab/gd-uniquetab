@@ -94,10 +94,23 @@ typedef bool (*PlateSink)(const std::string& name, const std::vector<std::uint8_
 // plateTag: empty for the start-up view, so the shipped names are kept exactly; a custom game's
 // view passes its own tag, which is appended ("uniq_plate_32x32_346x625_lootascension") because
 // the cover size alone collides when two mods share one.
+// layoutHash: empty for the plates of the DERIVED grid (the names above). A user grid's plates
+// (ensureLayoutPlates) pass the eight hex digits of their hash and are always named with the
+// cover and the tag: "uniq_plate_64x64_438x627_L1a2b3c4d", "uniq_plate_32x32_974x659_rot_L...".
+// geo.x0/y0 is then the user grid's origin and `cells` its cols x rows.
+// THE LATTICE: every one of a cell's cols x rows (utGridFit's, the numbers the page lays its
+// boxes out in) is framed - ut_layout.h utLatticeFrame, which cuts a frame to the plate where its
+// 2 px outset crosses the edge instead of dropping the cell. rowGap: the F line's (negative = the
+// view's ut::kUtRowGap, which is what every generation writes).
 bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& geo,
                     const std::vector<CellGrid>& cells, const std::string& groundHex,
                     const std::string& plateTag, PlateSink sink, void* ctx, PlateReport& rep,
-                    std::string* error);
+                    std::string* error, const std::string& layoutHash = std::string(),
+                    int rowGap = -1);
+
+// The leaf name (no folder, no .tex) of one plate - the rule generatePlates and ut_plate.cpp share.
+std::string plateLeafName(int cellW, int cellH, int plateW, int plateH, const std::string& plateTag,
+                          const std::string& layoutHash);
 
 // Writes the set into dir (the engine's texture override root, <game>\settings\ui\caravan).
 // Only files named uniq_plate_*.tex are ever written there, a plate whose bytes are already on

@@ -83,9 +83,9 @@ bool storeOnDeposit(const UtReplicaCapture& cap, const char* record);
 // Record `n` copies leaving the page. Returns the new count. At 0 the entry is kept as history.
 unsigned int storeOnTake(const char* record, unsigned int n);
 
-// The prototype the page must paint for `record`, built lazily and cached per world (this is
-// today's storeDisplayProtoId, with the count as the stack). 0 = none.
-unsigned int storeDisplayProtoId(const char* record);      // unchanged name, new stack source
+// The prototype the page must paint for `record`, built lazily and cached per world, with the
+// collection's count as the stack. 0 = none.
+unsigned int storeDisplayProtoId(const char* record);
 
 // ---- durability, and the read-only views -----------------------------------------------------
 // `storeOnDeposit` is ALL-OR-NOTHING. It journals the row, flushes the FILE synchronously on the

@@ -121,26 +121,6 @@ if errorlevel 1 (
 echo [deploy] OK -^> "%DST%"
 for %%F in ("%DST%") do echo [deploy] %%~zF bytes, %%~tF
 
-rem An installation that ran an older build still has that build's own winmm.dll in x64\, and
-rem two copies of the mod in one folder would both load. It is taken away ONLY when it carries the
-rem old build's own marker string: anything else under that name - the loader itself, ReShade,
-rem somebody's else shim - is left alone. This is the last use of that marker.
-if exist "%GAMEDIR%\winmm.dll" (
-    findstr /m /c:GDUNIQUETAB_LANEA_HOOKDLL "%GAMEDIR%\winmm.dll" >nul 2>&1
-    if errorlevel 1 (
-        echo [deploy] "%GAMEDIR%\winmm.dll" is not this mod - left alone
-    ) else (
-        del /q "%GAMEDIR%\winmm.dll"
-        if exist "%GAMEDIR%\winmm.dll" (
-            echo [deploy] WARNING: an older build of this mod is still at "%GAMEDIR%\winmm.dll"
-            echo [deploy]          and could not be deleted. Remove it by hand: it would load a
-            echo [deploy]          second copy of the mod.
-        ) else (
-            echo [deploy] removed the older winmm.dll build of this mod
-        )
-    )
-)
-
 rem ---- the mod folder ---------------------------------------------------------------------------
 rem x64\uniquetab\ is where the .asi writes the ini, the log, the collection, the exports and the
 rem files it generates on the first launch: catalogue.bin, the three uniq-*.txt lists and the

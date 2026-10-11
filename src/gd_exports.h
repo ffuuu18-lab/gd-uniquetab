@@ -17,8 +17,8 @@
 // pointer to the return slot as the SECOND argument, before the declared ones. Those are
 // marked "sret" in the notes; the typedefs in this header cover only the simple cases.
 //
-// Read-only rule for milestones M1-M4: names that create, move, delete or persist items are
-// still listed (they are part of the class) but are marked WRITE - do not call them.
+// Names that create, move, delete or persist items are still listed (they are part of the
+// class) but are marked WRITE: a call through one of them changes the player's items.
 
 #pragma once
 
@@ -342,27 +342,27 @@ enum GD_ItemClassification_Unverified {
 // ---------------------------------------------------------------------------------------------
 // InventorySack - every exported method   [Game.dll]
 // ---------------------------------------------------------------------------------------------
-// public: bool __cdecl GAME::InventorySack::AddItem(class GAME::Vec2 const & __ptr64,class GAME::Item * __ptr64,bool) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::AddItem(class GAME::Vec2 const & __ptr64,class GAME::Item * __ptr64,bool) __ptr64  ** WRITE **
 #define GD_SACK_ADDITEM "?AddItem@InventorySack@GAME@@QEAA_NAEBVVec2@2@PEAVItem@2@_N@Z"
-// public: bool __cdecl GAME::InventorySack::AddItem(class GAME::Item * __ptr64,bool,bool) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::AddItem(class GAME::Item * __ptr64,bool,bool) __ptr64  ** WRITE **
 #define GD_SACK_ADDITEM_2 "?AddItem@InventorySack@GAME@@QEAA_NPEAVItem@2@_N1@Z"
-// public: class GAME::Vec2 __cdecl GAME::InventorySack::AddItemAndReturnPoint(class GAME::Item * __ptr64) __ptr64  ** WRITE - do not call in M1-M4 **  [returns by value -> hidden sret pointer as arg 2]
+// public: class GAME::Vec2 __cdecl GAME::InventorySack::AddItemAndReturnPoint(class GAME::Item * __ptr64) __ptr64  ** WRITE **  [returns by value -> hidden sret pointer as arg 2]
 #define GD_SACK_ADDITEMANDRETURNPOINT "?AddItemAndReturnPoint@InventorySack@GAME@@QEAA?AVVec2@2@PEAVItem@2@@Z"
 // public: void __cdecl GAME::InventorySack::AlignRect(class GAME::Rect & __ptr64)const __ptr64
 #define GD_SACK_ALIGNRECT "?AlignRect@InventorySack@GAME@@QEBAXAEAVRect@2@@Z"
-// public: bool __cdecl GAME::InventorySack::ArrangeUnpositionedItems(void) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::ArrangeUnpositionedItems(void) __ptr64  ** WRITE **
 #define GD_SACK_ARRANGEUNPOSITIONEDITEMS "?ArrangeUnpositionedItems@InventorySack@GAME@@QEAA_NXZ"
-// public: void __cdecl GAME::InventorySack::CompleteRelics(class GAME::Player * __ptr64) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::CompleteRelics(class GAME::Player * __ptr64) __ptr64  ** WRITE **
 #define GD_SACK_COMPLETERELICS "?CompleteRelics@InventorySack@GAME@@QEAAXPEAVPlayer@2@@Z"
 // public: bool __cdecl GAME::InventorySack::ContainsItem(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & __ptr64)const __ptr64
 #define GD_SACK_CONTAINSITEM "?ContainsItem@InventorySack@GAME@@QEBA_NAEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z"
 // public: bool __cdecl GAME::InventorySack::ContainsItem(unsigned int)const __ptr64
 #define GD_SACK_CONTAINSITEM_2 "?ContainsItem@InventorySack@GAME@@QEBA_NI@Z"
-// public: void __cdecl GAME::InventorySack::DeleteAndCreateAllItemsFor(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::DeleteAndCreateAllItemsFor(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE **
 #define GD_SACK_DELETEANDCREATEALLITEMSFOR "?DeleteAndCreateAllItemsFor@InventorySack@GAME@@QEAAXPEAVControllerPlayer@2@@Z"
-// public: bool __cdecl GAME::InventorySack::DepositSackIntoReagents(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::DepositSackIntoReagents(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE **
 #define GD_SACK_DEPOSITSACKINTOREAGENTS "?DepositSackIntoReagents@InventorySack@GAME@@QEAA_NPEAVControllerPlayer@2@@Z"
-// public: void __cdecl GAME::InventorySack::DestroyAllItems(void) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::DestroyAllItems(void) __ptr64  ** WRITE **
 #define GD_SACK_DESTROYALLITEMS "?DestroyAllItems@InventorySack@GAME@@QEAAXXZ"
 // protected: bool __cdecl GAME::InventorySack::FindNextPosition(class GAME::Item const * __ptr64,class GAME::Rect & __ptr64,bool)const __ptr64
 #define GD_SACK_FINDNEXTPOSITION "?FindNextPosition@InventorySack@GAME@@IEBA_NPEBVItem@2@AEAVRect@2@_N@Z"
@@ -404,7 +404,7 @@ enum GD_ItemClassification_Unverified {
 #define GD_SACK_GETSYMBOLCOLORINDEX "?GetSymbolColorIndex@InventorySack@GAME@@QEBAIXZ"
 // public: unsigned int __cdecl GAME::InventorySack::GetSymbolIndex(void)const __ptr64
 #define GD_SACK_GETSYMBOLINDEX "?GetSymbolIndex@InventorySack@GAME@@QEBAIXZ"
-// public: void __cdecl GAME::InventorySack::GiveAllItems(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::GiveAllItems(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE **
 #define GD_SACK_GIVEALLITEMS "?GiveAllItems@InventorySack@GAME@@QEAAXPEAVControllerPlayer@2@@Z"
 // public: class GAME::Vec2 __cdecl GAME::InventorySack::GridToPixels(class GAME::Vec2 const & __ptr64)const __ptr64  [returns by value -> hidden sret pointer as arg 2]
 #define GD_SACK_GRIDTOPIXELS "?GridToPixels@InventorySack@GAME@@QEBA?AVVec2@2@AEBV32@@Z"
@@ -414,15 +414,15 @@ enum GD_ItemClassification_Unverified {
 #define GD_SACK_ISITEMADDEDWHILENOTTHECURRENTLYSELECTEDINVENTORYTAB "?IsItemAddedWhileNotTheCurrentlySelectedInventoryTab@InventorySack@GAME@@QEAA_NXZ"
 // public: bool __cdecl GAME::InventorySack::IsSpaceForItem(class GAME::Item const * __ptr64,bool)const __ptr64
 #define GD_SACK_ISSPACEFORITEM "?IsSpaceForItem@InventorySack@GAME@@QEBA_NPEBVItem@2@_N@Z"
-// public: bool __cdecl GAME::InventorySack::LoadSackIntoTransmutes(void) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::LoadSackIntoTransmutes(void) __ptr64  ** WRITE **
 #define GD_SACK_LOADSACKINTOTRANSMUTES "?LoadSackIntoTransmutes@InventorySack@GAME@@QEAA_NXZ"
 // public: class GAME::Vec2 __cdecl GAME::InventorySack::PixelsToGrid(class GAME::Vec2 const & __ptr64)const __ptr64  [returns by value -> hidden sret pointer as arg 2]
 #define GD_SACK_PIXELSTOGRID "?PixelsToGrid@InventorySack@GAME@@QEBA?AVVec2@2@AEBV32@@Z"
-// public: void __cdecl GAME::InventorySack::RemoveAllItems(void) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::RemoveAllItems(void) __ptr64  ** WRITE **
 #define GD_SACK_REMOVEALLITEMS "?RemoveAllItems@InventorySack@GAME@@QEAAXXZ"
-// public: bool __cdecl GAME::InventorySack::RemoveItem(unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::RemoveItem(unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_REMOVEITEM "?RemoveItem@InventorySack@GAME@@QEAA_NI@Z"
-// public: bool __cdecl GAME::InventorySack::ReplaceItem(unsigned int,unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::ReplaceItem(unsigned int,unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_REPLACEITEM "?ReplaceItem@InventorySack@GAME@@QEAA_NII@Z"
 // protected: bool __cdecl GAME::InventorySack::SearchHorizantal(class GAME::Rect & __ptr64,bool)const __ptr64
 #define GD_SACK_SEARCHHORIZANTAL "?SearchHorizantal@InventorySack@GAME@@IEBA_NAEAVRect@2@_N@Z"
@@ -430,23 +430,23 @@ enum GD_ItemClassification_Unverified {
 #define GD_SACK_SEARCHITEMS "?SearchItems@InventorySack@GAME@@QEAAXAEBV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@AEAV?$vector@VRect@GAME@@@mem@@1@Z"
 // protected: bool __cdecl GAME::InventorySack::SearchVertical(class GAME::Rect & __ptr64,bool)const __ptr64
 #define GD_SACK_SEARCHVERTICAL "?SearchVertical@InventorySack@GAME@@IEBA_NAEAVRect@2@_N@Z"
-// public: void __cdecl GAME::InventorySack::SetBorder(unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::SetBorder(unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_SETBORDER "?SetBorder@InventorySack@GAME@@QEAAXI@Z"
-// public: void __cdecl GAME::InventorySack::SetBorderColor(unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::SetBorderColor(unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_SETBORDERCOLOR "?SetBorderColor@InventorySack@GAME@@QEAAXI@Z"
-// public: void __cdecl GAME::InventorySack::SetButtonName(class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::SetButtonName(class std::basic_string<unsigned short,struct std::char_traits<unsigned short>,class std::allocator<unsigned short> >) __ptr64  ** WRITE **
 #define GD_SACK_SETBUTTONNAME "?SetButtonName@InventorySack@GAME@@QEAAXV?$basic_string@GU?$char_traits@G@std@@V?$allocator@G@2@@std@@@Z"
-// public: void __cdecl GAME::InventorySack::SetDims(int,int,bool) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::SetDims(int,int,bool) __ptr64  ** WRITE **
 #define GD_SACK_SETDIMS "?SetDims@InventorySack@GAME@@QEAAXHH_N@Z"
 // public: void __cdecl GAME::InventorySack::SetItemAddedWhileNotTheCurrentlySelectedInventoryTab(bool) __ptr64
 #define GD_SACK_SETITEMADDEDWHILENOTTHECURRENTLYSELECTEDINVENTORYTAB "?SetItemAddedWhileNotTheCurrentlySelectedInventoryTab@InventorySack@GAME@@QEAAX_N@Z"
-// public: void __cdecl GAME::InventorySack::SetSymbol(unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::SetSymbol(unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_SETSYMBOL "?SetSymbol@InventorySack@GAME@@QEAAXI@Z"
-// public: void __cdecl GAME::InventorySack::SetSymbolColor(unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::SetSymbolColor(unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_SETSYMBOLCOLOR "?SetSymbolColor@InventorySack@GAME@@QEAAXI@Z"
-// public: bool __cdecl GAME::InventorySack::Sort(unsigned int) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: bool __cdecl GAME::InventorySack::Sort(unsigned int) __ptr64  ** WRITE **
 #define GD_SACK_SORT "?Sort@InventorySack@GAME@@QEAA_NI@Z"
-// public: void __cdecl GAME::InventorySack::TakeAllItems(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE - do not call in M1-M4 **
+// public: void __cdecl GAME::InventorySack::TakeAllItems(class GAME::ControllerPlayer * __ptr64) __ptr64  ** WRITE **
 #define GD_SACK_TAKEALLITEMS "?TakeAllItems@InventorySack@GAME@@QEAAXPEAVControllerPlayer@2@@Z"
 
 // ---------------------------------------------------------------------------------------------
@@ -458,7 +458,7 @@ enum GD_ItemClassification_Unverified {
 #define GD_ITEM_CANNOTPICKUP "?CannotPickUp@Item@GAME@@QEBA_NXZ"
 // public: bool __cdecl GAME::Item::CannotPickUpMultiple(void)const __ptr64
 #define GD_ITEM_CANNOTPICKUPMULTIPLE "?CannotPickUpMultiple@Item@GAME@@QEBA_NXZ"
-// public: static class GAME::Item * __ptr64 __cdecl GAME::Item::CreateItem(struct GAME::ItemReplicaInfo const & __ptr64)  ** WRITE - do not call in M1-M4 **
+// public: static class GAME::Item * __ptr64 __cdecl GAME::Item::CreateItem(struct GAME::ItemReplicaInfo const & __ptr64)  ** WRITE **
 #define GD_ITEM_CREATEITEM "?CreateItem@Item@GAME@@SAPEAV12@AEBUItemReplicaInfo@2@@Z"
 // public: virtual class GAME::GraphicsTexture const * __ptr64 __cdecl GAME::Item::GetBitmap(void)const __ptr64
 #define GD_ITEM_GETBITMAP "?GetBitmap@Item@GAME@@UEBAPEBVGraphicsTexture@2@XZ"

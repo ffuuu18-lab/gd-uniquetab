@@ -44,6 +44,8 @@
 
 #include <windows.h>
 
+#include "ut_padinput.h"   // UtPadScreenRects - the screen pad's published rectangles
+
 struct GdTexture;   // GAME::GraphicsTexture (gd_runtime.h)
 
 namespace ut {
@@ -57,6 +59,20 @@ int plateInstall(int* total);
 
 // Game-thread tick: the late signature scan (the exe .text is Steam-DRM encrypted at init).
 void plateTick(bool gameThread);
+
+// ---- the SCREEN pad's input (ut_padinput.h has the rules) -----------------------------------
+// The draw that paints the screen pad / label publishes WHERE it painted them, every frame it
+// paints them: client px (the event's own space), the logical button per rectangle (the index
+// panelButtonHit returns for the in-window pad). The frame is stamped here (hookFrameCount), so
+// a pad that stops being painted goes inert by itself after kUtPadScreenStaleTicks frames.
+// `r == nullptr` (or r->shown == 0) retracts at once. Any thread; a sequence lock makes the
+// GetMouseEvent detour read a whole copy. Nothing published = the detour touches no event.
+void plateScreenRectsPublish(const UtPadScreenRects* r);
+
+// For a status line: "pending" / "resolved" / "installed" / "refused" / "OFF (fault)".
+const char* plateScreenInputState();
+// Where the pad and the label pinned to the screen are drawn, for the log lines.
+const char* plateScreenSiteName();
 
 // Called by ut_live.cpp right after a relayout succeeded. group < 0 restores the vanilla plate.
 void plateApply(int group, const char* label, int cellW, int cellH);
@@ -161,6 +177,9 @@ bool plateCursorInAnyBox(int sx, int sy);
 // False when nothing is captured or the read faults (fail-safe = "not on a box" is NOT assumed:
 // the caller treats false-from-a-fault as a reason to pass the event through).
 bool plateBoxHitLocal(float lx, float ly, bool* faulted);
+// The live local rects (x, y, w, h; UI scale inside) of every captured box with a plausible size,
+// up to `cap`; parked boxes sit far off the page. -1 when a read faulted. GAME THREAD.
+int plateBoxRectsLocal(float* xywh, int cap);
 
 // Releases one texture the mod loaded, through the single GraphicsEngine::UnloadTexture
 // resolution site this file owns (SEH-framed). false = unavailable, or the call faulted.
@@ -188,10 +207,11 @@ int plateOwnedRefresh(bool force);
 //     the page on screen, which marks the group the user is looking at.
 // Pure interlocked reads: no engine call, no lock and no allocation, so the strip's draw path
 // stays as call-free as it was.
-unsigned int plateSearchMask();
+// True when collection group `group` (any index) is marked.
+bool plateSearchMarked(int group);
 
 // Drop the marks and restart the search sweep, because something other than the needle changed
-// under it - today, the owned-only filter, which decides whether the sweep runs at all.
+// under it - the owned-only filter, which decides whether the sweep runs at all.
 // Interlocked stores only; callable from the game thread's click path.
 void plateSearchRearm();
 bool plateOwns(const char* record);
