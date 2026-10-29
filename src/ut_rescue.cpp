@@ -152,6 +152,7 @@
 #include <string.h>
 
 #include <algorithm>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -195,9 +196,148 @@ struct Entry {
     unsigned int count = 0;
 };
 
+// ---- the record index ---------------------------------------------------------------------
+//
+// A row is found by its record, case-insensitively. A linear _stricmp scan made the reader's
+// duplicate check quadratic in the file and cost the caravan-open reconcile (two lookups a row,
+// on the GAME thread) about half a second at the base game's full collection. The index is an
+// open-addressed hash of the rows' records that lives beside g_entries:
+//   - THE KEY is the record folded the way _stricmp folds in the "C" locale - ASCII A-Z -> a-z,
+//     every other byte as it is - hashed (FNV-1a and a final mix). A slot holds a row's position
+//     and that hash; EQUALITY is _stricmp itself, the compare the scan makes.
+//   - THE FIRST ROW WINS. A key that is already there is never re-pointed, so a list holding two
+//     rows of one record (an old binary journal can) answers with the first, as the scan did.
+//   - ASCII ONLY. A key with a byte >= 0x80, or a list that holds any such record, is answered by
+//     the scan, unchanged: how a locale folds those bytes is the one thing a hash cannot know.
+//     Records are ASCII paths, so in play the index answers every lookup.
+//   - IT CAN BE MISSING, NEVER WRONG. A failed allocation leaves `ok` false and the scan answers
+//     until the next mutation rebuilds it.
+//   - THE LOCK is g_cs, the one g_entries lives under: every function here runs with it held, or
+//     on a private list nothing else can see yet (the reader builds its list and that list's
+//     index together and publishes the pair under the lock, so a lookup on the game thread
+//     during a reload sees the old pair or the new one, never half of either).
+//   - THE INVARIANT: after every mutation the index answers what a fresh scan answers
+//     (journalIndexCheck; tools\test_journal.cpp runs it after every operation of every case).
+// A lookup allocates nothing (the accessors' rule below); only a mutation, which allocates
+// already, grows or rebuilds it. 8 bytes a slot, at most half full: 20,000 rows = 512 KB.
+struct IndexSlot {
+    int at;              // the row's position in its list; -1 = an empty slot
+    unsigned int hash;
+};
+
+struct RecordIndex {
+    std::vector<IndexSlot> slots;   // a power of two, at most half full
+    size_t used = 0;                // occupied slots = the distinct records
+    size_t nonAscii = 0;            // rows whose record has a byte >= 0x80
+    bool ok = false;                // false = not built: the scan answers
+};
+
+const int kIndexScan = -2;   // indexFind: this lookup is the scan's to answer
+
+bool asciiOnly(const char* s) {
+    for (; *s; ++s) {
+        if ((unsigned char)*s >= 0x80) return false;
+    }
+    return true;
+}
+
+unsigned int recordHash(const char* s) {
+    unsigned int h = 2166136261u;
+    for (; *s; ++s) {
+        unsigned int c = (unsigned char)*s;
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        h = (h ^ c) * 16777619u;
+    }
+    h ^= h >> 16;
+    h *= 0x85EBCA6Bu;
+    h ^= h >> 13;
+    h *= 0xC2B2AE35u;
+    h ^= h >> 16;
+    return h;
+}
+
+// Two spellings of ONE key: an in-place overwrite between them moves nothing in the index.
+bool indexSameKey(const std::string& a, const std::string& b) {
+    return asciiOnly(a.c_str()) && asciiOnly(b.c_str()) && _stricmp(a.c_str(), b.c_str()) == 0;
+}
+
+// Row `at` goes in unless its record is there already (the first row wins). Never allocates.
+void indexPlace(RecordIndex* ix, const std::vector<Entry>& v, int at, unsigned int h) {
+    const size_t mask = ix->slots.size() - 1;
+    for (size_t k = h & mask;; k = (k + 1) & mask) {
+        IndexSlot& sl = ix->slots[k];
+        if (sl.at < 0) {
+            sl.at = at;
+            sl.hash = h;
+            ++ix->used;
+            return;
+        }
+        if (sl.hash == h &&
+            _stricmp(v[(size_t)sl.at].record.c_str(), v[(size_t)at].record.c_str()) == 0)
+            return;
+    }
+}
+
+// The whole index over `v`, the slot array reused when it is big enough. Never throws.
+void indexBuild(RecordIndex* ix, const std::vector<Entry>& v) {
+    ix->ok = false;
+    ix->used = 0;
+    ix->nonAscii = 0;
+    size_t want = 64;
+    while (want < (v.size() + 1) * 2) want <<= 1;
+    try {
+        if (ix->slots.size() < want) {
+            ix->slots.assign(want, IndexSlot{-1, 0});
+        } else {
+            std::fill(ix->slots.begin(), ix->slots.end(), IndexSlot{-1, 0});
+        }
+    } catch (...) {
+        return;
+    }
+    for (size_t i = 0; i < v.size(); ++i) {
+        const char* rec = v[i].record.c_str();
+        if (!asciiOnly(rec)) ++ix->nonAscii;
+        indexPlace(ix, v, (int)i, recordHash(rec));
+    }
+    ix->ok = true;
+}
+
+// After v.push_back: the new last row goes in; at half full (or when not built) a rebuild.
+void indexAdd(RecordIndex* ix, const std::vector<Entry>& v) {
+    if (v.empty()) return;
+    if (!ix->ok || (ix->used + 1) * 2 > ix->slots.size()) {
+        indexBuild(ix, v);
+        return;
+    }
+    const char* rec = v.back().record.c_str();
+    if (!asciiOnly(rec)) ++ix->nonAscii;
+    indexPlace(ix, v, (int)v.size() - 1, recordHash(rec));
+}
+
+// The row of `record`, -1 for none, or kIndexScan when the index cannot answer.
+int indexFind(const RecordIndex& ix, const std::vector<Entry>& v, const char* record) {
+    if (!ix.ok || ix.nonAscii || ix.slots.empty() || !asciiOnly(record)) return kIndexScan;
+    const unsigned int h = recordHash(record);
+    const size_t mask = ix.slots.size() - 1;
+    for (size_t k = h & mask;; k = (k + 1) & mask) {
+        const IndexSlot& sl = ix.slots[k];
+        if (sl.at < 0) return -1;
+        if (sl.hash == h && (size_t)sl.at < v.size() &&
+            _stricmp(v[(size_t)sl.at].record.c_str(), record) == 0)
+            return sl.at;
+    }
+}
+
 CRITICAL_SECTION g_cs;
 bool g_csReady = false;
 std::vector<Entry>* g_entries = nullptr;
+// g_entries' index (above). Under g_cs, with g_entries; null only when its allocation failed.
+RecordIndex* g_index = nullptr;
+// TEST ONLY (journalTestIndexAudit): every mutation re-checks the index against a scan.
+volatile LONG g_indexAudit = 0;
+long g_indexAuditRuns = 0;
+long g_indexAuditFails = 0;
+char g_indexAuditWhy[256] = {0};
 char g_path[MAX_PATH] = {0};      // <journal dir>\uniq-items.jsonl - THE journal
 char g_reportPath[MAX_PATH] = {0};
 // The resolved journal folder, kept so the three paths can be re-composed when the
@@ -257,12 +397,121 @@ unsigned long long nowFileTime() {
     return ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
 }
 
-int findEntry(const char* record) {
+// The scan: the FIRST row whose record _stricmp-equals `record`. The definition of a lookup -
+// the index answers what this answers, and this answers whatever the index cannot.
+int findEntryScan(const char* record) {
     if (!g_entries || !record) return -1;
     for (size_t i = 0; i < g_entries->size(); ++i) {
         if (_stricmp((*g_entries)[i].record.c_str(), record) == 0) return (int)i;
     }
     return -1;
+}
+
+// g_cs held. A hash lookup; the scan only for what the index cannot answer.
+int findEntry(const char* record) {
+    if (!g_entries || !record) return -1;
+    if (g_index) {
+        const int at = indexFind(*g_index, *g_entries, record);
+        if (at != kIndexScan) return at;
+    }
+    return findEntryScan(record);
+}
+
+// g_cs held. After any change to the list's length or order: the index over it, again.
+void indexRebuild() {
+    if (g_index && g_entries) indexBuild(g_index, *g_entries);
+}
+
+// g_cs held. After g_entries->push_back.
+void indexAppended() {
+    if (g_index && g_entries) indexAdd(g_index, *g_entries);
+}
+
+// g_cs held. THE INVARIANT, checked: the index answers, for every row's record (as written,
+// upper-cased and lower-cased) and for a record no row has, exactly what a scan answers. The
+// reference is one linear pass over the rows (the first row of each folded record); the real
+// scan is asked too - for every row up to 2,048 rows, and for a spread sample beyond.
+bool indexCheckLocked(char* why, size_t whyCap) {
+    if (why && whyCap) why[0] = 0;
+    if (!g_entries) return true;
+    const std::vector<Entry>& v = *g_entries;
+#define UT_INDEX_FAIL(...)                                          \
+    do {                                                            \
+        if (why && whyCap) _snprintf_s(why, whyCap, _TRUNCATE, __VA_ARGS__); \
+        return false;                                               \
+    } while (0)
+    if (!g_index || !g_index->ok) UT_INDEX_FAIL("the index is not built (%zu rows)", v.size());
+    const RecordIndex& ix = *g_index;
+    try {
+        std::map<std::string, int> first;
+        size_t nonAscii = 0;
+        for (size_t i = 0; i < v.size(); ++i) {
+            std::string k = v[i].record;
+            for (size_t c = 0; c < k.size(); ++c) {
+                if (k[c] >= 'A' && k[c] <= 'Z') k[c] = (char)(k[c] + ('a' - 'A'));
+            }
+            first.emplace(k, (int)i);   // keeps the first row of each key
+            if (!asciiOnly(v[i].record.c_str())) ++nonAscii;
+        }
+        if (nonAscii != ix.nonAscii)
+            UT_INDEX_FAIL("%zu rows are not ASCII and the index counts %zu", nonAscii, ix.nonAscii);
+        if (!nonAscii && first.size() != ix.used)
+            UT_INDEX_FAIL("%zu distinct records and %zu index slots in use", first.size(), ix.used);
+        size_t occupied = 0;
+        for (size_t k = 0; k < ix.slots.size(); ++k) {
+            const IndexSlot& sl = ix.slots[k];
+            if (sl.at < 0) continue;
+            ++occupied;
+            if ((size_t)sl.at >= v.size())
+                UT_INDEX_FAIL("slot %zu names row %d of %zu", k, sl.at, v.size());
+            if (sl.hash != recordHash(v[(size_t)sl.at].record.c_str()))
+                UT_INDEX_FAIL("slot %zu holds a stale hash for row %d (%s)", k, sl.at,
+                              v[(size_t)sl.at].record.c_str());
+        }
+        if (occupied != ix.used)
+            UT_INDEX_FAIL("%zu slots are occupied and %zu are counted", occupied, ix.used);
+        const size_t step = v.size() <= 2048 ? 1 : v.size() / 512;
+        for (size_t i = 0; i < v.size(); ++i) {
+            std::string k = v[i].record;
+            for (size_t c = 0; c < k.size(); ++c) {
+                if (k[c] >= 'A' && k[c] <= 'Z') k[c] = (char)(k[c] + ('a' - 'A'));
+            }
+            const int want = first[k];
+            std::string up = k;
+            for (size_t c = 0; c < up.size(); ++c) {
+                if (up[c] >= 'a' && up[c] <= 'z') up[c] = (char)(up[c] - ('a' - 'A'));
+            }
+            const char* asked[3] = {v[i].record.c_str(), k.c_str(), up.c_str()};
+            const bool scanToo = i % step == 0 || i + 16 >= v.size();
+            for (int a = 0; a < 3; ++a) {
+                const int got = findEntry(asked[a]);
+                const int scan = scanToo ? findEntryScan(asked[a]) : want;
+                if (got != want || scan != want)
+                    UT_INDEX_FAIL("row %zu (%s) asked as \"%s\": the index says %d, the scan %d, "
+                                  "the first such row is %d",
+                                  i, v[i].record.c_str(), asked[a], got, scan, want);
+            }
+        }
+        const char* none = "records/__index_check__/no_such_record.dbr";
+        if (findEntry(none) != findEntryScan(none))
+            UT_INDEX_FAIL("a record no row has: the index says %d, the scan %d", findEntry(none),
+                          findEntryScan(none));
+    } catch (...) {
+        UT_INDEX_FAIL("allocation failure in the check");
+    }
+#undef UT_INDEX_FAIL
+    return true;
+}
+
+// g_cs held. The TEST ONLY audit: off in the mod (one interlocked read), on in the harness.
+void indexAudit(const char* where) {
+    if (!InterlockedCompareExchange(&g_indexAudit, 0, 0)) return;
+    char why[200];
+    ++g_indexAuditRuns;
+    if (!indexCheckLocked(why, sizeof(why)) && g_indexAuditFails++ == 0) {
+        _snprintf_s(g_indexAuditWhy, sizeof(g_indexAuditWhy), _TRUNCATE, "after %s: %s", where,
+                    why);
+    }
 }
 
 unsigned int get32(const std::vector<unsigned char>& v, size_t at) {
@@ -1350,7 +1599,8 @@ struct TextParse {
 // Parses a whole buffer. A bad line costs THAT LINE ONLY. `quiet` silences the per-line noise for
 // the migration's verify pass, which re-reads a file it just wrote.
 TextParse parseTextBuffer(const std::vector<unsigned char>& f, const char* path,
-                          std::vector<Entry>* into, bool quiet) {
+                          std::vector<Entry>* into, bool quiet, RecordIndex* ix) {
+    indexBuild(ix, *into);   // `ix` is `into`'s index from here on
     TextParse r;
     r.ok = false;
     r.format = 0;
@@ -1463,21 +1713,31 @@ TextParse parseTextBuffer(const std::vector<unsigned char>& f, const char* path,
             continue;
         }
         // Duplicate record, case-insensitively, exactly as findEntry compares: keep the LAST,
-        // matching journalUpsert's replace semantics.
-        bool replaced = false;
-        for (size_t i = 0; i < into->size(); ++i) {
-            if (_stricmp((*into)[i].record.c_str(), e.record.c_str()) == 0) {
-                if (!quiet) {
-                    logD("rescue journal: %s line %d repeats record %s - the LAST one wins (that "
-                         "is what a re-deposit does)",
-                         path, lineNo, e.record.c_str());
+        // matching journalUpsert's replace semantics. The list's own index finds the first row
+        // of the record (linear in the file, not quadratic); what it cannot answer is scanned.
+        int dup = indexFind(*ix, *into, e.record.c_str());
+        if (dup == kIndexScan) {
+            dup = -1;
+            for (size_t i = 0; i < into->size(); ++i) {
+                if (_stricmp((*into)[i].record.c_str(), e.record.c_str()) == 0) {
+                    dup = (int)i;
+                    break;
                 }
-                (*into)[i] = e;
-                replaced = true;
-                break;
             }
         }
-        if (!replaced) into->push_back(e);
+        if (dup >= 0) {
+            if (!quiet) {
+                logD("rescue journal: %s line %d repeats record %s - the LAST one wins (that "
+                     "is what a re-deposit does)",
+                     path, lineNo, e.record.c_str());
+            }
+            const bool sameKey = indexSameKey((*into)[(size_t)dup].record, e.record);
+            (*into)[(size_t)dup] = e;
+            if (!sameKey) indexBuild(ix, *into);
+        } else {
+            into->push_back(e);
+            indexAdd(ix, *into);
+        }
     }
     if (!headerSeen) {
         logD("rescue journal: %s is empty - ignored", path);
@@ -1487,11 +1747,45 @@ TextParse parseTextBuffer(const std::vector<unsigned char>& f, const char* path,
 }
 
 // Reads the real journal into g_entries. Returns true when a file was there AND parsed.
+// The file is parsed into a PRIVATE list with its own index, and the pair is published under
+// g_cs: nothing can see a half-read list or a half-built index. Both callers (journalInit, and
+// journalFollow after it emptied the list) hand it an empty list, which makes the publication a
+// swap; rows already there would be merged exactly as the parse used to append to them (a
+// record already there takes the file's row in place, the rest are appended in file order).
 bool readTextFile(const char* path) {
     std::vector<unsigned char> f;
     if (!readWholeFile(path, &f)) return false;   // absent, empty, or over the 64 MB cap
-    const TextParse r = parseTextBuffer(f, path, g_entries, false);
+    std::vector<Entry> read;
+    RecordIndex readIndex;
+    const TextParse r = parseTextBuffer(f, path, &read, false, &readIndex);
     if (!r.ok) return false;
+    EnterCriticalSection(&g_cs);
+    try {
+        if (g_entries->empty()) {
+            g_entries->swap(read);
+            if (g_index) {
+                std::swap(*g_index, readIndex);
+                if (!g_index->ok) indexRebuild();
+            }
+        } else {
+            for (size_t i = 0; i < read.size(); ++i) {
+                const int at = findEntry(read[i].record.c_str());
+                if (at >= 0) {
+                    const bool sameKey =
+                        indexSameKey((*g_entries)[(size_t)at].record, read[i].record);
+                    (*g_entries)[(size_t)at] = read[i];
+                    if (!sameKey) indexRebuild();
+                } else {
+                    g_entries->push_back(read[i]);
+                    indexAppended();
+                }
+            }
+        }
+    } catch (...) {
+        indexRebuild();
+    }
+    indexAudit("the read");
+    LeaveCriticalSection(&g_cs);
     if (r.tooNew) InterlockedExchange(&g_readOnly, 1);
     const size_t got = g_entries->size();
     if (r.headerEntries != (unsigned int)got || r.badLines || r.dropped) {
@@ -1628,6 +1922,10 @@ bool migrateBinary(const char* binPath, const char* whence) {
     std::string text;
     buildText(fromBin, &text);
     *g_entries = fromBin;   // the session runs from these whatever happens below
+    EnterCriticalSection(&g_cs);
+    indexRebuild();
+    indexAudit("the binary migration");
+    LeaveCriticalSection(&g_cs);
 
     if (!writeWholeFileAtomic(g_path, text.c_str(), text.size())) {
         logE("***** collection: MIGRATION FAILED - \"%s\" could not be written (err %lu) *****",
@@ -1647,7 +1945,8 @@ bool migrateBinary(const char* binPath, const char* whence) {
     if (!readWholeFile(g_path, &back)) {
         _snprintf_s(why, sizeof(why), _TRUNCATE, "the file could not be read back at all");
     } else {
-        const TextParse r = parseTextBuffer(back, g_path, &fromText, true);
+        RecordIndex fromTextIndex;
+        const TextParse r = parseTextBuffer(back, g_path, &fromText, true, &fromTextIndex);
         if (!r.ok) {
             _snprintf_s(why, sizeof(why), _TRUNCATE, "the file we just wrote does not parse");
         } else if (fromText.size() != fromBin.size()) {
@@ -1757,6 +2056,12 @@ bool journalInit(HMODULE selfModule, const char* journalDir) {
     } catch (...) {
         return false;
     }
+    try {
+        g_index = new RecordIndex();   // none = every lookup is the scan, slower and as correct
+    } catch (...) {
+        g_index = nullptr;
+    }
+    if (g_index) indexBuild(g_index, *g_entries);   // the empty list's: "no file" is a journal too
     char outDir[MAX_PATH] = {0};
     utModDirA(selfModule, outDir, sizeof(outDir));
     utModPathA(selfModule, "rescue-report.txt", g_reportPath, sizeof(g_reportPath));
@@ -2283,14 +2588,18 @@ bool journalUpsert(const UtReplicaCapture& cap) {
             // the legacy (map-owned) deposit path leaves it exactly where it was, which for a
             // brand-new entry is 0.
             e.count = (*g_entries)[at].count;
+            const bool sameKey = indexSameKey((*g_entries)[at].record, e.record);
             (*g_entries)[at] = e;
+            if (!sameKey) indexRebuild();
         } else {
             g_entries->push_back(e);
+            indexAppended();
         }
         ok = true;
     } catch (...) {
         ok = false;
     }
+    indexAudit("journalUpsert");
     LeaveCriticalSection(&g_cs);
     if (ok) {
         InterlockedExchange(&g_dirty, 1);
@@ -2310,7 +2619,9 @@ bool journalRemove(const char* record) {
             removed = true;
         } catch (...) {
         }
+        indexRebuild();   // every later row moved up one
     }
+    indexAudit("journalRemove");
     LeaveCriticalSection(&g_cs);
     if (removed) {
         InterlockedExchange(&g_dirty, 1);
@@ -2419,6 +2730,7 @@ bool journalSetCount(const char* record, unsigned int count) {
         }
         if (count) e.lastSeenAt = nowFileTime();
     }
+    indexAudit("journalSetCount");
     LeaveCriticalSection(&g_cs);
     if (changed) {
         InterlockedExchange(&g_dirty, 1);
@@ -2434,13 +2746,13 @@ int journalCollectStored(char (*out)[256], unsigned int* counts, int cap) {
     EnterCriticalSection(&g_cs);
     for (size_t i = 0; i < g_entries->size(); ++i) {
         if (!(*g_entries)[i].count) continue;   // TABLE-OWNED rows ONLY - see ut_rescue.h
-        if (out) {
-            if (n >= cap) break;
+        if (out && n < cap) {
             _snprintf_s(out[n], 256, _TRUNCATE, "%s", (*g_entries)[i].record.c_str());
             if (counts) counts[n] = (*g_entries)[i].count;
         }
-        ++n;   // `out == nullptr` COUNTS the rows and copies nothing (storeStatus) - cap is
-               // then ignored, because a truncated count would be a wrong number in the log.
+        ++n;   // EVERY row is counted, whatever `cap` lets this copy: the return is the table's
+               // row count and never the buffer's size (a truncated count would be a wrong
+               // number on the label - "coll 4096/7169"). `out == nullptr` counts only.
     }
     LeaveCriticalSection(&g_cs);
     return n;
@@ -2634,14 +2946,19 @@ bool journalDepositCommit(const UtReplicaCapture& cap, unsigned int count, bool*
         const int at = findEntry(cap.record);
         if (at >= 0) {
             if (had) {
+                const bool sameKey = indexSameKey((*g_entries)[at].record, prev.record);
                 (*g_entries)[at] = prev;
+                if (!sameKey) indexRebuild();
             } else {
                 g_entries->erase(g_entries->begin() + at);
+                indexRebuild();
             }
             if (rolledBack) *rolledBack = true;
         }
     } catch (...) {
+        indexRebuild();
     }
+    indexAudit("the deposit's rollback");
     LeaveCriticalSection(&g_cs);
     // The list is dirty either way: what is on disk is the PRE-image, and the entries in memory
     // are the pre-image too, so the worker's next pass writes what is already there. Harmless,
@@ -2696,6 +3013,7 @@ bool journalMarkStored(const char* record, bool stored) {
             changed = true;
         }
     }
+    indexAudit("journalMarkStored");
     LeaveCriticalSection(&g_cs);
     if (changed) {
         InterlockedExchange(&g_dirty, 1);
@@ -2823,6 +3141,8 @@ bool journalFollow(int variant, const char* viewKey) {
         g_entries->clear();
     } catch (...) {
     }
+    indexRebuild();
+    indexAudit("the mode/view switch");
     // Every session latch belongs to the file that is closing, not to the session: a read-only
     // mark earned by one mode's file must not silence the other mode's.
     InterlockedExchange(&g_dirty, 0);
@@ -2941,10 +3261,12 @@ int journalPruneNotStored(char (*out)[256], int cap, char* why, size_t whyCap) {
             keep.push_back((*g_entries)[i]);
         }
         g_entries->swap(keep);
+        indexRebuild();
     } catch (...) {
         dropped = -1;
         if (why) _snprintf_s(why, whyCap, _TRUNCATE, "allocation failure - nothing was dropped");
     }
+    indexAudit("journalPruneNotStored");
     LeaveCriticalSection(&g_cs);
     if (dropped > 0) {
         InterlockedExchange(&g_dirty, 1);
@@ -2995,6 +3317,29 @@ bool journalItemName(const char* record, char* out, size_t cap) {
 // rescue from the same object. `utCatHasKindOf` is a compile-time fact - a catalogue without the
 // accessor makes every answer 0 and costs nothing at run time.
 bool journalKindMarkBuilt() { return utCatHasKindOf<gdut::ItemView>(); }
+
+bool journalIndexCheck(char* why, size_t whyCap) {
+    if (why && whyCap) why[0] = 0;
+    if (!g_entries || !g_csReady) return true;
+    EnterCriticalSection(&g_cs);
+    const bool ok = indexCheckLocked(why, whyCap);
+    LeaveCriticalSection(&g_cs);
+    return ok;
+}
+
+void journalTestIndexAudit(int on) { InterlockedExchange(&g_indexAudit, on ? 1 : 0); }
+
+long journalTestIndexAuditReport(long* runs, char* why, size_t whyCap) {
+    if (runs) *runs = 0;
+    if (why && whyCap) why[0] = 0;
+    if (!g_csReady) return 0;
+    EnterCriticalSection(&g_cs);
+    if (runs) *runs = g_indexAuditRuns;
+    const long fails = g_indexAuditFails;
+    if (why && whyCap) _snprintf_s(why, whyCap, _TRUNCATE, "%s", g_indexAuditWhy);
+    LeaveCriticalSection(&g_cs);
+    return fails;
+}
 
 // TEST ONLY (journalTestSetKind): -2 = no override, the catalogue answers.
 volatile LONG g_kindOverride = -2;

@@ -36,7 +36,6 @@ namespace ut {
 inline bool utProbeJunk(const std::string& key) {
     static const char* const kPrefix[] = {
         "records/sandbox/", "records/creatures/", "records/mod_testgrounds/",
-        "records/endlessdungeon/scriptentities/",
     };
     for (const char* p : kPrefix)
         if (key.compare(0, std::strlen(p), p) == 0) return true;

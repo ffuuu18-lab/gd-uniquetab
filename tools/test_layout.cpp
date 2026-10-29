@@ -41,6 +41,11 @@
 //  12. the layout plates' resolver (utLayoutPlatesGrid) sees the screen keys - the
 //      recorded DeathGrimDawn SAVE replayed with and without pad_screen, the
 //      live page agreeing both ways, and the plate set the page shows (utPlateSetChoice).
+//  13. zoom_pct: the arithmetic (utZoomCell, utZoomPct); zoom 100 is every G line of vanilla,
+//      Reign of Terror and DeathGrimDawn exactly (the identity gate); the fits at 125 / 150 / 200
+//      for the derived grid and two user grids; the per-group clamp (a small user grid, ROT's
+//      64x160 at 200) and that every clamped cell fits; one grid per button; the editor's smallest
+//      grid; the layout plates' text at a zoom; the plate set under a zoom (utLiveGridKind).
 // Exit code 0 = all of it held. Argument 1: the repository root (for data\oracle\).
 #include <stdio.h>
 #include <stdlib.h>
@@ -51,6 +56,7 @@
 #include <vector>
 
 #include "../src/ut_layout.h"
+#include "../src/ut_layoutedit.h"   // utEditMinSizes, for the editor's smallest grid at a zoom
 #include "../src/ut_padmat.h"
 #include "../src/ut_padpage.h"
 #include "../src/ut_screendraw.h"
@@ -1197,6 +1203,22 @@ int main(int argc, char** argv) {
         check(ident && utPadOwnIndex(v) == 25 && utPadLogicalCount(v) == 26 &&
                   utPadSlotLogical(v, 0, 26) == -1,
               "24 groups that fit: one page, slot i IS button i (1.1.0's order), OWN last");
+        {
+            // THE EDIT BUTTON: logical G + 3, drawn in the slot before OWN (OWN stays last: the
+            // wide one); OWN and NEXT keep their indexes.
+            const UtPadPages e = utPadPaginate(24, 1, [](int) { return true; });
+            bool same = e.pages == 1 && e.buttons == 27 && e.perPage == 24 && e.edit == 1;
+            for (int i = 0; i <= 24; ++i) same = same && utPadSlotLogical(e, 0, i) == i;
+            check(same && utPadSlotLogical(e, 0, 25) == 27 && utPadSlotLogical(e, 0, 26) == 25 &&
+                      utPadSlotLogical(e, 0, 27) == -1 && utPadEditIndex(e) == 27 &&
+                      utPadOwnIndex(e) == 25 && utPadNextIndex(e) == 26 && utPadLogicalCount(e) == 28,
+                  "with EDIT: MAT, the 24 groups, EDIT (logical 27), OWN (25, still last); OWN and "
+                  "NEXT keep their indexes");
+            const UtPadPages off = utPadPaginate(24, 0, [](int) { return true; });
+            check(off.edit == 0 && off.buttons == 26 && utPadSlotLogical(off, 0, 25) == 25 &&
+                      utPadLogicalCount(off) == 26,
+                  "edit_button=0: the pad of 1.2.0 exactly (26 buttons, OWN in slot 25)");
+        }
         const float scales[7] = {0.7f, 0.8f, 0.928f, 1.0f, 1.25f, 1.5f, 2.0f};
         const UtRect today = utPadDefault(25, 14, 1);
         struct View {
@@ -1230,6 +1252,9 @@ int main(int argc, char** argv) {
             std::vector<const char*> ptr;
             for (const std::string& t : tags) ptr.push_back(t.c_str());
             const UtCaptions caps = {ptr.data(), (int)ptr.size()};
+            std::vector<const char*> ptrE(ptr);   // the measure set with EDIT (MAT .. OWN, EDIT)
+            ptrE.push_back("EDIT");
+            const UtCaptions capsE = {ptrE.data(), (int)ptrE.size()};
             check(ids.size() == vw.groups, (std::string("the G lines of ") + path + " give the group count").c_str());
             if (!*vw.dir) {
                 // 1.1.0's MAT + 24 groups, then 1.2.0's Blueprints, then OWN
@@ -1254,6 +1279,40 @@ int main(int argc, char** argv) {
                           "vanilla at UI scale 1: 27 buttons in 10 x 3 cells of 30 x 14, caption 10 (1.1.0's size)");
             }
             check(all, "every button fits today's pad at the seven UI scales - no page needed");
+            // the same view with the EDIT button (edit_button=1, the default)
+            bool allE = true;
+            for (float s : scales) {
+                const int n = (int)ptrE.size();
+                const UtPadPages pg = utPadPaginate((int)ids.size(), 1, [&](int k) {
+                    return utPadFit(today, k, 1, s, 14, utWidestCaptionPx, &capsE).ok != 0;
+                });
+                const UtPadFit f = utPadFit(today, n, 1, s, 14, utWidestCaptionPx, &capsE);
+                const UtPadFit f0 = utPadFit(today, n - 1, 1, s, 14, utWidestCaptionPx, &caps);
+                allE = allE && pg.pages == 1 && pg.buttons == n && pg.edit == 1 && f.ok &&
+                       f.caption >= kUtCaptionMin && utPadSlotLogical(pg, 0, n - 1) == utPadOwnIndex(pg) &&
+                       utPadSlotLogical(pg, 0, n - 2) == utPadEditIndex(pg);
+                if (s == 1.0f)
+                    printf("    %-22s with EDIT: %d buttons, %d x %d cells of %d x %d, caption %d\n",
+                           !*vw.dir ? "vanilla" : vw.dir + 7, n, f.cols, f.rows, f.cellW, f.cellH,
+                           f.caption);
+                if (!*vw.dir) {
+                    // vanilla: EDIT takes one of the two empty cells; the caption keeps its size
+                    allE = allE && f.cols == f0.cols && f.rows == f0.rows && f.cellW == f0.cellW &&
+                           f.caption == f0.caption;
+                    if (s == 1.0f) {
+                        const UtRect blu = utPadCellRect(f, 25), ed = utPadCellRect(f, 26),
+                                     own = utPadCellRect(f, 27);
+                        check(f.cols == 10 && f.rows == 3 && f.cellW == 30 && f.cellH == 14 &&
+                                  f.caption == 10 && blu.x == 260 && blu.y == 55 && ed.x == 291 &&
+                                  ed.y == 55 && ed.w == 30 && ed.h == 14 && own.x == 322 && own.y == 55 &&
+                                  own.w == 61 && own.h == 14,
+                              "vanilla with EDIT at UI scale 1: 28 buttons in 10 x 3 cells of 30 x 14, "
+                              "caption 10; BLU 260,55, EDIT 291,55 30x14, OWN 322,55 61x14 (one cell right)");
+                    }
+                }
+            }
+            check(allE, "with EDIT every button fits today's pad at the seven UI scales, EDIT before "
+                        "OWN, OWN last (vanilla: the same cells and caption as without it)");
         }
         // Other (the generator's own last group) is a G line like any other: it gets its own
         // button, captioned by its tag.
@@ -1314,6 +1373,33 @@ int main(int argc, char** argv) {
                   "K is the largest page that still carries a readable caption");
             printf("    120 groups at UI scale 1: %d pages of %d, %d x %d cells, caption %d\n", pg.pages,
                    pg.perPage, f.cols, f.rows, f.caption);
+            // the same table with the EDIT button: every page MAT, K groups, NEXT, EDIT, OWN
+            p.push_back("EDIT");
+            const UtCaptions ce = {p.data(), (int)p.size()};
+            const UtPadPages pe = utPadPaginate(120, 1, [&](int k) {
+                return utPadFit(today, k, 1, 1.0f, 14, utWidestCaptionPx, &ce).ok != 0;
+            });
+            bool onceE = pe.pages > 1 && pe.edit == 1 && pe.buttons == pe.perPage + 4 &&
+                         pe.perPage == pg.perPage - 1;
+            std::vector<int> seenE(120, 0);
+            for (int page = 0; onceE && page < pe.pages; ++page) {
+                onceE = utPadSlotLogical(pe, page, 0) == 0 &&
+                        utPadSlotLogical(pe, page, pe.buttons - 1) == utPadOwnIndex(pe) &&
+                        utPadSlotLogical(pe, page, pe.buttons - 2) == utPadEditIndex(pe) &&
+                        utPadSlotLogical(pe, page, pe.buttons - 3) == utPadNextIndex(pe);
+                for (int s = 1; s <= pe.perPage; ++s) {
+                    const int b = utPadSlotLogical(pe, page, s);
+                    if (b < 0) continue;
+                    ++seenE[(size_t)(b - 1)];
+                    onceE = onceE && utPadPageOf(pe, b - 1) == page;
+                }
+            }
+            for (int g = 0; g < 120; ++g) onceE = onceE && seenE[(size_t)g] == 1;
+            const UtPadFit fe1 = utPadFit(today, pe.buttons + 1, 1, 1.0f, 14, utWidestCaptionPx, &ce);
+            check(onceE && utPadLogicalCount(pe) == 124 && utPadOwnIndex(pe) == 121 &&
+                      utPadNextIndex(pe) == 122 && utPadEditIndex(pe) == 123 && !fe1.ok,
+                  "120 groups with EDIT: one group less per page, every group once, MAT first, then "
+                  "NEXT, EDIT, OWN last; K still the largest that fits");
         }
     }
 
@@ -2120,6 +2206,246 @@ int main(int argc, char** argv) {
                   !strcmp(utPlateSetName(kUtPlateSetDerived), "the derived plates") &&
                   !strcmp(utPlateSetName(7), "?"),
               "  the sets' names");
+    }
+
+    // ---- 13. zoom_pct ----------------------------------------------------------------------------
+    printf("\n13. zoom_pct - the cells magnified, the per-group clamp, the plates, the editor\n");
+    {
+        // 13a. the arithmetic
+        check(utZoomPct(0) == 100 && utZoomPct(99) == 100 && utZoomPct(100) == 100 &&
+                  utZoomPct(150) == 150 && utZoomPct(200) == 200 && utZoomPct(201) == 200,
+              "utZoomPct: 0 and below 100 are 100, above 200 is 200");
+        check(utZoomCell(64, 100) == 64 && utZoomCell(64, 125) == 80 && utZoomCell(64, 150) == 96 &&
+                  utZoomCell(64, 200) == 128 && utZoomCell(32, 133) == 43 && utZoomCell(33, 150) == 50 &&
+                  utZoomCell(160, 200) == 320 && utZoomCell(0, 150) == 2,
+              "utZoomCell: round(cell * pct / 100), half up (33 at 150 = 50), at least 1");
+
+        // 13b. THE IDENTITY GATE: zoom 100 is every G line of the three views, cell and grid
+        struct V { const char* dir; const char* name; };
+        const V views[3] = {{"", "vanilla"}, {"\\views\\reignofterror", "Reign of Terror"},
+                            {"\\views\\deathgrimdawn", "DeathGrimDawn"}};
+        struct G { int cols, rows, cw, ch; std::string label; };
+        struct VG { int x0, y0, uw, uh, gap, nmax; std::vector<G> g; };
+        VG loaded[3];
+        for (int vi = 0; vi < 3; ++vi) {
+            VG& vg = loaded[vi];
+            vg.x0 = vg.y0 = vg.uw = vg.uh = 0;
+            vg.gap = kUtRowGap;
+            vg.nmax = kUtFrameBoxFloor;
+            std::string text;
+            const std::string path = root + "\\data\\oracle" + views[vi].dir + "\\uniq-groups.txt";
+            if (!readFile(path, &text)) {
+                printf("    %s is not here - SKIPPED\n", path.c_str());
+                continue;
+            }
+            size_t at = 0;
+            while (at < text.size()) {
+                size_t e = text.find('\n', at);
+                if (e == std::string::npos) e = text.size();
+                std::string line = text.substr(at, e - at);
+                at = e + 1;
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const std::vector<std::string> f = splitTabs(line);
+                if (f[0] == "P" && f.size() >= 7) {
+                    vg.x0 = atoi(f[1].c_str());
+                    vg.y0 = atoi(f[2].c_str());
+                    vg.uw = atoi(f[3].c_str());
+                    vg.uh = atoi(f[4].c_str());
+                } else if (f[0] == "F" && f.size() >= 7) {
+                    vg.nmax = atoi(f[2].c_str());
+                    vg.gap = atoi(f[6].c_str());
+                } else if (f[0] == "G" && f.size() >= 7) {
+                    vg.g.push_back(G{atoi(f[3].c_str()), atoi(f[4].c_str()), atoi(f[5].c_str()),
+                                     atoi(f[6].c_str()), f[2]});
+                }
+            }
+            UtLayout L = {};
+            L.rect[kUtLayGrid] = {vg.x0, vg.y0, vg.uw, vg.uh};
+            int same = 0, sameUser = 0;
+            UtLayout U = {};
+            U.rect[kUtLayGrid] = {vg.x0, vg.y0 + 40, vg.uw - 10, vg.uh - 80};
+            U.user[kUtLayGrid] = 1;
+            for (const G& g : vg.g) {
+                UtZoomFit z = {};
+                const UtGrid a = utLiveGroupGrid(L, g.cols, g.rows, g.cw, g.ch, vg.gap, vg.nmax, 100, &z);
+                const UtGrid b = utLiveGroupGrid(L, g.cols, g.rows, g.cw, g.ch, vg.gap, vg.nmax);
+                if (a.cols == g.cols && a.rows == g.rows && b.cols == g.cols && b.rows == g.rows &&
+                    z.pct == 100 && !z.clamped && z.cellW == g.cw && z.cellH == g.ch)
+                    ++same;
+                UtZoomFit zu = {};
+                const UtGrid c = utLiveGroupGrid(U, g.cols, g.rows, g.cw, g.ch, vg.gap, vg.nmax, 100, &zu);
+                const UtGrid d = utGridFit(U.rect[kUtLayGrid], g.cw, g.ch, vg.gap, vg.nmax);
+                if (c.cols == d.cols && c.rows == d.rows && zu.cellW == g.cw && zu.cellH == g.ch) ++sameUser;
+            }
+            char what[160];
+            snprintf(what, sizeof(what), "%s at zoom 100: all %zu G lines kept, cell and grid (%d), and a "
+                     "user grid's fit (%d)", views[vi].name, vg.g.size(), same, sameUser);
+            check(!vg.g.empty() && same == (int)vg.g.size() && sameUser == (int)vg.g.size(), what);
+        }
+
+        // 13c. the fits at 125 / 150 / 200: the derived vanilla grid 333 x 552 and two user grids
+        auto fitAt = [&](const UtRect& r, int user, int cw, int ch, int pct, int* zw, int* zh) {
+            UtLayout L = {};
+            L.rect[kUtLayGrid] = r;
+            L.user[kUtLayGrid] = user;
+            UtZoomFit z = {};
+            const UtGrid g = utLiveGroupGrid(L, 1, 1, cw, ch, kUtRowGap, 234, pct, &z);
+            if (zw) *zw = z.cellW;
+            if (zh) *zh = z.cellH;
+            return g.cols * 100 + g.rows;
+        };
+        const UtRect van = {105, 76, 333, 552};
+        int zw = 0, zh = 0;
+        check(fitAt(van, 0, 64, 64, 125, &zw, &zh) == 406 && zw == 80 && zh == 80 &&
+                  fitAt(van, 0, 64, 64, 150, &zw, &zh) == 305 && zw == 96 &&
+                  fitAt(van, 0, 64, 64, 200, &zw, &zh) == 204 && zw == 128,
+              "vanilla Helms 64x64: 125 % 80 px 4 x 6, 150 % 96 px 3 x 5, 200 % 128 px 2 x 4");
+        check(fitAt(van, 0, 64, 96, 125, nullptr, nullptr) == 404 &&
+                  fitAt(van, 0, 64, 96, 150, nullptr, nullptr) == 303 &&
+                  fitAt(van, 0, 64, 96, 200, &zw, &zh) == 202 && zw == 128 && zh == 192,
+              "vanilla Chest 64x96: 4 x 4, 3 x 3, 2 x 2 (128x192 at 200)");
+        check(fitAt(van, 0, 32, 32, 125, nullptr, nullptr) == 813 &&
+                  fitAt(van, 0, 32, 32, 150, nullptr, nullptr) == 611 &&
+                  fitAt(van, 0, 32, 32, 200, nullptr, nullptr) == 508,
+              "vanilla Rings 32x32: 8 x 13, 6 x 11, 5 x 8");
+        check(fitAt(van, 0, 64, 128, 125, nullptr, nullptr) == 403 &&
+                  fitAt(van, 0, 64, 128, 150, nullptr, nullptr) == 302 &&
+                  fitAt(van, 0, 64, 128, 200, &zw, &zh) == 202 && zh == 256,
+              "vanilla two-handers 64x128: 4 x 3, 3 x 2, 2 x 2 (128x256 at 200, it fits)");
+        const UtRect u1 = {105, 120, 333, 460};
+        check(fitAt(u1, 1, 64, 64, 150, nullptr, nullptr) == 304 &&
+                  fitAt(u1, 1, 32, 32, 200, nullptr, nullptr) == 506 &&
+                  fitAt(u1, 1, 64, 128, 200, nullptr, nullptr) == 201,
+              "user grid 105,120,333,460: Helms 150 % 3 x 4, Rings 200 % 5 x 6, two-handers 200 % 2 x 1");
+        const UtRect rot = {46, 72, 928, 520};
+        check(fitAt(rot, 1, 64, 64, 150, nullptr, nullptr) == 905 &&
+                  fitAt(rot, 1, 64, 160, 125, &zw, &zh) == 1102 && zw == 80 && zh == 200 &&
+                  fitAt(rot, 1, 64, 160, 200, &zw, &zh) == 701 && zh == 320,
+              "Reign of Terror user grid 46,72,928,520: Helms 150 % 9 x 5; Hunting Spears 125 % 11 x 2, "
+              "200 % 7 x 1 (128x320)");
+
+        // 13d. THE CLAMP: one magnified cell always fits the grid in force
+        const UtRect small = {105, 76, 100, 300};
+        UtZoomFit z = utZoomFit(small, 64, 64, kUtRowGap, 200);
+        check(z.pct == 157 && z.clamped && z.cellW == 100 && z.cellH == 100 &&
+                  fitAt(small, 1, 64, 64, 200, nullptr, nullptr) == 102,
+              "a 100 x 300 user grid at 200: Helms clamped to 157 % (100x100, 1 x 2)");
+        z = utZoomFit(small, 64, 128, kUtRowGap, 200);
+        check(z.pct == 157 && z.cellW == 100 && z.cellH == 201 && fitAt(small, 1, 64, 128, 200, nullptr, nullptr) == 101,
+              "  two-handers 157 % (100x201, 1 x 1)");
+        z = utZoomFit(small, 32, 32, kUtRowGap, 200);
+        check(z.pct == 200 && !z.clamped && z.cellW == 64 && fitAt(small, 1, 32, 32, 200, nullptr, nullptr) == 104,
+              "  Rings keep 200 % (64x64, 1 x 4): the clamp is per group");
+        const UtRect tight = {105, 76, 64, 130};
+        z = utZoomFit(tight, 64, 128, kUtRowGap, 150);
+        check(z.pct == 100 && z.clamped && z.cellW == 64 && z.cellH == 128 &&
+                  fitAt(tight, 1, 64, 128, 150, nullptr, nullptr) == 101,
+              "  a grid that holds only the generated cell: back at 100 %, today's 1 x 1");
+        const UtRect rotLow = {12, 76, 962, 300};
+        z = utZoomFit(rotLow, 64, 160, kUtRowGap, 200);
+        check(z.pct == 186 && z.cellW == 119 && z.cellH == 298 &&
+                  fitAt(rotLow, 1, 64, 160, 200, nullptr, nullptr) == 801,
+              "Reign of Terror's 64x160 in a 300 px high grid at 200: 186 % (119x298, 8 x 1)");
+        z = utZoomFit({12, 76, 962, 584}, 64, 160, kUtRowGap, 200);
+        check(z.pct == 200 && !z.clamped && z.cellH == 320,
+              "  in its derived 962 x 584 it keeps 200 % (128x320)");
+        // every cell of the three views, at every zoom, in the derived grid and in four smaller
+        // ones: the cell in force fits the rectangle (or is the generated cell at 100)
+        {
+            int cases = 0, bad = 0;
+            for (const VG& vg : loaded) {
+                const UtRect rects[5] = {{vg.x0, vg.y0, vg.uw, vg.uh}, {vg.x0, vg.y0, 100, 300},
+                                         {vg.x0, vg.y0, 64, 200}, {vg.x0, vg.y0, 200, 170},
+                                         {vg.x0, vg.y0, vg.uw, 162}};
+                for (const G& g : vg.g)
+                    for (const UtRect& r : rects)
+                        for (int pct = 100; pct <= 200; pct += 5) {
+                            const UtZoomFit f = utZoomFit(r, g.cw, g.ch, vg.gap, pct);
+                            ++cases;
+                            const bool fits = f.cellW <= r.w && f.cellH + vg.gap <= r.h;
+                            if (f.pct < 100 || f.pct > pct || (f.pct > 100 && !fits) ||
+                                (f.pct == pct) == (f.clamped != 0) ||
+                                (f.pct < pct && utZoomCell(g.cw, f.pct + 1) <= r.w &&
+                                 utZoomCell(g.ch, f.pct + 1) + vg.gap <= r.h))
+                                ++bad;
+                        }
+            }
+            char what[128];
+            snprintf(what, sizeof(what), "the clamp over %d cases: a zoomed cell always fits, and is the "
+                     "largest that does (%d off)", cases, bad);
+            check(cases > 1000 && bad == 0, what);
+        }
+
+        // 13e. one grid per button: Reign of Terror's Bows 64x128 + Hunting Spears 64x160 share the
+        // 64x160 cell, which is magnified like any group's
+        {
+            const std::vector<UtCell> view = {{32, 32}, {32, 96}, {64, 32}, {64, 64}, {64, 96}, {64, 128}, {64, 160}};
+            int exact = 0;
+            const UtCell c = utUnionCell({{64, 128}, {64, 160}}, view, &exact);
+            const UtRect rd = {12, 76, 962, 584};
+            const int u150 = fitAt(rd, 0, c.w, c.h, 150, &zw, &zh);
+            check(exact && c.w == 64 && c.h == 160 && u150 == 1002 && zw == 96 && zh == 240 &&
+                      u150 == fitAt(rd, 0, 64, 160, 150, nullptr, nullptr),
+                  "the union's cell 64x160 at 150 %: 96x240, 10 x 2 - the same page as Hunting Spears alone");
+        }
+
+        // 13f. the editor's smallest grid: the largest cell as the page shows it
+        {
+            int mw = 0, mh = 0;
+            utZoomLargestCell(van, 64, 128, kUtRowGap, 100, &mw, &mh);
+            const bool at100 = mw == 64 && mh == 128;
+            utZoomLargestCell(van, 64, 128, kUtRowGap, 150, &mw, &mh);
+            int minW[kUtLayParts], minH[kUtLayParts];
+            utEditMinSizes(mw, mh, kUtRowGap, 1.0f, minW, minH);
+            check(at100 && mw == 96 && mh == 192 && minW[kUtLayGrid] == 96 && minH[kUtLayGrid] == 194,
+                  "the editor's smallest grid: 64 x 130 at 100 %, 96 x 194 at 150 % (vanilla)");
+            utZoomLargestCell(small, 64, 128, kUtRowGap, 200, &mw, &mh);
+            check(mw == 100 && mh == 201 && mw <= small.w && mh + kUtRowGap <= small.h,
+                  "  in a 100 x 300 grid at 200 %: 100 x 201 - never larger than the grid it opens on");
+        }
+
+        // 13g. the layout plates at a zoom: a layout of its own, the derived grid included
+        {
+            UtLayoutSource v = {};
+            v.x0 = 105; v.y0 = 76; v.usableW = 333; v.usableH = 552; v.plateW = 438; v.plateH = 627;
+            v.maxCellW = 64; v.maxCellH = 128; v.rowGap = kUtRowGap;
+            v.padY = 25; v.padH = 14; v.padGap = 1; v.labelSize = 13; v.captionMax = 14;
+            UtRect gr = {};
+            char canon[80] = "x";
+            check(utLayoutPlatesGrid(v, &gr, canon, sizeof(canon)) == 0 && !canon[0] &&
+                      utRectEq(gr, van),
+                  "zoom 100, no grid_ line: no layout set (the derived plates), as before");
+            v.zoom = 150;
+            check(utLayoutPlatesGrid(v, &gr, canon, sizeof(canon)) == 1 && utRectEq(gr, van) &&
+                      !strcmp(canon, "105,76,333,552 zoom=150"),
+                  "zoom 150 under the derived grid: a set of its own, \"105,76,333,552 zoom=150\"");
+            v.grid = " 105, 120,333,460";
+            check(utLayoutPlatesGrid(v, &gr, canon, sizeof(canon)) == 1 &&
+                      !strcmp(canon, "105,120,333,460 zoom=150"),
+                  "  a user grid at 150: its canonical text and the zoom");
+            v.zoom = 100;
+            check(utLayoutPlatesGrid(v, &gr, canon, sizeof(canon)) == 1 && !strcmp(canon, "105,120,333,460"),
+                  "  the same grid at 100: the old text (every set on disk keeps its hash)");
+            v.zoom = 0;
+            check(utLayoutPlatesGrid(v, &gr, canon, sizeof(canon)) == 1 && !strcmp(canon, "105,120,333,460"),
+                  "  a source that names no zoom (0) is 100");
+            char tiny[12];
+            v.zoom = 150;
+            v.grid = nullptr;
+            check(utLayoutPlatesGrid(v, &gr, tiny, sizeof(tiny)) == 0 && !tiny[0],
+                  "  a text that does not fit its buffer is no set, never a cut one");
+        }
+
+        // 13h. the plate set under a zoom (ut_plate.cpp plateLiveGrid -> utLiveGridKind)
+        check(utLiveGridKind(0, 100) == 0 && utLiveGridKind(0, 0) == 0 && utLiveGridKind(0, 150) == 1 &&
+                  utLiveGridKind(1, 100) == 1 && utLiveGridKind(1, 200) == 1,
+              "utLiveGridKind: the derived grid at 100 only is 0; a user grid or any zoom is a layout");
+        check(utPlateSetChoice(1, 1, utLiveGridKind(0, 150)) == kUtPlateSetLayout &&
+                  utPlateSetChoice(1, 0, utLiveGridKind(0, 150)) == kUtPlateSetPlain &&
+                  utPlateSetChoice(0, 1, utLiveGridKind(0, 150)) == kUtPlateSetPlain,
+              "  zoom 150 under the derived grid: its own set when ready, the plain cover before");
+        check(utPlateSetChoice(1, 1, utLiveGridKind(0, 100)) == kUtPlateSetDerived,
+              "  back at 100: the derived plates, even while the zoom's set is still published");
     }
 
     printf("\n%s (%d failure(s))\n", g_fails ? "FAILED" : "PASSED", g_fails);

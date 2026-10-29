@@ -306,13 +306,28 @@ int journalRecordIsMi(const char* record, bool mayLoad);
 // that carries the KIND mark; -2 hands the answer back to the catalogue.
 void journalTestSetKind(int kind);
 
+// THE RECORD INDEX's invariant, checked (ut_rescue.cpp, "the record index"): a row is found by a
+// hash of its record folded as _stricmp folds in the "C" locale, and after every mutation that
+// index must answer exactly what a linear scan of the rows answers - for every row's record as
+// written, upper-cased and lower-cased, and for a record no row has. True = it does; false fills
+// `why`. Takes g_cs. The mod never calls it; the harnesses do.
+bool journalIndexCheck(char* why, size_t whyCap);
+
+// TEST ONLY - tools\test_journal.cpp. 1 = every mutation of the journal (the read, the binary
+// migration, an upsert, a remove, a count, a mark, the deposit's rollback, the prune, a mode or
+// view switch) runs journalIndexCheck before it lets go of the lock; the report returns how many
+// of those checks failed, how many ran, and the first failure. Off by default: the mod never
+// turns it on.
+void journalTestIndexAudit(int on);
+long journalTestIndexAuditReport(long* runs, char* why, size_t whyCap);
+
 // True when this build's catalogue type declares the KIND accessor (`gdut::catIsMi`). False =
 // no record is ever an MI in this build, whatever catalogue.bin says.
 bool journalKindMarkBuilt();
 
 // The STORED roll of `record`'s row - {prefix +0x28, suffix +0x48, seed +0x68} out of the
-// journal's own entry, whatever its count. False = no such row (out->known false). One linear
-// scan under the journal lock: a caller on a hot path memoises it (ut_tooltip.cpp does, 4 Hz).
+// journal's own entry, whatever its count. False = no such row (out->known false). One lookup
+// under the journal lock: a caller on a hot path memoises it (ut_tooltip.cpp does, 4 Hz).
 bool journalRollOf(const char* record, UtRollKey* out);
 
 // The stored roll in words, with the item's name and level out of the catalogue:
@@ -364,7 +379,10 @@ void journalCatalogueReload(const char* catalogueBin);
 bool journalSetCount(const char* record, unsigned int count);
 
 // Every row with count >= 1, for the table build at journalInit and for plateOwnedRefresh.
-// `out` is the caller's array; the return is how many were written, capped at `cap`.
+// `out` is the caller's array of `cap` rows. The return is EVERY such row the journal holds, and
+// the first min(return, cap) of them are written: a return above `cap` means the caller's buffer
+// was too small (ut_caps.h `utTableWalk` grows it and walks again), never that the table has
+// only `cap` rows.
 int journalCollectStored(char (*out)[256], unsigned int* counts, int cap);
 
 // The sum of every count - the number the label and the heartbeat call "collected".
@@ -396,9 +414,9 @@ bool journalFlushNow(void);
 //   * `journalCollectStored` returns the TABLE-OWNED rows ONLY. The owned filter, the label
 //     and the badges must OR it with the engine map (`reagentHeldTotal`) for as long as any row
 //     is MAP-OWNED, or a user with a map-owned collection would be shown zero.
-//     ONE EXTENSION to its contract: `out == nullptr` COUNTS the table's rows and copies
-//     nothing (and `cap` is then ignored, because a truncated count would be a wrong number in
-//     a log line);
+//     Its return is ALWAYS the whole row count, whatever `cap` lets it copy, and
+//     `out == nullptr` counts and copies nothing - a truncated count would be a wrong number
+//     on the label and in a log line;
 //   * `stored` keeps its meaning ("the last reconcile saw this record in the collection");
 //   * the header field is `"tableCopies"`, not `"collected"`: a user opening their own journal
 //     must not read `"collected":0` over a large map-owned collection.

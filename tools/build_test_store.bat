@@ -70,6 +70,50 @@ if defined HAVELIVE (
   echo [test]       the test touches. *****
 )
 
+rem ---- pass 4b: THE REHEARSAL, FIXED - every record of the base game --------------------------
+rem data\oracle\journals\all-items-mi.jsonl holds every collectible record of a 1.3.1.1 base game
+rem with monster infrequents, each at count 1 (7,111 rows) - more than the 4,096 a fixed buffer
+rem once counted. The same pass as 4, over a COPY of the fixture, with the file's own header as
+rem the exact expectation: every row counted, every row walked. Without data\oracle (the public
+rem tree carries none of it) the pass skips loudly; with data\oracle and no journal it FAILS.
+set "SFIX=%OUT%\store-allitems"
+if exist "%SFIX%" rd /s /q "%SFIX%"
+mkdir "%SFIX%"
+set "FIXJSONL=%ROOT%\data\oracle\journals\all-items-mi.jsonl"
+set "HAVEFIX="
+if exist "%FIXJSONL%" set "HAVEFIX=1"
+set "HAVEORACLE="
+if exist "%ROOT%\data\oracle\catalogue.bin" set "HAVEORACLE=1"
+if defined HAVEFIX (
+  copy /y "%FIXJSONL%" "%SFIX%\uniq-items.jsonl" >nul
+  set "UNIQUETAB_OUT=%SFIX%"
+  "%OUT%\test_store.exe" --live --fixed
+  if errorlevel 1 set RC=1
+) else (
+  if defined HAVEORACLE (
+    echo [test] FAIL: data\oracle is here and data\oracle\journals\all-items-mi.jsonl is not
+    set RC=1
+  ) else (
+    echo [test] ***** SKIPPED the fixed rehearsal - no data\oracle in this tree *****
+  )
+)
+
+rem ---- pass 20: EVERY BOUND FROM THE DATA (src\ut_caps.h) ----------------------------------------
+rem A 20,000-row synthetic journal (more rows than Grimarillion has records), written by the test
+rem itself in record order and then, in its own folder, shuffled: the owned walk's buffer grows
+rem from the data, the count is exact and the order of the lines changes nothing. Plus the
+rem prototype cap's derivation and the engine-map walk's growth, both pure.
+for %%O in (ordered shuffled) do (
+  if exist "%OUT%\store-caps-%%O" rd /s /q "%OUT%\store-caps-%%O"
+  mkdir "%OUT%\store-caps-%%O"
+)
+set "UNIQUETAB_OUT=%OUT%\store-caps-ordered"
+"%OUT%\test_store.exe" --caps
+if errorlevel 1 set RC=1
+set "UNIQUETAB_OUT=%OUT%\store-caps-shuffled"
+"%OUT%\test_store.exe" --caps --shuffled
+if errorlevel 1 set RC=1
+
 rem ---- pass 6: THE PAINT GATE (src\ut_paintgate.h) ---------------------------------------------
 rem A row the mod's own file owns paints from a WRITABLE journal and not from a read-only one,
 rem because everything that could balance the paint needs a journal that can own it. No file, no

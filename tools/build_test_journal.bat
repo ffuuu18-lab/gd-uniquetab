@@ -379,6 +379,16 @@ if errorlevel 1 set RC=1
 "%OUT%\test_journal.exe" --case-v3upgrade
 if errorlevel 1 set RC=1
 
+rem ---- case (n): one record in three spellings on disk - the reader's duplicate check, now
+rem answered by the journal's record index: one row, in the first line's place, with the last
+rem line's content; every spelling finds it, every mutation keeps the index equal to a scan.
+set "DC=%OUT%\journal-dupcase"
+if exist "%DC%" rd /s /q "%DC%"
+mkdir "%DC%"
+set "UNIQUETAB_OUT=%DC%"
+"%OUT%\test_journal.exe" --case-dupcase
+if errorlevel 1 set RC=1
+
 if "%RCLOG%"=="1" set RC=1
 set "UNIQUETAB_OUT="
 if exist "%ROOT%\out\uniq-items.jsonl.pretest" echo [test] WARNING: a .pretest file is still there - a pass did not restore the real journal; put it back by hand

@@ -407,7 +407,7 @@ std::string g_textWarned;   // game thread: what the last WARN named
 const TextWorld* textWorldFor(long tableGen, int groups) {
     const TextWorld* w = g_textWorld;
     const int want = groups > 0 ? groups : kUtButtonCount - 2;
-    if (!w || w->tableGen != tableGen || w->groups != want || (int)w->caps.size() != w->buttons + 3)
+    if (!w || w->tableGen != tableGen || w->groups != want || (int)w->caps.size() != w->buttons + 4)
         return nullptr;
     return w;
 }
@@ -1786,6 +1786,7 @@ const char* const kButtonTags[kUtButtonCount] = {
 };
 const UtCaptions kDefaultCaps = {kButtonTags, kUtButtonCount};
 const char* const kNextTag = ">>";
+const char* const kEditTag = "EDIT";
 
 // The logical button that shows `group` (-1 = the vanilla page -> MAT); -1 for a group on no
 // button ([unassigned]). Without a TextWorld for this table: one button per group.
@@ -1802,17 +1803,20 @@ int padIndexOfGroup(int group) {
     return b < 0 ? 0 : b;
 }
 
-// One group table's captions in logical order: MAT, the groups, OWN, NEXT. Built once per table
-// (liveGroupTableGen) by whichever thread asks first; a replaced table is never freed, because the
-// layout in force keeps a pointer into it.
+// One group table's captions in logical order: MAT, the groups, OWN, NEXT, EDIT. Built once per
+// table (liveGroupTableGen) by whichever thread asks first; a replaced table is never freed,
+// because the layout in force keeps a pointer into it.
 struct CapTable {
     long gen;
     int groups;
     long textGen;       // the TextWorld its captions came from, 0 = the G lines' tags
     std::vector<std::string> text;
     std::vector<const char*> ptr;
-    UtCaptions all;     // MAT, the groups, OWN: the unpaged pad's fit
-    UtCaptions paged;   // the same plus NEXT
+    std::vector<const char*> ptrAllEdit;   // MAT, the groups, OWN, EDIT
+    UtCaptions all;        // MAT, the groups, OWN: the unpaged pad's fit
+    UtCaptions paged;      // the same plus NEXT
+    UtCaptions allEdit;    // the unpaged pad with the EDIT button
+    UtCaptions pagedEdit;  // the paged pad with the EDIT button (every caption)
 };
 CapTable* volatile g_capTable = nullptr;
 SRWLOCK g_capLock = SRWLOCK_INIT;
@@ -1837,17 +1841,23 @@ const CapTable* capTable() {
             n->groups = want;
             n->textGen = wgen;
             if (w) {
-                for (const std::string& s : w->caps) n->text.push_back(s);   // MAT .. NEXT
+                for (const std::string& s : w->caps) n->text.push_back(s);   // MAT .. EDIT
             } else {
                 n->text.push_back(kButtonTags[0]);
                 for (int g = 0; g < want; ++g)
                     n->text.push_back(groups > 0 ? liveGroupTag(g) : kButtonTags[g + 1]);
                 n->text.push_back(kButtonTags[kUtButtonCount - 1]);
                 n->text.push_back(kNextTag);
+                n->text.push_back(kEditTag);
             }
             for (const std::string& s : n->text) n->ptr.push_back(s.c_str());
-            n->all = UtCaptions{&n->ptr[0], (int)n->ptr.size() - 1};
-            n->paged = UtCaptions{&n->ptr[0], (int)n->ptr.size()};
+            const int all = (int)n->ptr.size() - 2;   // MAT .. OWN
+            n->ptrAllEdit.assign(n->ptr.begin(), n->ptr.begin() + all);
+            n->ptrAllEdit.push_back(n->ptr.back());
+            n->all = UtCaptions{&n->ptr[0], all};
+            n->paged = UtCaptions{&n->ptr[0], all + 1};
+            n->allEdit = UtCaptions{&n->ptrAllEdit[0], all + 1};
+            n->pagedEdit = UtCaptions{&n->ptr[0], all + 2};
             g_capTable = n;
             t = n;
         } catch (...) {
@@ -2233,8 +2243,8 @@ bool drawButtonsInner(GdCanvas* canvas, float ox, float oy, bool screen, UtPadSc
     const int active = buttonOfGroup(liveShownGroup(nullptr));
     const int ownIdx = utPadOwnIndex(P.pages);
     const int nextIdx = utPadNextIndex(P.pages);
-    const UtCaptions* caps =
-        P.pages.pages > 1 ? panelButtonCaptionsPaged() : panelButtonCaptions();
+    const int editIdx = utPadEditIndex(P.pages);
+    const UtCaptions* caps = panelButtonCaptionsFor(P.pages.pages > 1 ? 1 : 0, P.pages.edit);
     // The OWN button is not a group, so it can never be `active` (buttonOfGroup never returns
     // its index).  It gets its own ON look from its own flag.
     const bool filterOn = liveOwnedOnly();
@@ -2308,9 +2318,11 @@ bool drawButtonsInner(GdCanvas* canvas, float ox, float oy, bool screen, UtPadSc
         // is in force.  ONE flag, so the background, the caption colour and the ring can never
         // disagree about it.
         const bool on = toggle ? filterOn : (b == active);
-        // MAT, OWN and NEXT are not collection groups, so none of them can carry a search mark;
-        // a button carries it when ANY of its groups does (buttons file: several groups per button).
-        const bool match = b > 0 && b != ownIdx && b != nextIdx && panelButtonSearchMarked(b);
+        // MAT, OWN, NEXT and EDIT are not collection groups, so none of them can carry a search
+        // mark; a button carries it when ANY of its groups does (buttons file: several groups per
+        // button). EDIT is never `on` either: buttonOfGroup never returns its index.
+        const bool match =
+            b > 0 && b != ownIdx && b != nextIdx && b != editIdx && panelButtonSearchMarked(b);
         const bool hot = (b == g_btnHover);
         const bool down = downLive && (int)downIdx == b;
         const char* tag = capText(b);
@@ -2823,6 +2835,60 @@ void editKeyCheck(DWORD now) {
         logW("layout editor: layout_edit=1 could not be written back to 0 - set it by hand");
 }
 
+// THE EDIT BUTTON'S LATCH: a click on the pad's EDIT button (either route, either thread) stores
+// its tick here; the pad's draw opens the editor on its next frame - the one-shot key's path, so
+// both routes end on the thread the editor's state lives on. On the game's own materials page
+// panelEditButton has asked for the last collection group first, and the latch waits until a
+// collection group is on screen; it drops after kEditButtonWaitMs either way.
+// THE EDITOR KEY'S LATCH ([keys] editor_open bound to a key): the window procedure's KEYDOWN
+// stores its tick here (panelEditKey) and the same check opens the editor - the EDIT button's
+// path and rules, its own latch so the log names which one asked.
+volatile LONG g_editButtonAt = 0;   // GetTickCount of the click (never 0), 0 = none
+volatile LONG g_editKeyAt = 0;      // GetTickCount of the editor_open key (never 0), 0 = none
+const DWORD kEditButtonWaitMs = 2000;
+
+void editLatchCheck(volatile LONG* latch, const char* who, const char* whose, DWORD now) {
+    const LONG at = InterlockedCompareExchange(latch, 0, 0);
+    if (!at) return;
+    if (g_edit.state != kUtEdClosed) {   // open already (the editor chord the same frame)
+        InterlockedCompareExchange(latch, 0, at);
+        return;
+    }
+    if (now - (DWORD)at >= 2 * kEditButtonWaitMs) {   // set, then the pad stopped drawing
+        if (InterlockedCompareExchange(latch, 0, at) == at)
+            logD("layout editor: %s is %lu ms old at the pad's next frame - dropped", whose,
+                 (unsigned long)(now - (DWORD)at));
+        return;
+    }
+    if (liveShownGroup(nullptr) >= 0 && editOpen(who, now)) {
+        InterlockedCompareExchange(latch, 0, at);
+        return;
+    }
+    if (now - (DWORD)at >= kEditButtonWaitMs && InterlockedCompareExchange(latch, 0, at) == at)
+        logD("layout editor: %s waited %lu ms and the editor did not open (%s) - dropped", whose,
+             (unsigned long)(now - (DWORD)at),
+             liveShownGroup(nullptr) < 0 ? "no collection group came on screen"
+                                         : "no layout or cover to edit yet");
+}
+
+void editButtonCheck(DWORD now) {
+    editLatchCheck(&g_editButtonAt, "the EDIT button", "the EDIT button's click", now);
+    editLatchCheck(&g_editKeyAt, "the editor_open key", "the editor_open key", now);
+}
+
+// Either latch: its tick, and on the game's own materials page the last collection group first.
+int editLatchSet(volatile LONG* latch) {
+    const DWORD now = GetTickCount();
+    InterlockedExchange(latch, (LONG)(now ? now : 1));
+    if (liveShownGroup(nullptr) >= 0) return -1;
+    // The game's own materials page: the editor edits a collection page's layout (never
+    // padmat_), so the latch first goes back to the last collection group the pad showed.
+    const int g = g_lastCollectionGroup;
+    if (liveSelectGroup(g)) return g;
+    InterlockedExchange(latch, 0);
+    return -2;
+}
+
 int edPx(int rec, float s, float o) { return iround(o + floorf((float)rec * s + 0.5f)); }
 
 void editDrawInner(GdCanvas* canvas, float ox, float oy) {
@@ -2974,8 +3040,11 @@ bool editTickDraw(GdCanvas* canvas, float ox, float oy) {
     // The screen a part may be dragged onto: read only while the editor is open (or the one-shot
     // key may open it this frame), so a player who never edits gets no extra engine call per
     // frame. A Ctrl+right-click open learns it at the first frame (utEditTick takes it then).
-    if (g_cfg.layoutEdit) editNoteView(canvas, ox, oy);
+    if (g_cfg.layoutEdit || InterlockedCompareExchange(&g_editButtonAt, 0, 0) ||
+        InterlockedCompareExchange(&g_editKeyAt, 0, 0))
+        editNoteView(canvas, ox, oy);
     editKeyCheck(now);
+    editButtonCheck(now);
     if (g_edit.state == kUtEdClosed) return false;
     editNoteView(canvas, ox, oy);
     LiveLayout lay;
@@ -3074,10 +3143,14 @@ int panelButtonRecY1() {
     return padInForce(&r, &f) ? r.y + r.h - 1 : 0;
 }
 
-const UtCaptions* panelButtonCaptions() {
+const UtCaptions* panelButtonCaptionsFor(int paged, int edit) {
     const CapTable* t = capTable();
-    return t ? &t->all : &kDefaultCaps;
+    if (!t) return &kDefaultCaps;
+    if (paged) return edit ? &t->pagedEdit : &t->paged;
+    return edit ? &t->allEdit : &t->all;
 }
+
+const UtCaptions* panelButtonCaptions() { return panelButtonCaptionsFor(0, g_cfg.editButton ? 1 : 0); }
 
 int widestCaptionLivePx(int size, const void* ctx) {
     const UtCaptions* c = (const UtCaptions*)ctx;
@@ -3209,8 +3282,7 @@ int panelLabelSizeInForce() {
 }
 
 const UtCaptions* panelButtonCaptionsPaged() {
-    const CapTable* t = capTable();
-    return t ? &t->paged : &kDefaultCaps;
+    return panelButtonCaptionsFor(1, g_cfg.editButton ? 1 : 0);
 }
 
 int panelButtonRects(UtButtonRect* out, int* logical, int cap, float s) {
@@ -3321,20 +3393,32 @@ bool panelLayoutEditMouse(int type, float lx, float ly, bool cursorEmpty, bool i
         return false;
     }
     if (type == kUtMouseRightDown) {
-        // Ctrl+right-click on the pad's ground (in the window or pinned to the screen), or on a
-        // label pinned to the screen, on a collection group, with the same rules as a pad click:
-        // the pad drawn, an empty cursor, no live box under it, the space proven.
+        // The editor chord ([keys] editor_open, Ctrl+right-click by default) on the pad's ground
+        // (in the window or pinned to the screen), or on a label pinned to the screen, on a
+        // collection group, with the same rules as a pad click: the pad drawn, an empty cursor,
+        // no live box under it, the space proven. Both routes decided the chord already; this is
+        // the recheck at the moment of opening (editor_open bound to a key: no click opens).
         if (g_edit.state != kUtEdClosed || !cursorEmpty || inBox || !proven) return false;
-        if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return false;
+        const UtKeyBind chord = g_cfg.keys.editorOpen;
+        const int mods = utKeyModsOf((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
+                                     (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+                                     (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+        if (!utKeyClickMatches(chord, type, mods)) return false;
         if (!panelButtonsDrawnRecently() || liveShownGroup(nullptr) < 0) return false;
         const float s = liveUiScale();
+        char how[64], text[40];
+        utKeyText(chord, text, sizeof(text));
         PadPlan P;
-        if (padPlan(&P, s) && !P.mat && utRectFHas(utScaledRectF(P.ground, s), lx, ly))
-            return editOpen("Ctrl+right-click on the pad", now);
+        if (padPlan(&P, s) && !P.mat && utRectFHas(utScaledRectF(P.ground, s), lx, ly)) {
+            _snprintf_s(how, _TRUNCATE, "%s on the pad", text);
+            return editOpen(how, now);
+        }
         LiveLayout lay;
         if (liveLayoutGet(&lay) && lay.L.screen[kUtLayLabel] &&
-            utRectFHas(utScaledRectF(lay.L.rect[kUtLayLabel], s), lx, ly))
-            return editOpen("Ctrl+right-click on the label", now);
+            utRectFHas(utScaledRectF(lay.L.rect[kUtLayLabel], s), lx, ly)) {
+            _snprintf_s(how, _TRUNCATE, "%s on the label", text);
+            return editOpen(how, now);
+        }
         return false;
     }
     if (g_edit.state == kUtEdClosed) return false;
@@ -3422,7 +3506,7 @@ int panelButtonTarget(int index, const char** label) {
         pg = lay.pages;
     } else {
         const int g = panelPadButtonCount();
-        pg = UtPadPages{g, g, 1, g + 2};
+        pg = UtPadPages{g, g, 1, g + 2, 0};
     }
     const TextWorld* w = textWorldNow();
     if (index < 0 || index >= utPadLogicalCount(pg)) return -2;
@@ -3431,7 +3515,14 @@ int panelButtonTarget(int index, const char** label) {
         if (label) *label = "owned-only filter";
         return kUtButtonFilterTarget;
     }
+    // The EDIT button opens the layout editor and selects no group (panelEditButton).
+    if (index == utPadEditIndex(pg)) {
+        if (!pg.edit) return -2;
+        if (label) *label = "the layout editor";
+        return kUtButtonEditTarget;
+    }
     if (index == utPadNextIndex(pg)) {
+        if (pg.pages <= 1) return -2;   // an unpaged pad has no NEXT
         const int shown = liveShownGroup(nullptr);
         const int b =
             utPadNextTarget(pg, utPadPageOf(pg, padIndexOfGroup(shown >= 0 ? shown : g_lastCollectionGroup)));
@@ -3459,6 +3550,15 @@ int panelButtonTarget(int index, const char** label) {
 
 // The button's own caption, for a log line. Never null.
 const char* panelButtonTag(int index) { return capText(index); }
+
+int panelEditButton() { return editLatchSet(&g_editButtonAt); }
+
+int panelEditKey() {
+    // The pad's draw consumes the latch: with no pad on screen (group_buttons=0, the pad off)
+    // the key is not the mod's.
+    if (!panelButtonsDrawnRecently()) return -3;
+    return editLatchSet(&g_editKeyAt);
+}
 
 void panelButtonsHoverTick(float ox, float oy) {
     g_btnHover = -1;
@@ -3551,9 +3651,11 @@ void panelButtonsAnnounce() {
             if (i) tags += ' ';
             tags += caps->tags[i];
         }
+        const int edit = g_cfg.editButton ? 1 : 0;
         logD("buttons: strip order (index 0 = the vanilla materials page, then groups 0..%d, "
-             "then OWN = the owned-only filter): %s",
-             caps->n - 3, tags.c_str());
+             "then OWN = the owned-only filter%s): %s",
+             caps->n - 3 - edit, edit ? ", EDIT = the layout editor (drawn before OWN)" : "",
+             tags.c_str());
     } catch (...) {
     }
     if (n1 <= 0) {

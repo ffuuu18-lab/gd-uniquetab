@@ -52,6 +52,7 @@
 #include "ut_rescue.h"
 #include "ut_store.h"
 #include "ut_bindings.h"
+#include "ut_caps.h"       // every bound a collection can reach, sized from the data
 #include "ut_log.h"
 #include "ut_paths.h"
 #include "ut_replicasize.h"
@@ -156,6 +157,9 @@ bool g_csReady = false;
 unsigned int g_flagOffset = 0;
 
 std::unordered_set<std::string>* g_pageRecords = nullptr;  // lower-case record paths on our page
+// Its size, published for any thread (`reagentPageRecordCount`): the view's catalogue size is
+// what the private table's prototype cap is ceilinged by (ut_caps.h). 0 = not read yet.
+volatile LONG g_pageRecordCount = 0;
 
 // The registry stores the object id NEXT TO the pointer, and every write into an Item re-checks
 // both (ObjectManager::IsObjectOnDeletedList plus Object::GetObjectId == the id we stored) -
@@ -1746,7 +1750,7 @@ const void* findReagentNode(const std::string& key, bool* mapOk) {
         int visited = 0;
         const ReagentNode* cur = head->parent;
         while ((cur && !cur->isnil) || sp > 0) {
-            if (++visited > 8192) return nullptr;
+            if (++visited > kUtMapWalkCeiling) return nullptr;
             while (cur && !cur->isnil) {
                 if (sp >= 64) return nullptr;
                 stack[sp++] = cur;
@@ -1845,7 +1849,9 @@ int reagentSaveVariantEx(const char** why) {
 // if that half of the info line ever goes, this reader and kSaveVariantOff go with it, because
 // nothing else in the mod reads the byte.)
 
-// SEH-only walk: collects the node pointers, no C++ objects in this frame.
+// SEH-only walk: collects the node pointers, no C++ objects in this frame. Returns how many nodes
+// the map HOLDS and writes the first min(that, cap) - callers size from it (ut_caps.h
+// `utCollectAll`); -1 = no map, or a walk past kUtMapWalkCeiling nodes (a corrupt tree).
 int reagentCollectNodes(const void** nodes, int cap) {
     int found = 0;
     __try {
@@ -1859,14 +1865,15 @@ int reagentCollectNodes(const void** nodes, int cap) {
         int visited = 0;
         const ReagentNode* cur = head->parent;
         while ((cur && !cur->isnil) || sp > 0) {
-            if (++visited > 8192) return -1;
+            if (++visited > kUtMapWalkCeiling) return -1;
             while (cur && !cur->isnil) {
                 if (sp >= 64) return -1;
                 stack[sp++] = cur;
                 cur = cur->left;
             }
             const ReagentNode* n = stack[--sp];
-            if (found < cap) nodes[found++] = n;
+            if (found < cap) nodes[found] = n;
+            ++found;   // EVERY node is counted: the caller grows to the count (utCollectAll)
             cur = n->right;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1881,14 +1888,8 @@ int reagentCollectNodes(const void** nodes, int cap) {
 // ids belong to the world that created them.
 void refreshMapOwnedFromMap() {
     if (!p_GetPlayerReagents || !g_gameEngine) return;
-    static const int kMaxNodes = 4096;
     std::vector<const void*> nodes;
-    try {
-        nodes.resize(kMaxNodes);
-    } catch (...) {
-        return;
-    }
-    const int n = reagentCollectNodes(&nodes[0], kMaxNodes);
+    const int n = utCollectAll(&nodes, reagentCollectNodes);   // every node, however many
     if (n <= 0) return;
     for (int i = 0; i < n; ++i) {
         ProtoInfo pi;
@@ -1901,14 +1902,8 @@ void refreshMapOwnedFromMap() {
 // One walk, then the string work outside any SEH frame (MSVC forbids mixing the two).
 bool reagentWalkPageRecords(std::map<std::string, int>* out) {
     if (!p_GetPlayerReagents || !g_gameEngine || !g_pageRecords) return false;
-    static const int kMaxNodes = 4096;
     std::vector<const void*> nodes;
-    try {
-        nodes.resize(kMaxNodes);
-    } catch (...) {
-        return false;
-    }
-    const int n = reagentCollectNodes(&nodes[0], kMaxNodes);
+    const int n = utCollectAll(&nodes, reagentCollectNodes);   // every node, however many
     if (n < 0) return false;
     for (int i = 0; i < n; ++i) {
         char raw[400];
@@ -4295,6 +4290,7 @@ void applyViewChange(GdEngine* engine, const char* why) {
     // read from the game thread only (the deposit gate, the open-edge sweep, the census), which
     // is the thread this runs on.
     if (g_pageRecords) g_pageRecords->clear();
+    InterlockedExchange(&g_pageRecordCount, 0);
     if (g_pages) g_pages->clear();
     if (utViewFile(g_selfMod, "uniq-records.txt", recPath, sizeof(recPath)) &&
         loadRecordList(recPath)) {
@@ -4550,6 +4546,7 @@ bool loadRecordList(const char* path) {
         if (end == text.size()) break;
         start = end + 1;
     }
+    InterlockedExchange(&g_pageRecordCount, (LONG)g_pageRecords->size());
     return !g_pageRecords->empty();
 }
 
@@ -6662,7 +6659,11 @@ void journalPruneTick(size_t markedFalse, size_t inconclusive) {
             return;
         }
     }
-    const int cap = 4096;
+    // One name per row the prune could drop, sized from the journal like the reconcile's own
+    // buffer below: every dropped record is logged by name, however large the file.
+    size_t rowsNow = 0;
+    journalCounts(&rowsNow, nullptr, nullptr, nullptr);
+    const int cap = (int)rowsNow + 64;
     std::vector<char> names;
     try {
         names.resize((size_t)cap * 256);
@@ -7648,14 +7649,8 @@ bool reagentStoreCensusEx(UtStoreCensus* out, char (*emptyOut)[256], int cap,
         return false;
     }
     out->pageRecords = (int)g_pageRecords->size();
-    static const int kMaxNodes = 4096;
     std::vector<const void*> nodes;
-    try {
-        nodes.resize(kMaxNodes);
-    } catch (...) {
-        return false;
-    }
-    const int n = reagentCollectNodes(&nodes[0], kMaxNodes);
+    const int n = utCollectAll(&nodes, reagentCollectNodes);   // every node, however many
     if (n < 0) return false;   // inconclusive: the probe must not act on this
     out->nodes = n;
     for (int i = 0; i < n; ++i) {
@@ -7837,6 +7832,10 @@ int reagentHeldTotal(const char* record, int* fromTable, int* fromMap) {
 // this is asked once per load, only for the record that already matched the mark by name.
 int reagentSafeStack(const GdItem* item) {
     return safeStackOf(item);
+}
+
+int reagentPageRecordCount() {
+    return (int)InterlockedCompareExchange(&g_pageRecordCount, 0, 0);
 }
 
 bool reagentTransferOpen() {
@@ -8181,61 +8180,55 @@ void switchPage(int delta) {
          cur, next, g_pageLabel);
 }
 
-bool reagentHandleMessage(unsigned int msg, WPARAM wParam, LPARAM lParam, LRESULT* result) {
-    (void)lParam;
+// [keys] editor_open bound to a key: the EDIT button's latch (panelEditKey), one INFO line per
+// press (an auto-repeat is consumed with nothing more). False = not the mod's key (no pad drawn).
+static bool editorOpenKey(const UtKeys& keys, bool repeat) {
+    if (repeat) return panelButtonsDrawnRecently();
+    const int g = panelEditKey();
+    if (g == -3) return false;
+    char text[40];
+    utKeyText(keys.editorOpen, text, sizeof(text));
+    if (g >= 0)
+        logI("keys: editor_open=%s -> the layout editor, after the last collection group %d \"%s\" "
+             "(the materials page has no layout to edit)", text, g, liveGroupLabel(g));
+    else if (g == -1)
+        logI("keys: editor_open=%s -> the layout editor", text);
+    else
+        logI("keys: editor_open=%s -> the layout editor: the live pager refused the last collection "
+             "group, so nothing opens", text);
+    return true;
+}
+
+// One action [keys] matched, behind the gates the hotkeys always had: the caravan open and the
+// Crafting Materials page the caravan page actually on screen (caravan+0x1728 == 3), so a key is
+// never eaten that was meant for another tab. True = consumed.
+static bool keysAct(int action, const UtKeyEvent& ev, const UtKeys& keys, bool repeat) {
     if (!g_cfg.pageHotkeys) return false;
     if (!InterlockedCompareExchange(&g_transferOpenNow, 0, 0)) return false;
-    // Nothing is consumed unless the Crafting Materials page is the caravan page actually on
-    // screen (caravan+0x1728 == 3), so the hotkeys never eat a keystroke meant for another tab.
     if (!liveMaterialsVisible()) return false;
-    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
-    // While live paging is armed the same keys act IMMEDIATELY and nothing is written
-    // to engine memory outside the game thread - the message thread only moves two integers and
-    // the next GameEngine::Update applies the layout.
+    // While live paging is armed the same keys act IMMEDIATELY and nothing is written to engine
+    // memory outside the game thread - the message thread only moves two integers and the next
+    // GameEngine::Update applies the layout. A step acts on its DOWN only (an auto-repeat is one
+    // more DOWN).
     if (liveActive()) {
-        // PageUp / PageDown act on the KEYDOWN only (an auto-repeat is one more KEYDOWN); the
-        // KEYUP never steps again - it is only swallowed, and only when its KEYDOWN was consumed
-        // here, so one Ctrl+PageDown is one button and one PageDown one window of rows, and a key
-        // the game saw go down also reaches it going up. Bit 0 = PageUp, bit 1 = PageDown: the
-        // last KEYDOWN of that key was consumed. The WindowProc's thread only.
-        static unsigned s_pageKeyEaten = 0;
-        bool consumed = false;
-        if (msg == WM_MOUSEWHEEL) {
-            const int ticks = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
-            consumed = liveHandleWheel(ticks, ctrl);
-        } else if (msg == WM_KEYDOWN) {
-            consumed = liveHandleKey((int)wParam, ctrl);
-            if (wParam == VK_PRIOR || wParam == VK_NEXT) {
-                const unsigned bit = wParam == VK_PRIOR ? 1u : 2u;
-                s_pageKeyEaten = consumed ? (s_pageKeyEaten | bit) : (s_pageKeyEaten & ~bit);
-            }
-        } else if (msg == WM_KEYUP && (wParam == VK_PRIOR || wParam == VK_NEXT)) {
-            const unsigned bit = wParam == VK_PRIOR ? 1u : 2u;
-            consumed = (s_pageKeyEaten & bit) != 0;
-            s_pageKeyEaten &= ~bit;
+        switch (action) {
+            case kUtKeyActRowsWheel: return liveHandleWheel(ev.ticks, false);
+            case kUtKeyActButtonWheel: return liveHandleWheel(ev.ticks, true);
+            case kUtKeyActEditorOpen: return editorOpenKey(keys, repeat);
+            default: return liveHandleStep(action);
         }
-        if (consumed) {
-            if (result) *result = 0;
-            return true;
-        }
-        return false;
     }
 
-    if (!ctrl) return false;
+    // The fallback (the session's tab did not arm): the button actions switch the built-once page.
     int delta = 0;
-    if (msg == WM_MOUSEWHEEL) {
-        const int ticks = GET_WHEEL_DELTA_WPARAM(wParam) / WHEEL_DELTA;
-        if (ticks == 0) return false;
-        delta = ticks > 0 ? -1 : 1;  // wheel up = the previous page
-    } else if (msg == WM_KEYDOWN) {
-        if (wParam == VK_PRIOR) delta = -1;
-        else if (wParam == VK_NEXT) delta = 1;
-        else return false;
-    } else if (msg == WM_KEYUP) {
-        if (wParam != VK_PRIOR && wParam != VK_NEXT) return false;
-        if (result) *result = 0;
-        return true;  // swallow the matching up so the game never sees half a keystroke
+    if (action == kUtKeyActButtonWheel) {
+        if (ev.ticks == 0) return false;
+        delta = ev.ticks > 0 ? -1 : 1;  // wheel up = the previous page
+    } else if (action == kUtKeyActButtonPrev) {
+        delta = -1;
+    } else if (action == kUtKeyActButtonNext) {
+        delta = 1;
     } else {
         return false;
     }
@@ -8243,7 +8236,55 @@ bool reagentHandleMessage(unsigned int msg, WPARAM wParam, LPARAM lParam, LRESUL
         switchPage(delta);
     } catch (...) {
     }
-    if (result) *result = 0;
+    return true;
+}
+
+bool reagentHandleMessage(unsigned int msg, WPARAM wParam, LPARAM lParam, LRESULT* result) {
+    // Only the messages a [keys] binding can name: the keys, the wheel, the middle and X buttons.
+    switch (msg) {
+        case WM_KEYDOWN:
+        case WM_KEYUP:
+        case WM_SYSKEYDOWN:
+        case WM_SYSKEYUP:
+        case WM_MOUSEWHEEL:
+        case WM_MBUTTONDOWN:
+        case WM_MBUTTONUP:
+        case WM_XBUTTONDOWN:
+        case WM_XBUTTONUP: break;
+        default: return false;
+    }
+    // The bindings in force (ut_keys.h, derived when the settings were read), copied once: an edit
+    // lands between two messages. WM_SYSKEY* only when some key binding names Alt or F10.
+    const UtKeys keys = g_cfg.keys;
+    const UtKeyEvent ev = utKeyDecode(msg, (unsigned long long)wParam, utKeysWantSys(keys));
+    if (ev.what == kUtKeyEvNone) return false;
+    const LRESULT done = (msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP) ? TRUE : 0;
+
+    // THE KEYUP RULE, per VK (HANDOFF section 12): a DOWN the mod consumed sets its VK's bit, one
+    // it let through clears it, and the UP of that VK is swallowed only when its bit is set - so
+    // one Ctrl+PageDown is one button, one PageDown one window of rows, a key the game saw go down
+    // also reaches it going up, and a released modifier in between does not matter. The UP never
+    // acts. Mouse buttons bound to a step (WM_MBUTTONUP / WM_XBUTTONUP) the same. The WindowProc's
+    // thread only.
+    static UtKeyEaten s_eaten = {};
+    if (ev.what == kUtKeyEvUp) {
+        if (!utKeyEatUp(&s_eaten, ev.code)) return false;
+        if (result) *result = done;
+        return true;
+    }
+
+    // The modifiers at the message's own time.
+    const int mods = utKeyModsOf((GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                                 (GetKeyState(VK_SHIFT) & 0x8000) != 0,
+                                 (GetKeyState(VK_MENU) & 0x8000) != 0);
+    const int action = ev.what == kUtKeyEvWheel ? utKeyFind(keys, kUtKeySiteWheel, 0, mods)
+                                                : utKeyFind(keys, kUtKeySiteKey, ev.code, mods);
+    const bool repeat = ev.what == kUtKeyEvDown && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) &&
+                        (lParam & (1 << 30)) != 0;
+    const bool consumed = action != kUtKeyActNone && keysAct(action, ev, keys, repeat);
+    if (ev.what == kUtKeyEvDown) utKeyEatDown(&s_eaten, ev.code, consumed);
+    if (!consumed) return false;
+    if (result) *result = done;
     return true;
 }
 

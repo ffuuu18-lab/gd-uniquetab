@@ -57,9 +57,10 @@ const char* const kRelicClass = "ItemArtifact";
 const char* const kFormulaClass = "ItemArtifactFormula";
 const char* const kRelicPath = "records/items/gearrelic/";
 
-// The curated inclusion list: records the four shipped rules drop but a player really owns.
+// The curated inclusion list: records the rank rule drops (neither Epic nor Legendary) but a
+// player really owns, admitted at their own classification.
 const char* const kExtraRecords[] = {
-    "records/endlessdungeon/items/a001_ring.dbr",       // Leovinus' Ring
+    "records/endlessdungeon/items/a001_ring.dbr",       // Leovinus' Ring (Common)
 };
 // The developer test records that share that folder; never collectible.
 const char* const kExtraExclude[] = {
@@ -67,12 +68,16 @@ const char* const kExtraExclude[] = {
     "records/endlessdungeon/items/q001_torso.dbr",
 };
 
-// Where a record a MOD layer wins is never collected from - the custom-view replacement of the
-// records/items/ path rule: Crate's test records, creatures, test maps, the endless dungeon's
-// script entities, and monster-worn gear wherever a mod keeps it.
+// Where a record is never collected from, in the base game and a mod layer alike: Crate's test
+// records, creatures (the gear NPCs wear), test maps, and monster-worn gear wherever it is kept.
+// Anywhere else a record of the right class and rank is collected - the base game keeps a few
+// real items outside records/items/ too (the Lokarr set in records/storyelements/signs/, the
+// quest rewards in records/storyelements/rewards/, the Totally Normal Shield's three versions
+// among the Shattered Realm's script entities, records/endlessdungeon/scriptentities/
+// portal_s01..03.dbr - the folder's other records are ScriptEntity and Decoration props, which
+// no rule collects).
 const char* const kJunkPrefix[] = {
     "records/sandbox/", "records/creatures/", "records/mod_testgrounds/",
-    "records/endlessdungeon/scriptentities/",
 };
 const char* const kJunkPart = "/enemygear/";
 
@@ -144,16 +149,12 @@ bool isJunk(const std::string& key) {
     return key.find(kJunkPart) != std::string::npos;
 }
 
-// The four shipped rules. modRule: the record is a mod layer's, so the junk list replaces the
-// records/items/ path rule.
+// The shipped rules, the same for every layer: not in a junk folder (isJunk), no BLANK in the
+// FileDescription (the designer templates), and a name tag the view's text resolves (a
+// blueprint's: the crafted item's).
 bool isShipped(const std::string& key, const ArzRecord& rec, const std::string& cls,
-               const GameData& g, bool modRule) {
-    if (modRule) {
-        if (isJunk(key)) return false;
-    } else {
-        if (!startsWith(key, "records/items/")) return false;
-        if (startsWith(key, "records/items/enemygear/")) return false;
-    }
+               const GameData& g) {
+    if (isJunk(key)) return false;
     std::string fd = rec.str("FileDescription");
     for (char& c : fd) if (c >= 'a' && c <= 'z') c = char(c - 'a' + 'A');
     if (fd.find("BLANK") != std::string::npos) return false;
@@ -166,7 +167,9 @@ bool isShipped(const std::string& key, const ArzRecord& rec, const std::string& 
     return false;
 }
 
-// 'items/<rest>' -> Items.arc entry '<rest>'; 'ui/<rest>' -> UI.arc entry '<rest>'.
+// 'items/<rest>' -> Items.arc entry '<rest>'; 'ui/<rest>' -> UI.arc entry '<rest>';
+// 'level art/<rest>' -> Level Art.arc entry '<rest>' (the engine's rule: the first segment names
+// the archive).
 bool texExists(const GameData& g, const std::string& bitmap) {
     if (bitmap.empty()) return false;
     std::string b = bitmap;
@@ -177,6 +180,7 @@ bool texExists(const GameData& g, const std::string& bitmap) {
     for (char& c : head) if (c >= 'A' && c <= 'Z') c = char(c - 'A' + 'a');
     if (head == "items" && g.items->contains(rest)) return true;
     if (head == "ui" && g.ui->contains(rest)) return true;
+    if (head == "level art" && g.levelArt && g.levelArt->contains(rest)) return true;
     int w = 0, h = 0;
     return g.layered() && g.view->texSize(bitmap, w, h);
 }
@@ -225,6 +229,7 @@ GameData::~GameData() {
     delete db;
     delete items;
     delete ui;
+    delete levelArt;
 }
 
 bool GameData::layered() const { return view && !view->empty(); }
@@ -236,10 +241,11 @@ bool GameData::record(const std::string& name, ArzRecord& out) const {
 
 bool GameData::load(const std::string& gameDir, const std::string& lang, std::string* error,
                     const ModView* layers) {
-    delete db; delete items; delete ui;
+    delete db; delete items; delete ui; delete levelArt;
     db = new ArzDatabase;
     items = new ArcSet;
     ui = new ArcSet;
+    levelArt = nullptr;
     view = layers;
     tags.clear();
     modTags = 0;
@@ -247,6 +253,9 @@ bool GameData::load(const std::string& gameDir, const std::string& lang, std::st
     if (!loadTextTags(gameDir, lang, tags, error)) return false;
     if (!items->load(gameDir, "resources\\Items.arc", error)) return false;
     if (!ui->load(gameDir, "resources\\UI.arc", error)) return false;
+    // optional: a game folder without it (a trimmed copy) only leaves those few icons unfound
+    levelArt = new ArcSet;
+    if (!levelArt->load(gameDir, "resources\\Level Art.arc", nullptr)) { delete levelArt; levelArt = nullptr; }
     if (!layered()) return true;
     // The mod's own names on top of the base game's, in its load order (the last file wins):
     // its English set first, then its set in this language over it, so a tag the translation
@@ -359,9 +368,10 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
     std::size_t unstorable = 0;
     std::string unstorableSample;
     ArzRecord rec;
-    // One record through the rule. modLayer: a mod layer won it, so the mod rules apply - the
-    // junk list for the path, an unknown class as "other" (Epic/Legendary only), and a
-    // classification catalogue.bin cannot store skipped instead of failing the generation.
+    // One record through the rule. modLayer: a mod layer won it, so the mod rules apply - an
+    // unknown class as "other" (Epic/Legendary only), and a classification catalogue.bin cannot
+    // store skipped instead of failing the generation. The path rule (the junk list) is every
+    // layer's.
     auto consider = [&](const ArzArchive& a, const ArzEntry& e, bool modLayer) -> bool {
         const std::string& key = e.key;
         if (inList(key, kExtraExclude, sizeof kExtraExclude / sizeof *kExtraExclude)) return true;
@@ -388,10 +398,10 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
         if (isExtra) {
             admit = true;
         } else if (isRelic || epicLeg || modAugment || isFormula) {
-            admit = isShipped(key, rec, cls, g, modLayer);
+            admit = isShipped(key, rec, cls, g);
         } else if (collectMi && isMiCandidate(key, cls, cla, rec.str("FileDescription"))) {
             // a monster infrequent (collect_mi=1): the same shipped filter / mod rule
-            admit = isShipped(key, rec, cls, g, modLayer);
+            admit = isShipped(key, rec, cls, g);
         }
         // Without collect_mi, Rare equipment (monster infrequents, faction and crafted rares) is
         // not part of the collection; with it (the default), every such record is.

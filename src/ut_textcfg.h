@@ -416,7 +416,7 @@ inline int utLabelPick(const std::vector<std::string>& lines, int limitPx, UtTex
 struct UtTextBuiltin { const char* id; const char* caption; const char* name; };
 
 // The 26 pad buttons in pad order (vanilla, the 24 slot groups, owned), then the generator's own
-// group. Captions and names are 1.1.0's (kButtons, the G line labels, the groups file's other). The paged pad's NEXT button (id `next`) is utTextBuiltinNext, outside the table.
+// group. Captions and names are 1.1.0's (kButtons, the G line labels, the groups file's other). The paged pad's NEXT button (id `next`) is utTextBuiltinNext and the layout editor's EDIT button (id `edit`) utTextBuiltinEdit, both outside the table.
 inline const UtTextBuiltin* utTextBuiltins(std::size_t* count) {
     static const UtTextBuiltin kTable[] = {
         {"vanilla", "MAT", "Crafting Materials"},
@@ -446,11 +446,18 @@ inline const UtTextBuiltin* utTextBuiltinNext() {
     return &kNext;
 }
 
+// The EDIT button (the layout editor, [advanced] edit_button): caption.edit.
+inline const UtTextBuiltin* utTextBuiltinEdit() {
+    static const UtTextBuiltin kEdit = {"edit", "EDIT", "Layout editor"};
+    return &kEdit;
+}
+
 inline const UtTextBuiltin* utTextBuiltinById(const std::string& id) {
     std::size_t n = 0;
     const UtTextBuiltin* t = utTextBuiltins(&n);
     for (std::size_t i = 0; i < n; ++i) if (id == t[i].id) return &t[i];
     if (id == utTextBuiltinNext()->id) return utTextBuiltinNext();
+    if (id == utTextBuiltinEdit()->id) return utTextBuiltinEdit();
     return nullptr;
 }
 
@@ -1159,6 +1166,7 @@ inline UtTextPad utTextResolvePad(const UtTextContext& c, const std::vector<UtTe
     }
     cap("owned", "OWN");
     cap("next", ">>");
+    cap("edit", "EDIT");
     std::vector<bool> derived;
     for (UtTextSource s : p.capSrc) derived.push_back(s == kSrcDerived);
     utTextDistinctDerived(p.caps, derived);

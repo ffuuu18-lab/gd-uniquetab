@@ -119,10 +119,13 @@ bool basemodsOnCommandLine();
 void generationLockAcquire();
 void generationLockRelease();
 
-// The user's grid in force for one view's cover, record px, window-local (ut::utLayoutGridRect).
+// The user's grid in force for one view's cover, record px, window-local (ut::utLayoutGridRect),
+// or the derived grid at a zoom (ut::utLayoutPlatesGrid: a zoom is a layout of its own).
 struct LayoutGrid {
     int x = 0, y = 0, w = 0, h = 0;
-    std::string text;   // the canonical override, "grid_438x627=105,120,333,460" (the hash input)
+    std::string text;   // the canonical override, "grid_438x627=105,120,333,460" (the hash input);
+                        // at a zoom "... zoom=150" follows
+    int zoom = 100;     // zoom_pct: the cells are magnified (ut::utZoomFit per cell size)
 };
 
 // What a layout plate set is, before anything is painted: read from the view's own outputs
@@ -130,7 +133,8 @@ struct LayoutGrid {
 struct LayoutPlan {
     UiGeometry geo;                 // the P line; x0/y0 moved to the user grid's origin
     int rowGap = 2;                 // the F line's
-    std::vector<CellGrid> cells;    // every distinct cell size, fitted to the user grid (cap: the F line's frame count)
+    std::vector<CellGrid> cells;    // every distinct cell size, fitted to the user grid (cap: the F line's frame count);
+                                    // at a zoom the magnified cells, each clamped to fit, distinct, ascending
     std::string hash;               // eight hex digits: the low half of FNV-1a 64 over the inputs
     std::vector<std::string> names; // the leaf names, one per cell, ascending like `cells`
 };

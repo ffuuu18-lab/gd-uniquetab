@@ -10,6 +10,8 @@
 //   utGridFit                    rectangle + cell size -> cols x rows under the frame's box cap
 //                                (THE rule: pages_gen's grid(), verbatim)
 //   utFrameBoxes                 the view's frame box count: the cover's fit, 160..512
+//   utZoomCell / utZoomFit       zoom_pct: a cell magnified, and the per-group clamp that keeps
+//                                one magnified cell inside the grid rectangle in force
 //   utLatticeFrame               the frame the plate painter draws under one cell of that fit
 //                                (every cell of it: the lattice has the page's cols x rows)
 //   utPadFit                     rectangle + N buttons -> cols x rows, cell size, caption size
@@ -27,13 +29,15 @@
 //                                force, drawn where it is over the page's boxes; the log's text
 //                                (utMatPadText)
 //   utLayoutFromSource           the P line + the [layout] values + the pad keys -> the layout
-//   utLiveGroupGrid / utRowKeep  a group's cols x rows on the live page, the row across a change
+//   utLiveGroupGrid / utRowKeep  a group's cols x rows (and its cell, at the zoom) on the live
+//                                page, the row across a change
 //   utLayoutGridRect             the grid in force for the generator (the plates it paints)
 //   utLayoutCanonical            a grid override as the layout plates' hash reads it
 //   utLayoutPlatesGrid           what the layout-plates thread paints: the grid in force with the
 //                                screen keys pinned (no screen known there), and its canonical text
 //   utPlateSetChoice            which plate set the page shows: the layout plates only under the
-//                                live page's user grid, the derived ones only under its derived grid
+//                                live page's user grid or zoom, the derived ones only under its
+//                                derived grid at zoom 100 (utLiveGridKind)
 //
 // The derived rectangles are what 1.1.0 draws: utPadDefault / utLabelDefault give the default pad
 // and label, the grid's is the view's usable rectangle (the P line of uniq-groups.txt).
@@ -195,6 +199,66 @@ inline int utFrameBoxes(int coverW, int coverH, const int* cellW, const int* cel
     if (best < kUtFrameBoxFloor) best = kUtFrameBoxFloor;
     if (best > kUtFrameBoxMax) best = kUtFrameBoxMax;
     return best;
+}
+
+// ---- the zoom (zoom_pct, [layout]) -------------------------------------------------------------
+// The item icons drawn bigger: every cell in force is the generated cell times zoom / 100,
+// rounded, and the grid is fitted again over the same rectangle (fewer cols x rows, the row
+// window scrolls further). The engine draws a box's bitmap STRETCHED onto the box widget's
+// rectangle, so the live side writes that rectangle's w,h from the texture times the zoom
+// (ut_live.cpp showBox) and the icon, its hover, tooltip and pick-up area follow. 100 = the cell
+// as generated and nothing written: exactly the page without the key. Below 100 is not offered
+// (a smaller cell would want more boxes than the frame holds).
+const int kUtZoomMin = 100;
+const int kUtZoomMax = 200;
+const int kUtZoomDefault = 100;
+
+// A zoom as the layout reads it: 0 (a source that names none) and anything below the range is
+// 100, anything above it 200. The settings file refuses a value outside 100..200 with a WARN
+// before it gets here; this only keeps the arithmetic safe.
+inline int utZoomPct(int pct) {
+    if (pct < kUtZoomMin) return kUtZoomMin;
+    if (pct > kUtZoomMax) return kUtZoomMax;
+    return pct;
+}
+
+// One cell side at a zoom: round(cell * pct / 100), half up, at least 1. 100 is the cell itself.
+inline int utZoomCell(int cell, int pct) {
+    if (cell < 1) cell = 1;
+    pct = utZoomPct(pct);
+    if (pct == 100) return cell;
+    return (cell * pct + 50) / 100;
+}
+
+// One group's zoom in force: the key's, lowered (never below 100) until ONE magnified cell fits
+// the grid rectangle `r` - zoomed width <= r.w and zoomed height + rowGap <= r.h, so utGridFit
+// gives at least one column and one row by its own arithmetic and no box overflows the
+// rectangle or the plate. The derived grids of vanilla (333 x 552) and Reign of Terror
+// (962 x 584) hold every cell at 200; a small user grid lowers the zoom of its tall groups only.
+// A cell that does not fit even at 100 stays at 100 (the resolver's own rule decides that grid).
+struct UtZoomFit {
+    int pct;            // the zoom in force for this cell, kUtZoomMin..the key's
+    int cellW, cellH;   // the cell in force: utZoomCell of the generated one at `pct`
+    int clamped;        // 1 = `pct` is below the key's (the cell would not fit the rectangle)
+};
+inline UtZoomFit utZoomFit(const UtRect& r, int cellW, int cellH, int rowGap, int zoomPct) {
+    if (cellW < 1) cellW = 1;
+    if (cellH < 1) cellH = 1;
+    if (rowGap < 0) rowGap = 0;
+    const int key = utZoomPct(zoomPct);
+    UtZoomFit f;
+    f.pct = key;
+    while (f.pct > kUtZoomMin &&
+           (utZoomCell(cellW, f.pct) > r.w || utZoomCell(cellH, f.pct) + rowGap > r.h))
+        --f.pct;
+    f.cellW = utZoomCell(cellW, f.pct);
+    f.cellH = utZoomCell(cellH, f.pct);
+    f.clamped = f.pct < key ? 1 : 0;
+    return f;
+}
+// The zoom in force alone.
+inline int utZoomEff(const UtRect& r, int cellW, int cellH, int rowGap, int zoomPct) {
+    return utZoomFit(r, cellW, cellH, rowGap, zoomPct).pct;
 }
 
 // ---- the painted lattice (the cover plates, src\gen\plate_gen.cpp and tools\make_plates.py) ----
@@ -1123,6 +1187,10 @@ struct UtLayoutSource {
     int screenKnown;          // 1 = the four below are this frame's
     int screenW, screenH;     // the canvas, client px
     float originX, originY;   // the materials window's screen origin, client px
+    // zoom_pct (0 = none named = 100). The resolver does not read it - a user grid is judged
+    // against the generated largest cell, the zoom is clamped per group instead (utZoomFit) -;
+    // the layout plates do (utLayoutPlatesGrid: a zoom is a layout of its own).
+    int zoom;
 };
 
 // Builds the UtLayoutInput (the user rectangles land in `userStore`, which must outlive `in`) and
@@ -1193,14 +1261,35 @@ inline int utLayoutIgnoredText(int part, const char* cover, const char* value, c
 
 // One group's grid on the live page: the generated cols x rows (the G line) while the derived
 // grid is in force, utGridFit over the user's rectangle under the live frame's box count when a
-// user grid is.
+// user grid is. AT A ZOOM (zoomPct above 100): the group's zoom in force is utZoomFit over the
+// grid in force (derived or user), and when it is above 100 the grid is utGridFit of the
+// magnified cell over that rectangle under the same cap - the G line's cols x rows are an answer
+// for the cell as generated only. A group whose zoom comes out at 100 (the key 100, or clamped
+// all the way down) gets exactly the grid it has without the key. `zoomed` (optional) receives
+// the zoom and the cell in force.
 inline UtGrid utLiveGroupGrid(const UtLayout& lay, int genCols, int genRows, int cellW, int cellH,
-                              int rowGap, int cap) {
+                              int rowGap, int cap, int zoomPct = kUtZoomDefault,
+                              UtZoomFit* zoomed = nullptr) {
+    const UtZoomFit z = utZoomFit(lay.rect[kUtLayGrid], cellW, cellH, rowGap, zoomPct);
+    if (zoomed) *zoomed = z;
+    if (z.pct > kUtZoomMin)
+        return utGridFit(lay.rect[kUtLayGrid], z.cellW, z.cellH, rowGap, cap < 1 ? 1 : cap);
     if (!lay.user[kUtLayGrid]) {
         const UtGrid g = {genCols < 1 ? 1 : genCols, genRows < 1 ? 1 : genRows, 0};
         return g;
     }
     return utGridFit(lay.rect[kUtLayGrid], cellW, cellH, rowGap, cap < 1 ? 1 : cap);
+}
+
+// The editor's smallest grid at a zoom (ut_layoutedit.h utEditMinSizes is handed the largest
+// cell): the view's largest cell magnified as the page shows it in `grid`, the grid in force -
+// utZoomFit's cell, so it never exceeds that rectangle and opening the editor never refuses the
+// grid it starts from. At 100 the generated largest cell, as without the key.
+inline void utZoomLargestCell(const UtRect& grid, int maxCellW, int maxCellH, int rowGap,
+                              int zoomPct, int* w, int* h) {
+    const UtZoomFit z = utZoomFit(grid, maxCellW, maxCellH, rowGap, zoomPct);
+    if (w) *w = z.pct > kUtZoomMin ? z.cellW : maxCellW;
+    if (h) *h = z.pct > kUtZoomMin ? z.cellH : maxCellH;
 }
 
 // The first visible ITEM stays the first visible item across a cols change: row r of `oldCols`
@@ -1248,6 +1337,11 @@ inline int utLayoutCanonical(const char* value, char* out, size_t cap) {
 // the live page before its first draw). `*rect` = the grid in force; `canon` = the user grid_
 // value's canonical text ("" for none). Returns 1 when the USER's grid is in force and has a
 // canonical text: the thread then paints (or finds on disk) the set "grid_<cover>=<canon>".
+// A ZOOM IS A LAYOUT OF ITS OWN: with src.zoom above 100 the answer is 1 for the derived grid
+// too, `canon` is the grid in force's "x,y,w,h" (the user's canonical text, or the derived
+// rectangle's) followed by " zoom=<pct>", and the set is painted for the magnified cells
+// (gen::planLayoutPlates, LayoutGrid::zoom). At 100 the text and the answer are the old ones, so
+// every set already on disk keeps its hash.
 inline int utLayoutPlatesGrid(const UtLayoutSource& src, UtRect* rect, char* canon, size_t cap) {
     UtLayoutSource s = src;
     s.screenKnown = 0;
@@ -1260,8 +1354,23 @@ inline int utLayoutPlatesGrid(const UtLayoutSource& src, UtRect* rect, char* can
     char* out = (canon && cap) ? canon : tmp;
     const size_t n = (canon && cap) ? cap : sizeof(tmp);
     out[0] = 0;
-    if (!user) return 0;
-    return utLayoutCanonical(s.grid, out, n) > 0 ? 1 : 0;
+    const int zoom = utZoomPct(s.zoom);
+    if (zoom == kUtZoomMin) {
+        if (!user) return 0;
+        return utLayoutCanonical(s.grid, out, n) > 0 ? 1 : 0;
+    }
+    int len = user ? utLayoutCanonical(s.grid, out, n) : utRectFormat(r, out, n);
+    if (len <= 0) len = utRectFormat(r, out, n);
+    if (len <= 0 || (size_t)len >= n) {
+        out[0] = 0;
+        return 0;
+    }
+    const int k = snprintf(out + len, n - (size_t)len, " zoom=%d", zoom);
+    if (k < 0 || (size_t)(len + k) >= n) {
+        out[0] = 0;
+        return 0;
+    }
+    return 1;
 }
 
 // ---- the plate set under the grid in force ----------------------------------------------------
@@ -1274,7 +1383,9 @@ inline int utLayoutPlatesGrid(const UtLayoutSource& src, UtRect* rect, char* can
 // user pad or label at the measured scale - and the user grid with it. The plate follows the
 // boxes: the layout plates only while the live grid is the user's, the derived plates only while
 // it is the derived one; a user grid with no set of its own (not published yet, being painted,
-// refused by the thread) shows the plain cover, never a lattice painted for another grid.
+// refused by the thread) shows the plain cover, never a lattice painted for another grid. A zoom
+// above 100 counts as "the user's" here (utLiveGridKind): the derived plates are painted for the
+// generated cells, so under zoomed boxes only the zoom's own set (or the plain cover) is shown.
 // ut_plate.cpp plateNames compares the two (layoutPlatesState against liveLayoutGet) and
 // plateLayoutEdge renames the cached plates when either side changes.
 enum UtPlateSet {
@@ -1285,11 +1396,18 @@ enum UtPlateSet {
 // `layoutSet`: the thread published a user grid's set for this view and cover; `layoutReady`: its
 // files are on disk. `liveGrid`: -1 = the live layout is not resolved yet (no UI scale or no P
 // line loaded: no box is fitted to any grid, the thread's answer stands, as before), 0 = the live
-// grid is the derived one, 1 = it is the user's.
+// grid is the derived one at zoom 100, 1 = a layout of its own (the user's grid, or a zoom).
 inline int utPlateSetChoice(int layoutSet, int layoutReady, int liveGrid) {
     if (liveGrid == 0) return kUtPlateSetDerived;   // never _L under the derived grid
     if (!layoutSet) return liveGrid > 0 ? kUtPlateSetPlain : kUtPlateSetDerived;
     return layoutReady ? kUtPlateSetLayout : kUtPlateSetPlain;
+}
+
+// The live page's side of utPlateSetChoice: 1 = a layout of its own - the user's grid in force,
+// or any zoom above 100 (the cells in force are not the cells the derived plates were painted
+// for) -, 0 = the derived grid at 100.
+inline int utLiveGridKind(int userGrid, int zoomPct) {
+    return (userGrid || utZoomPct(zoomPct) > kUtZoomMin) ? 1 : 0;
 }
 
 inline const char* utPlateSetName(int set) {

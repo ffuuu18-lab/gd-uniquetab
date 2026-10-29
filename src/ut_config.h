@@ -11,7 +11,7 @@
 // it, the file the mod writes is RENDERED from it (configRender), and the test suite derives what
 // it expects from it. Adding a setting means adding one row.
 //
-// THE SHAPE (ini_version 42). uniquetab.ini shows four keys ([general]: enabled, collect_mi,
+// THE SHAPE (ini_version 44). uniquetab.ini shows four keys ([general]: enabled, collect_mi,
 // tooltip_mark, log_level) and the [layout] lines the in-game editor writes. 40 added collect_mi
 // (the monster infrequents; default 1, a 39 file gains collect_mi=1, a 40 file keeps what it
 // says). 41 moved max_per_record and rescue into the [advanced] blob as hidden rows marked
@@ -20,12 +20,28 @@
 // a LIVE line there. rescue still writes itself back to 0 when its run ends (configPersistInt),
 // which comments it again. 42 made a custom
 // game's own file a complete file of this same shape (PER CUSTOM GAME below); the main file only
-// gains the new number. Every other
+// gains the new number. 44 added zoom_pct, the one hidden row of [layout] (a commented line under
+// the section's blurb; refused outside 100..200, never clamped: kUtCfgRefuse), and [keys] (THE
+// KEYS below): a 43 file is rewritten once and gains the zoom line and the seven commented [keys]
+// rows. Every other
 // key that is still parsed is a HIDDEN row (kUtCfgHidden): it is written as one commented line of
 // the [advanced] blob at the end of the file - ";key=default<tabs>; what it does" - and a hidden
 // key the user sets to a value other than its default is written LIVE in the same place (the ';'
 // gone, its description kept). The persist keeps that shape: a hidden key written back at its
-// default is commented again.
+// default is commented again. A hidden row of another section ([keys]) is written the same way in
+// its own section, on the blob's column.
+//
+// THE KEYS. [keys], between [layout] and [advanced], holds seven hidden text rows - rows_up,
+// rows_down, button_prev, button_next, rows_wheel, button_wheel, editor_open - whose grammar,
+// refusals and matching are ut_keys.h's. Each row's check is utKeyParse for its action: a value
+// it refuses is ignored with one WARN per edit naming the reason, and the default stays; an empty
+// value is the default. The parse then DERIVES UtConfig::keys (ut_keys.h UtKeys, a POD) from the
+// seven texts under the settings lock, with the conflict pass (two identical chords of one site:
+// the later row is none, one WARN naming both), so the window procedure reads plain ints
+// (g_cfg.keys.rowsUp ...) and a change bumps configGeneration. MAIN FILE ONLY, like journal_dir:
+// a custom game's file never renders the section, a [keys] line there is ignored with one WARN,
+// and while a custom game is active g_cfg's [keys] texts and bindings are still the main file's
+// (re-read within a second as ever).
 //
 // GEOMETRY UNITS. plate_label_size and the [layout] rectangles are RECORD px - the caravan
 // window's own coordinates, which the mod multiplies by the UI scale it measures at run time. The
@@ -60,9 +76,11 @@
 // journal_prune and layout_edit start at 0). NOTHING IS INHERITED afterwards: while the view is
 // active that file is the whole configuration - the main file is not consulted, and a key the
 // game's file does not name is the compiled default (never the main file's value). The one
-// exception is journal_dir, read once at start-up from the main file before any custom game is
+// exceptions are journal_dir, read once at start-up from the main file before any custom game is
 // known (it is where the mods\<name>\ journal folders live): a game's file shows it as a
-// commented line saying so, and a live journal_dir line there is refused with one WARN. Every
+// commented line saying so, and a live journal_dir line there is refused with one WARN; and the
+// [keys] rows, which a game's file does not show at all (a line there: one WARN, ignored) and
+// which stay the main file's while the game is active. Every
 // key written back (the one-shots, the editor's SAVE) goes to the ACTIVE view's file
 // (configPersistStr decides), journal_dir always to the main one. Both files are polled once a
 // second: the game's is the one in force, the main file's stamp is still tracked so the vanilla
@@ -93,11 +111,13 @@
 
 #include <string>
 
+#include "ut_keys.h"
+
 // Bumped whenever the key set changes. A file written by an older build is MERGED, never reset:
 // every key that still exists keeps the user's value, new keys take their default, keys this
 // build no longer has are dropped with one log line naming them, and the file is rewritten in the
 // current layout. See configReload().
-#define UT_INI_VERSION 42
+#define UT_INI_VERSION 44
 
 // One family's lines, in file order. Plain bytes, zero-filled when unused, so UtConfig stays a
 // POD that the change test can memcmp.
@@ -197,10 +217,19 @@ struct UtConfig {
     // 1 = outline the grid, the pad and the label rectangles in force, with their numbers and
     // each group's cols x rows, so a [layout] key can be set by eye.
     int layoutOutline = 0;
+    // 1 = an EDIT button on the pad, drawn just before OWN, opens the layout editor; 0 = no
+    // button (the pad re-lays out at the reload; Ctrl+right-click and layout_edit=1 still open it).
+    int editButton = 1;
 
     // ---- [layout] - where the grid, the pad and the label sit, per caravan cover size ----------
     // The largest caption size on the buttons, screen px; the cell bounds it as well.
     int padCaptionMax = 14;
+    // zoom_pct (44): the collection's item icons drawn bigger, in percent - every cell times
+    // zoom / 100, fewer items per screen, the icons magnified. 100..200, 100 = as generated; a
+    // value outside the range is refused (one WARN, 100 kept). A hidden row of [layout], per
+    // settings file like the layout lines. Clamped per group where a small grid cannot hold one
+    // magnified cell (ut_layout.h utZoomFit).
+    int zoomPct = 100;
     // grid_<W>x<H>, pad_<W>x<H>, label_<W>x<H>, padmat_<W>x<H> = x,y,w,h: the user's rectangles
     // for the caravan cover of that size (vanilla: 438x627). padmat_ is the pad on the game's own
     // materials page when the pad in force would cover real material boxes there.
@@ -212,6 +241,19 @@ struct UtConfig {
     // corner, one value for every view and cover; empty = not set (the page's own place).
     char padScreen[64] = {0};     // the canonical value is at most 26 characters; the rest is
     char labelScreen[64] = {0};   // room for blanks typed by hand (never cut into another value)
+
+    // ---- [keys] - the keys and clicks the tab answers to; the MAIN uniquetab.ini only ----------
+    // The seven rows' text as the file says it (trimmed; a refused or empty value is the default),
+    // and the bindings in force, DERIVED from them at the parse (ut_keys.h utKeysDerive: the
+    // conflict pass applied). While a custom game is active both are the main file's.
+    char keyRowsUp[48] = "PageUp";
+    char keyRowsDown[48] = "PageDown";
+    char keyButtonPrev[48] = "Ctrl+PageUp";
+    char keyButtonNext[48] = "Ctrl+PageDown";
+    char keyRowsWheel[48] = "Wheel";
+    char keyButtonWheel[48] = "Ctrl+Wheel";
+    char keyEditorOpen[48] = "Ctrl+RightClick";
+    UtKeys keys;
 
     // ---- [files] -----------------------------------------------------------------------------
     // Where the JOURNAL file lives. Empty = the mod folder (the folder beside the .asi). Only the
@@ -237,7 +279,7 @@ struct UtConfig {
     // every record it drops. The only setting in the mod that deliberately removes entries.
     int journalPrune = 0;
     // 1 (with the caravan open on a collection group) = open the in-game layout editor; set back
-    // to 0 when it opens. Ctrl+right-click on the button pad opens it as well.
+    // to 0 when it opens. The pad's EDIT button and Ctrl+right-click on the pad open it as well.
     int layoutEdit = 0;
 
     // ---- [advanced] - tuning. Every one of these is clamped to the range in its ini line ------
@@ -338,11 +380,15 @@ struct UtCfgKey {
     // default kept), like a word that is not one of `choices`.
     UtCfgValueCheck check;
 };
+// kUtCfgRefuse on a kUtCfgInt row: a value outside [lo, hi] is REFUSED - one WARN, the default
+// kept - instead of clamped (zoom_pct: a typo of 1500 must not become the largest zoom).
 
 enum {
-    kUtCfgHidden = 1,      // a row of the commented [advanced] blob (live only when not default)
-    kUtCfgWhenSet = 4      // a visible line written only while it holds a value (the editor's
+    kUtCfgHidden = 1,      // a commented blob row of its section (live only when not default):
+                           // the [advanced] blob, or one row of [layout] (zoom_pct)
+    kUtCfgWhenSet = 4,     // a visible line written only while it holds a value (the editor's
                            // pad_screen / label_screen); never counted as a missing setting
+    kUtCfgRefuse = 8       // kUtCfgInt: outside the range = refused (the default), not clamped
 };
 
 struct UtCfgSection {
@@ -391,8 +437,8 @@ bool configFamilySet(UtCfgFamilyStore* s, const char* suffix, const char* value)
 const char* configFamilyValue(const UtConfig& c, const char* key);
 
 // ---- PER CUSTOM GAME AND THE STATE FILE (see the top of this file) ---------------------------
-// True for journal_dir, the one key a custom game's own file does not hold (every other row and
-// every family line is a key of both files).
+// True for journal_dir and the seven [keys] rows, the keys a custom game's own file does not hold
+// (every other row and every family line is a key of both files).
 bool configMainOnlyKey(const char* key);
 // The custom game's key of a view name: "reignofterror" for custom-reignofterror and for
 // basemods+custom-reignofterror; "" for vanilla, basemods or anything that is not a legal key.
@@ -408,7 +454,7 @@ void configViewFiles(const wchar_t* mainIni, const char* viewName, std::wstring*
 // The active view changed (ut_generate, before the view's generation reads a setting). A custom
 // game's own file is written when absent (the seed: the main file's values in force), migrated
 // when an older build wrote it, and read; the view's state file is read; g_cfg becomes the game's
-// file (journal_dir from the main one) or, for vanilla/basemods, the main file - with the state
+// file (journal_dir and [keys] from the main one) or, for vanilla/basemods, the main file - with the state
 // applied - and the logger's level follows it. One INFO line when the game's own file is created
 // or starts or stops applying; configGeneration() bumps when the result differs. Any thread; file
 // I/O under the settings lock.

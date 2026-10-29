@@ -12,6 +12,24 @@ the mod. Nothing the mod does is written into `player.gdc` or into any `.gst` st
 future patch, a broken mod or a plain uninstall cannot make the game prune what you stored. If
 you remove the mod, your collection file stays on disk exactly as it was.
 
+## New in 1.2.1
+
+- **The Lokarr set can be stored.** Lokarr's Gaze, Coat, Mantle and Boots - and Wilhelm's
+  Wondrous Wargem, Gazer Man, the Totally Normal Shield, and the quest rewards Sister's Amulet of
+  Lifegiving and Slith Primal Ring - live outside the game's item folder, and the collection used
+  to skip them. They are on their pages now; the pages are generated again once, at the first
+  start after the update.
+- **An EDIT button opens the layout editor.** The button pad has an `EDIT` button just before
+  OWN: one click and the in-game layout editor opens (Ctrl+right-click - `editor_open` under
+  `[keys]` - still works too). `edit_button=0` under `[advanced]` removes it.
+- **Bigger item icons.** `zoom_pct=150` under `[layout]` draws the collection's boxes one and a
+  half times as big (up to 200), fewer per screen; it applies within a second, no restart. See
+  *Bigger icons* under *[layout]*.
+- **Your own keys.** The keys and clicks the tab answers to - PageUp / PageDown, Ctrl+PageUp /
+  Ctrl+PageDown, the wheel, Ctrl+wheel and Ctrl+right-click - are lines of a new `[keys]` section
+  of `uniquetab.ini`, each at its default until you change it (`button_next=Ctrl+F3`,
+  `rows_wheel=Alt+Wheel`, `editor_open=F8`); see *Your keys* under *Settings*.
+
 ## New in 1.2.0
 
 - **Monster infrequents.** Every monster infrequent - every Rare item the game gives a record of
@@ -141,7 +159,7 @@ time you open the tab.
 `uniquetab.asi` and start the game. There is nothing to do by hand. Your collection, your settings
 and your exports stay where they are, and the first start does the rest, once:
 
-- `uniquetab.ini` is rewritten as `ini_version` 42 with every value kept - the four everyday
+- `uniquetab.ini` is rewritten as `ini_version` 44 with every value kept - the four everyday
   settings on top, `collect_mi=1` the new one, everything else commented out at its end - and the
   log lists every line it dropped (see *Settings*);
 - each custom game's folder moves from `views\` to `mods\<name>\` (see *Where each game's data
@@ -192,13 +210,14 @@ drive and nothing of this mod.
 Open the caravan and go to the **Crafting Materials** page. Your usual materials are page one,
 untouched; the collection pages follow.
 
-- **Mouse wheel** scrolls the page.
+- **Mouse wheel** scrolls the page, one row per notch, and **PageUp / PageDown** one window of
+  rows at a time.
 - **Ctrl+wheel** and **Ctrl+PageUp / Ctrl+PageDown** walk the category buttons (Helms, Rings,
   Relics, Blueprints, and so on) in the pad's order - your buttons file's order -, MAT included:
   one stop per button, a button holding several groups once, one step per key press. A group your
   buttons file leaves off the pad is skipped.
 - The **buttons across the top of the page** select a group too: the buttons of the game you are
-  in - one per group unless your buttons file says otherwise -, plus MAT and OWN. MAT opens the
+  in - one per group unless your buttons file says otherwise -, plus MAT, EDIT and OWN. MAT opens the
   game's own materials page, from the buttons in the window and from buttons you put on the
   screen alike. A button that holds several groups shows all of their items on one page. Should a
   game ever have more buttons than the pad can show readably, they come a page at a time and a
@@ -207,6 +226,11 @@ untouched; the collection pages follow.
   lives before you go there.
 - One of those buttons is **OWN**. It toggles between showing every item in the group and showing
   only the ones you already have.
+- The button just before OWN, **EDIT**, opens the layout editor (see *Edit the layout in the
+  game*). `edit_button=0` under `[advanced]` removes it; Ctrl+right-click on the pad still opens
+  the editor then.
+- Every key and click on this list but the left click on a button is yours to change: *Your
+  keys* under *Settings*.
 - **Hovering an item** the collection can hold - on a collection page or in your bags - adds one
   line to its tooltip: "In your collection" or "Not in your collection" (`tooltip_mark`; the words
   are yours to change in the buttons file). On a blueprint the line is about that blueprint, not
@@ -220,8 +244,8 @@ one the game's blueprint scroll in its rarity's colour. Put one in and take it b
 learn it, take it back and right-click it as usual. Learning a blueprint uses it up, so the page
 holds the ones you chose to keep rather than learn. Crate's own 11 test blueprints are left out.
 
-**Monster infrequents** sit on their slot's page, after its uniques: the Helms page holds the 288
-unique helms and then the MI helms (608 boxes in all), and the base game has 196 pages. Every Rare
+**Monster infrequents** sit on their slot's page, after its uniques: the Helms page holds the 289
+unique helms and then the MI helms (609 boxes in all), and the base game has 197 pages. Every Rare
 item the game gives a record of its own is one: the ones dropped by monsters, the faction stores'
 rares and the blacksmith's crafted ones alike. Each level tier is its own box (Incendiary Casque's
 tiers sit side by side), and a box holds ONE roll, whatever `max_per_record` says: the roll you put
@@ -232,6 +256,13 @@ reads "In your collection (another roll)" - the words after "In your collection"
 `tooltip.roll` under `[tab]` of your buttons file. The Spears page has 64-wide cells now: the MI
 spears are wider than the six unique ones. `collect_mi=0` takes the MIs off the pages (see
 *Settings*).
+
+**What is collected** is decided by the item's slot and rarity, wherever the game keeps its record:
+a few real items live outside the game's item folder - the Lokarr set, Leovinus' Ring, Wilhelm's
+Wondrous Wargem, Gazer Man, the Totally Normal Shield, and the quest rewards Sister's Amulet of
+Lifegiving and Slith Primal Ring (Rare, one record per difficulty, so they count as monster
+infrequents) - and are collected like every other item of their page. Test items, the gear
+monsters and townsfolk wear, and the designers' blank templates never are.
 
 ### Putting an item in
 
@@ -318,10 +349,12 @@ that game (it applies again when you are back in the main campaign). Edit it whi
 re-read within a second. `enabled=0` there turns the tab off in that game only, `log_level` sets
 that game's logging, `collect_mi` its monster infrequents (its pages are generated again once, at
 its next entry; the main campaign's are not), and the layout editor and every one-shot that sets
-itself back write into it. The one exception is `journal_dir`: it is read once at start-up from
+itself back write into it. One exception is `journal_dir`: it is read once at start-up from
 the main file, before any custom game is known, so the game's file shows it as a commented line
-saying so, and a `journal_dir` line you add there is ignored with one line in the log. Delete the
-file and it is written again from the main file's values.
+saying so, and a `journal_dir` line you add there is ignored with one line in the log. The other
+is `[keys]`: your keys are read from the main file only and work in every game the same way (the
+game's file has no `[keys]` section, and a `[keys]` line you add there is ignored with one line in
+the log). Delete the file and it is written again from the main file's values.
 
 ### Where each game's data is
 
@@ -348,13 +381,15 @@ something goes wrong*.) When `journal_dir` is set, the collection files are in
 
 `x64\uniquetab\uniquetab.ini` is written by the mod on the first launch and re-read about once a
 second, so you can edit it while the game runs. A value outside its allowed range is clamped and
-the log says so. Delete the file and it comes back with the defaults. It is the settings of the
-main campaign (with or without `/basemods`); each custom game you enter gets a complete copy of
-its own, `mods\<name>\uniquetab.ini`, with every key below but `journal_dir` - see *Its own
-settings* under *The Crucible and other custom games*.
+the log says so (`zoom_pct`'s is refused instead, see *[layout]*). Delete the file and it comes
+back with the defaults. It is the settings of the main campaign (with or without `/basemods`); each
+custom game you enter gets a complete copy of its own, `mods\<name>\uniquetab.ini`, with every key
+below but `journal_dir` and `[keys]` - see *Its own settings* under *The Crucible and other custom
+games*.
 
-It has three parts: the four everyday settings under `[general]`, your rectangles under
-`[layout]`, and every other setting under `[advanced]` at the end, commented out at its default.
+It has four parts: the four everyday settings under `[general]`, your rectangles under
+`[layout]`, your keys under `[keys]`, and every other setting under `[advanced]` at the end,
+commented out at its default.
 
 **[general]**
 
@@ -365,16 +400,19 @@ It has three parts: the four everyday settings under `[general]`, your rectangle
 | `tooltip_mark` | 1 = every item tooltip says whether it is in your collection |
 | `log_level` | how much goes in the log: error, warn, info, debug, trace (trace also writes every line at once) |
 
-The file says `ini_version=42`. An older file is carried over on the first start with every value
+The file says `ini_version=44`. An older file is carried over on the first start with every value
 kept: a file older than 40 gets the `collect_mi=1` line, and `max_per_record` and `rescue` move from
 `[general]` into `[advanced]` - commented out at their default, or as a live line there if you had
-set them (`max_per_record=2` stays `max_per_record=2`). A custom game's own file says the same
-number and is carried over the same way, on that game's first entry.
+set them (`max_per_record=2` stays `max_per_record=2`); a 1.2.0 file (42) gains the commented
+`edit_button` line, the commented `zoom_pct` line under `[layout]` and the commented `[keys]`
+section. A custom game's own file says the same number and is carried over the same way, on that
+game's first entry: every line it has is kept, and a setting it does not set keeps its default
+(the main file's value is not copied into it).
 
 The rescue (`rescue`, an untested setting under `[advanced]`) has a second trigger that needs no
-editing: put an empty file called `RESCUE-NOW` next to the ini. The mod sees it, deletes it and runs the rescue. Items the current game's database
-does not have are skipped (and listed in `rescue-report.txt`) - their records stay in the
-collection untouched, for the game that has them.
+editing: put an empty file called `RESCUE-NOW` next to the ini. The mod sees it, deletes it and
+runs the rescue. Items the current game's database does not have are skipped (and listed in
+`rescue-report.txt`) - their records stay in the collection untouched, for the game that has them.
 
 **[advanced]** - every other setting, one line each, commented out at its default with what it
 does beside it. Remove the `;` in front of one to change it; the line keeps its place, and a
@@ -394,6 +432,7 @@ own while you play one).
 | `plate_swap` | 1 | 1 = the background picture follows the group, 0 = always the vanilla one |
 | `layout_outline` | 0 | 1 = outline the grid, the buttons and the label with their numbers - green where your own rectangle is in force, red where one was refused and why |
 | `layout_edit` | 0 | 1 = open the in-game layout editor on the next collection group (sets itself to 0) |
+| `edit_button` | 1 | 1 = an EDIT button on the pad opens the layout editor; 0 = no button (the `editor_open` chord of `[keys]` still opens it: Ctrl+right-click unless you change it). Per settings file, like every key; the pad changes within a second |
 | `journal_dir` | empty | where the collection file is kept (read at start-up). Empty = the mod's own folder. Main `uniquetab.ini` only |
 | `export_gds` | 1 | write uniq-export.gds for GD Stash: 0 off, 1 the collection, 2 all |
 | `export_csv` | 0 | write uniq-export.csv for a spreadsheet: 0 off, 1 the collection, 2 all |
@@ -420,6 +459,7 @@ is laid out as it always was. The in-game editor writes these lines for you.
 | --- | --- |
 | `grid_<W>x<H>`, `pad_<W>x<H>`, `label_<W>x<H>` = `x,y,w,h` | your own rectangles for the caravan cover of that size, in the materials window's own pixels at UI scale 1 (the outline prints them) |
 | `pad_screen`, `label_screen` = `<corner>,x,y,w,h` | the buttons or the label line pinned to a corner of the SCREEN instead of the window (below) |
+| `zoom_pct` = 100..200 | the item icons of the collection pages bigger, in percent - a commented line at 100 (*Bigger icons*, below) |
 
 `<W>x<H>` is the cover: `438x627` for the base game and DeathGrimDawn, `346x625` Loot Ascension,
 `974x659` Reign of Terror, `975x968` X-Mod. The grid takes as many whole cells as fit from its
@@ -432,21 +472,39 @@ for the new grid - one under every box, a column at the window's very edge inclu
 switches to them; they are kept for the next start. Removing the line
 brings the original frames back.
 
+**Bigger icons.** Remove the `;` in front of `;zoom_pct=100` and set a number from 100 to 200:
+`zoom_pct=150` makes every box of the collection pages one and a half times as big - in the base
+game Helms are 96-pixel cells, 3 x 5 to a screen instead of 5 x 8, and the page scrolls through
+more rows. The icons are the game's own pictures drawn larger, so they get softer the larger they
+are: 200 is twice the size and visibly soft. Hovering, the tooltip, picking an item up and the
+corner badges follow the bigger boxes, and putting an item in works as always. The frames under the
+boxes are painted again for the new size (a second or two of plain background, as when you move the
+grid). It applies within a second and needs no restart; 100 is the page exactly as without the
+line, and a value outside 100..200 is refused with one line in the log (100 is used). It is one
+value per settings file, like the other `[layout]` lines: a custom game's own file has its own.
+When your own grid is too small to hold one enlarged box of a group, that group is shown at the
+largest size that fits, and the log names it. In the layout editor the grid snaps to the enlarged
+cells and cannot be made smaller than one enlarged box of the largest group; a grid you wrote by
+hand that is smaller than that is shown as just said, but the editor keeps SAVE off until you make
+it large enough. The game's own materials page keeps its normal size. The game's own
+interface-scale setting (its UI scale slider) makes the icons bigger too - with the whole
+interface, the caravan and the HUD, and the tab then shows as many items per screen as before.
+
 **Off the window.** `pad_screen=tr,8,8,320,44` puts the buttons in the top-right corner of the
 screen: the corner is `tl`, `tr`, `bl` or `br`, `x,y` the distance from that corner inwards and
-`w,h` the size, in the same page pixels as the other lines, scaled with the UI scale like the
-page. `label_screen` does the same for the label line. One line each serves every caravan and
-stash mod of its file: the main `uniquetab.ini`'s in the main campaign, a custom game's own
-file's in that game. The pinned parts are drawn above the
-HUD (the minimap, the quest tracker) and below every tooltip, on a dark ground with a thin frame,
-and only while the caravan is open on the Crafting Materials page; their clicks are theirs - every
-button does there what it does in the window (MAT, OWN and `>>` included), a click on them never
-moves the character, and a plain right-click on them fires no skill. On the game's own materials
-page a pinned pad stays in its corner. A line that would cover the item grid, has no room for the
-buttons or the text, or is as large as the screen is refused with one line in the log, and the
-part stays in the window. The grid always stays in the window. Delete the line to put the part
-back. While a part is on the screen its `pad_<W>x<H>` / `label_<W>x<H>` line is not used and not
-judged - no warning about it -, and it is in force again when the part goes back into the window.
+`w,h` the size, in the same page pixels as the other lines, scaled with the UI scale like the page.
+`label_screen` does the same for the label line. One line each serves every caravan and stash mod
+of its file: the main `uniquetab.ini`'s in the main campaign, a custom game's own file's in that
+game. The pinned parts are drawn above the HUD (the minimap, the quest tracker) and below every
+tooltip, on a dark ground with a thin frame, and only while the caravan is open on the Crafting
+Materials page; their clicks are theirs - every button does there what it does in the window (MAT,
+EDIT, OWN and `>>` included), a click on them never moves the character, and a plain right-click on
+them fires no skill. On the game's own materials page a pinned pad stays in its corner. A line that
+would cover the item grid, has no room for the buttons or the text, or is as large as the screen is
+refused with one line in the log, and the part stays in the window. The grid always stays in the
+window. Delete the line to put the part back. While a part is on the screen its `pad_<W>x<H>` /
+`label_<W>x<H>` line is not used and not judged - no warning about it -, and it is in force again
+when the part goes back into the window.
 
 **The game's own materials page.** There the buttons are drawn where your pad is, over the page's
 own slots if they lie there: every button works, and a click or a hover on the pad never reaches
@@ -454,9 +512,13 @@ a slot under it (slots beside the pad work as always). `padmat_<W>x<H>` under `[
 the buttons somewhere else on that page only; it has to fit inside the page and hold the buttons,
 or it is ignored with one line in the log.
 
-**Edit the layout in the game.** With the caravan open on a collection group, hold Ctrl and
-right-click the button pad (or a pinned label line, or set `layout_edit=1`; it sets itself back to
-0 when the editor opens). The items are hidden while you edit; the page shows the item grid (with
+**Edit the layout in the game.** With the caravan open, click **EDIT** on the button pad (the
+button just before OWN): the editor opens on the collection group you are on. On the game's own
+materials page EDIT first goes back to the last collection group you had open, then the editor
+opens there. The other ways in, on a collection group: hold Ctrl and right-click the button pad
+(or a pinned label line) - `editor_open` under `[keys]` changes that click, or makes it a key -,
+or set `layout_edit=1` (it sets itself back to 0 when the editor opens); both work with
+`edit_button=0` too. The items are hidden while you edit; the page shows the item grid (with
 the current group's cells as lines), the button pad and the label line as outlined rectangles with
 handles. Drag a rectangle to move it, or a corner or an edge to resize it: the grid stays on the
 page and snaps to whole cells; drag the buttons or the label line off the window to put them
@@ -484,6 +546,55 @@ changing the UI scale or the resolution cancels the edit. An item on the cursor 
 by the editor. It does not move the buttons of the game's own materials page (`padmat_`). You can
 put the buttons anywhere on the page, even above the label line or over the materials page's
 slots - there they are drawn over the slots and take the clicks.
+
+### Your keys
+
+The keys and clicks the tab answers to are the lines of the `[keys]` section of the main
+`uniquetab.ini`, between `[layout]` and `[advanced]`, each commented out at its default. Remove the
+`;` in front of one and write your own; the change takes effect within a second.
+
+| key | default | what it does |
+| --- | --- | --- |
+| `rows_up` | `PageUp` | one window of rows up on a collection page |
+| `rows_down` | `PageDown` | one window of rows down |
+| `button_prev` | `Ctrl+PageUp` | the button before the one on screen, MAT included |
+| `button_next` | `Ctrl+PageDown` | the button after it |
+| `rows_wheel` | `Wheel` | the wheel with the cursor over the page: one row per notch |
+| `button_wheel` | `Ctrl+Wheel` | the wheel anywhere while the page is open: one button per notch |
+| `editor_open` | `Ctrl+RightClick` | on the button pad or a pinned label line: the layout editor. Bound to a key, that key opens it, as EDIT does |
+
+**How to write one.** Any of `Ctrl`, `Shift` and `Alt`, each once, then one key, joined by `+`:
+`Alt+PageDown`, `Shift+Wheel`, `Ctrl+F3`, `F5`; upper or lower case does not matter, and `none`
+turns the action off. The keys are the letters `A`-`Z`, the digits `0`-`9`, `F1`-`F24`,
+`PageUp`, `PageDown`, `Home`, `End`, `Insert`, `Delete`, the arrows `Up`, `Down`, `Left`,
+`Right`, `Space`, `Tab`, `Enter`, `Backspace`, the number pad's `Num0`-`Num9`, `NumMul`,
+`NumPlus`, `NumMinus`, `NumDot` and `NumDiv`, and the mouse's `Wheel`, `RightClick`,
+`MiddleClick`, `Mouse4` and `Mouse5`. The four steps take a key, `MiddleClick`, `Mouse4` or
+`Mouse5`; the two wheel lines take `Wheel`; `editor_open` takes `RightClick` or a key.
+
+**Three rules.**
+
+- **The main `uniquetab.ini` only.** `[keys]` is read from the main file and is in force in every
+  game, custom games included. A custom game's own file has no `[keys]`; a `[keys]` line written
+  there is ignored, with one line in the log.
+- **A letter, a digit, Space, Enter, Tab, Backspace or a number-pad key needs Ctrl or Alt.** The
+  stash search box gets every key you type, and the mod cannot tell when it has the focus, so a
+  bare `R` would page the tab and type an `r` into the box. Shift is not enough (Shift+R types an
+  `R`).
+- **A key the game itself uses does both.** The game reads the keyboard on its own, so the mod
+  cannot hide a key from it: a key you bind here that the game binds too does the game's action
+  as well. Pick one the game leaves free; PageUp and PageDown, with or without Ctrl, are free by
+  default.
+
+A line that does not read - a word it does not know, two keys, a modifier twice, `LeftClick` (the
+buttons' own), `Esc` (the game's), `Alt+F4`, `Alt+Tab`, `Alt+Space`, the wrong kind for the line
+(`rows_up=Wheel`) - is ignored with one line in the log and the default stays. Two lines with the
+same chord: the later one is off until one of them changes, and the log names both. When the keys
+you hold fit two lines, the one with more modifiers wins - with the defaults Ctrl+PageDown is a
+button and PageDown a window of rows, as always, and once `button_next` is `Ctrl+F3`,
+Ctrl+PageDown pages rows like PageDown. A modifier you hold that a line does not name does not
+stop it (Ctrl+Shift+right-click opens the editor too). As before, the tab answers only while the
+caravan shows the Crafting Materials page.
 
 ### Your buttons
 
@@ -518,6 +629,7 @@ re-read within a second. Delete it and it is written again with the defaults.
   | `tooltip.yes`, `tooltip.no` | the two lines every item tooltip gets |
   | `tooltip.roll` | the words after `tooltip.yes` when you hover a monster infrequent you hold in another roll (default ` (another roll)`). They are appended as written, so quote them to keep the leading blank: `tooltip.roll = " (noch ein Wurf)"`. Not in the generated file - add the line yourself |
   | `mat.caption`, `own.caption`, `next.caption` | the captions of MAT, OWN and `>>` |
+  | `edit.caption` | the caption of the EDIT button (default `EDIT`, up to 12 characters). Not in the generated file - add the line yourself |
   | `font.caption`, `font.label` | the font of the captions and of the label line (a font of the game by its path) |
   | `size.label`, `size.caption_max`, `size.caption` | the label size and the largest caption size (they win over `plate_label_size` and `pad_caption_max`), one fixed caption size |
   | `color.caption`, `color.label`, `color.ring`, `color.mark` | colours, `RRGGBB` |
@@ -747,8 +859,8 @@ explain itself. If you report a problem anywhere, send that file.
   already holds it - "<name>" level N: prefix ..., suffix ..., seed ...`. Take the stored one out
   first if you want to keep the other roll instead.
 - **My pages doubled after the update.** That is the monster infrequents (`collect_mi=1`, the
-  default): every Rare item of a slot has a box after the uniques - 196 pages in the base game
-  instead of 108. Set `collect_mi=0` in `uniquetab.ini` and restart to go back: the pages are
+  default): every Rare item of a slot has a box after the uniques - 197 pages in the base game
+  instead of 109. Set `collect_mi=0` in `uniquetab.ini` and restart to go back: the pages are
   generated again once, and any MI you had stored stays in the collection, hidden (the label says
   `+N not on these pages`) until you set it back to 1. Nothing is lost either way.
 - **There is no ART button (DeathGrimDawn).** The Artifacts group comes with the monster

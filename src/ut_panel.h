@@ -100,12 +100,19 @@ enum { kUtButtonCount = 26 };
 // owned-only filter (ut_live.cpp's liveToggleOwnedOnly).  Distinct from -1 (the vanilla page) and
 // from -2 (an index out of range).
 enum { kUtButtonFilterTarget = -3 };
+// What panelButtonTarget returns for the EDIT button: it selects no group, it opens the layout
+// editor (panelEditButton).
+enum { kUtButtonEditTarget = -4 };
 
 // The captions in force in button order (MAT, the group table's tags, OWN; the 26 built-ins until
-// a table loads), for the layout's caption fit. Lives for the process.
+// a table loads), plus EDIT while [advanced] edit_button=1, for the layout's caption fit. Lives
+// for the process.
 const UtCaptions* panelButtonCaptions();
 // The same plus NEXT, for a paged pad's fit.
 const UtCaptions* panelButtonCaptionsPaged();
+// The measure set of a pad that is `paged` (NEXT) and carries EDIT (`edit`), whatever the
+// settings file says now (the layout passes the pad it paginated).
+const UtCaptions* panelButtonCaptionsFor(int paged, int edit);
 
 // The caption fit's UtWidestFn (ctx = a UtCaptions*): the widest caption at `size` in the font the
 // pad draws - the live metrics once the world's cross-check agreed, else the compiled table.
@@ -199,8 +206,9 @@ bool panelMatPadAt(float lx, float ly, float scale);
 
 // What a click on button `i` selects: ABSOLUTELY the first group of its button (-1 = the vanilla
 // materials page) - the page of a several-group button is the union of its groups, keyed by the
-// first - or -2 when the index is out of range. The LAST button is the exception and returns
-// kUtButtonFilterTarget - it selects nothing and toggles the owned-only filter instead.
+// first - or -2 when the index is out of range. OWN is the exception and returns
+// kUtButtonFilterTarget - it selects nothing and toggles the owned-only filter instead - and so
+// is EDIT, which returns kUtButtonEditTarget (panelEditButton opens the editor).
 // `label` (optional) gets the group's own name (a several-group button's: the button's name); it
 // lives for the process and is never null.
 int panelButtonTarget(int index, const char** label);
@@ -274,6 +282,21 @@ bool panelLayoutEditing();
 // pad's own consumption rules. True = consumed (the engine's handler must not run).
 bool panelLayoutEditMouse(int type, float lx, float ly, bool cursorEmpty, bool inBox, bool proven);
 
+// The EDIT button's click, from either pad (the window's mouse slot or the screen input): sets
+// the latch the pad's draw consumes on its next frame (editOpen "the EDIT button"). On the game's
+// own materials page it first selects the last collection group the pad showed and the editor
+// opens once that group is on screen; the latch drops after 2 s with one DEBUG line. Any thread;
+// nothing but two interlocked ints and liveSelectGroup's two. Returns the group it switched to,
+// or -1 when it switched nothing (a collection page is on screen) and -2 when the switch was
+// refused (the latch is dropped then).
+int panelEditButton();
+
+// [keys] editor_open bound to a key: the window procedure's KEYDOWN on the materials window (the
+// caravan open, live paging armed). The EDIT button's path with its own latch - the editor opens
+// on the pad's next frame ("the editor_open key"), on the game's own materials page after the
+// last collection group; the same returns, and -3 (no latch: the key is not the mod's) when the
+// pad has not drawn lately (group_buttons=0, the pad off, the editor already open). Any thread.
+int panelEditKey();
 // ---- diagnostics --------------------------------------------------------------------------
 // "cat=<n> add=123 rem=45 matched=78 unknown=3" - for the heartbeat line
 // (`cat=` is the loaded catalogue item count).

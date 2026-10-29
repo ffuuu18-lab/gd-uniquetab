@@ -10,13 +10,20 @@ harness (tools\build_test_catalogue.bat) compares the DLL's output against them:
     uniq-pages.arz              record for record (only the LZ4 encoding differs)
     plates\uniq_plate_*.tex     byte for byte, on the vanilla view
 
+journals\all-items-mi.jsonl is a collection journal holding every collectible record of a
+1.3.1.1 base game with monster infrequents, each at count 1 (7,111 rows): the store suite's fixed
+rehearsal (tools\build_test_store.bat pass 4b) reads a copy of it. It is not rebuilt from the
+game folder.
+
 The model suite (build_model.bat) loads catalogue.bin. src\ holds the sample .dbr text
 tools\build_uniq_db.py dumps next to the archive it writes; plates\src\ holds the game's own
 caravan textures tools\make_plates.py paints over (see the README.txt there).
 
-Everything here but templates\ is derived from the game's data, and none of it is in the public
-tree. To run the harness from there, rebuild it from your own copy of Grim Dawn 1.3.0.8, with GD_DIR naming that
-game folder, in this order:
+Everything here but templates\ and the README files is derived from the game's data, and none of
+that is in the public tree (this file, nomi\README.txt, views\README.txt, plates\src\README.txt
+and templates\ are). To run the harness from there, rebuild it from your own copy of Grim Dawn
+1.3.0.8, with GD_DIR naming that game folder (the Python tools read %GD_DIR% first, then
+Steam's registry - tools\gdpath.py), in this order:
 
     python tools\build_catalogue.py     catalogue.json, catalogue-stats.md
     python tools\pack_catalogue.py      catalogue.bin
@@ -27,6 +34,15 @@ game folder, in this order:
 
 The oracle is a 1.3.0.8 artefact: point UNIQUETAB_TEST_GAME_DIR at a 1.3.0.8 game folder when
 the harness runs, whatever version the installed game has moved on to.
+
+The reference folder the cuts come from holds, all of 1.3.0.8: x64\ (Grim Dawn.exe, Game.dll,
+Engine.dll), database\database.arz and gdx1..3\database\gdx1..3.arz; resources\Items.arc,
+UI.arc, Text_EN.arc and Level Art.arc (847,666,093 bytes); gdx1\resources\Items.arc, UI.arc,
+Text_EN.arc and Level Art.arc (293,908,330 bytes); gdx2\resources\ and gdx3\resources\ Items.arc,
+UI.arc and Text_EN.arc; and one custom game under mods\. gdx2's and gdx3's Level Art.arc are not
+part of the reference (the loader treats a missing one as absent). Level Art.arc carries the
+icons of the four Lokarr pieces (level art/buildings/signs/, in gdx1's), so every cut pages them;
+the vanilla cuts leave no record off the pages.
 
 uniq-pages.json (the per-page manifest a full build_uniq_db.py run writes beside the .arz) is
 0.9 MB of derived data that no harness compares; catalogue.json is the 4 MB intermediate and is

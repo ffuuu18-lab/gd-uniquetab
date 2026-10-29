@@ -17,6 +17,8 @@
 //   8. idempotence per Update generation: a repeat replays the bytes and never acts again;
 //   9. the editor hand-over: Ctrl+RIGHT DOWN on the pad and on the label, its RIGHT UP, a plain
 //      RIGHT DOWN untouched; with the editor open the LEFT DOWN / MOVE / LEFT UP are the editor's;
+//      the chord from a [keys] binding (= utKeyClickMatches over every type and modifier set;
+//      RightClick, Alt+RightClick, a key);
 //  10. the header's purity; with a game's x64\DirectInput.dll (optional, read only) the export by
 //      name, its stride, its first instructions and the device vtable's slots +0x10 / +0x38;
 //  11. every logical button kind (MAT, the buttons, OWN, NEXT), the adopted drag (an
@@ -48,6 +50,7 @@
 
 #include "../src/ut_padinput.h"
 #include "../src/ut_layoutedit.h"   // section 12: the editor half of the replays
+#include "../src/ut_keys.h"         // section 9: the editor chord from a [keys] binding
 
 using namespace ut;
 
@@ -81,6 +84,8 @@ static UtPadInGates gates() {
     g.proven = 1;
     g.leftUp = 0;
     g.rightUp = 1;
+    g.editorType = kUtEvtRightDown;   // editor_open's default, Ctrl+RightClick
+    g.editorMods = 1;
     return g;
 }
 
@@ -542,7 +547,7 @@ int main(int argc, char** argv) {
                 for (int t = 0; t < kTypeCount; ++t) {
                     for (int mod = 0; mod < 4; ++mod) {
                         UtPadInGates g = gates();
-                        g.ctrl = mod & 1;
+                        g.mods = mod & 1;
                         g.editorOpen = (mod >> 1) & 1;
                         const UtPadScreenRects* rr = &R;
                         if (variant == 0) { rr = &none; g.fresh = utPadScreenRectsFresh(none, T); }
@@ -666,7 +671,7 @@ int main(int argc, char** argv) {
         check(o.rewrite && o.ended == 1 && o.act == kUtPadActEditor,
               "and its UP: rewritten - no drop reaches the world - and handed to the editor");
         g.editorOpen = 0;
-        g.ctrl = 1;
+        g.mods = 1;
         o = utPadInput(&s, 24, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
         check(o.rewrite && o.act == kUtPadActNone && o.why == kUtPadWhyCursorItem,
               "an item on the cursor, Ctrl+RIGHT DOWN on the pad: consumed, no editor");
@@ -684,13 +689,13 @@ int main(int argc, char** argv) {
         int idx = 0;
         for (int t = 0; t < kTypeCount; ++t) {
             for (int mod = 0; mod < 2; ++mod) {
-                g.ctrl = mod;
+                g.mods = mod;
                 const UtPadInOut o = utPadInput(&s, 30, idx++, ev(kAllTypes[t], 1499.0f, 50.0f), R, g);
                 if (!untouched(o) || s.press != kUtPressNone) ++bad;
             }
         }
         check(bad == 0, "every event type, Ctrl up or down, one pixel left of the pad: untouched");
-        g.ctrl = 0;
+        g.mods = 0;
         UtPadInOut o = utPadInput(&s, 31, 0, ev(kUtEvtLeftDown, 800.0f, 500.0f), R, g);
         check(untouched(o) && s.press == kUtPressNone, "a LEFT DOWN on the world: the world's");
         o = utPadInput(&s, 31, 1, ev(kUtEvtMove, 1570.0f, 60.0f), R, g);
@@ -828,7 +833,7 @@ int main(int argc, char** argv) {
         UtPadInState s;
         utPadInReset(&s);
         UtPadInGates g = gates();
-        g.ctrl = 1;
+        g.mods = 1;
         UtPadInOut o = utPadInput(&s, 90, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
         check(o.rewrite && o.act == kUtPadActEditor && o.editorType == kUtEvtRightDown &&
                   o.why == kUtPadWhyCtrlRight && s.press == kUtPressRight,
@@ -878,7 +883,7 @@ int main(int argc, char** argv) {
         o = utPadInput(&s, 102, 0, ev(kUtEvtLeftUp, 1700.0f, 50.0f), R, g);
         check(!o.rewrite && !o.clear && o.act == kUtPadActEditor && o.editorType == kUtEvtLeftUp,
               "a stray LEFT UP inside, no press: handed over, never consumed");
-        g.ctrl = 1;
+        g.mods = 1;
         o = utPadInput(&s, 103, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
         check(o.rewrite && o.act == kUtPadActNone,
               "Ctrl+RIGHT DOWN with the editor already open: consumed, nothing to enter");
@@ -887,6 +892,77 @@ int main(int argc, char** argv) {
         g.proven = 0;
         o = utPadInput(&s, 104, 0, ev(kUtEvtLeftDown, 1700.0f, 50.0f), R, g);
         check(untouched(o), "editor open but the space not proven: untouched");
+    }
+
+    // the editor chord comes from [keys] editor_open: the gates carry its DOWN type and modifiers
+    // as scrBody fills them from the binding (a click: its type and mods; a key or none: type 0)
+    {
+        static const char* const kTexts[] = {"Ctrl+RightClick", "RightClick", "Alt+RightClick",
+                                             "Ctrl+Shift+RightClick", "Shift+RightClick", "F8",
+                                             "Ctrl+F8", "none"};
+        long tried = 0, bad = 0, opened = 0;
+        unsigned long long gen = 400;
+        for (const char* text : kTexts) {
+            UtKeyBind b = {};
+            if (utKeyParse(text, kUtKeyActEditorOpen, &b)) {
+                printf("    \"%s\" did not parse for editor_open\n", text);
+                ++bad;
+                continue;
+            }
+            for (int t = 0; t < kTypeCount; ++t)
+                for (int mods = 0; mods < 8; ++mods) {
+                    UtPadInState s;
+                    utPadInReset(&s);
+                    UtPadInGates g = gates();
+                    g.editorType = b.kind == kUtKeyClick ? b.code : 0;   // scrBody's wiring
+                    g.editorMods = b.mods;
+                    g.mods = mods;
+                    const int type = kAllTypes[t];
+                    const UtPadInOut o = utPadInput(&s, gen++, 0, ev(type, 1700.0f, 50.0f), R, g);
+                    const bool want = utKeyClickMatches(b, type, mods);
+                    const bool got = o.act == kUtPadActEditor && o.why == kUtPadWhyCtrlRight;
+                    ++tried;
+                    if (want != got) {
+                        if (bad < 5)
+                            printf("    %s: type %d mods %d -> %s, wanted %s\n", text, type, mods,
+                                   got ? "the editor" : "not", want ? "the editor" : "not");
+                        ++bad;
+                    }
+                    if (got) ++opened;
+                    // every RIGHT DOWN on the ground is consumed (rewritten), the chord or not
+                    if (type == kUtEvtRightDown && !(o.rewrite && s.press == kUtPressRight)) ++bad;
+                }
+        }
+        printf("    %ld inputs, %ld open the editor\n", tried, opened);
+        check(bad == 0 && opened > 0,
+              "the machine's editor chord = utKeyClickMatches for 8 bindings x every type x "
+              "Ctrl/Shift/Alt; every RIGHT DOWN on the pad consumed");
+
+        UtPadInState s;
+        utPadInReset(&s);
+        UtPadInGates g = gates();
+        g.editorMods = 0;   // editor_open=RightClick
+        g.mods = 0;
+        UtPadInOut o = utPadInput(&s, 500, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
+        check(o.act == kUtPadActEditor, "editor_open=RightClick: a plain RIGHT DOWN on the pad opens it");
+        o = utPadInput(&s, 500, 1, ev(kUtEvtRightUp, 1700.0f, 50.0f), R, g);
+        check(o.rewrite && o.ended == 1, "and its RIGHT UP is rewritten");
+        g.editorMods = kUtKeyModAlt;   // editor_open=Alt+RightClick
+        g.mods = kUtKeyModCtrl;
+        o = utPadInput(&s, 501, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
+        check(o.rewrite && o.act == kUtPadActNone && o.why == kUtPadWhyGround,
+              "editor_open=Alt+RightClick: Ctrl+RIGHT DOWN is only consumed");
+        o = utPadInput(&s, 501, 1, ev(kUtEvtRightUp, 1700.0f, 50.0f), R, g);
+        g.mods = kUtKeyModAlt | kUtKeyModCtrl;
+        o = utPadInput(&s, 502, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
+        check(o.act == kUtPadActEditor, "and Ctrl+Alt+RIGHT DOWN opens it (extra modifiers allowed)");
+        o = utPadInput(&s, 502, 1, ev(kUtEvtRightUp, 1700.0f, 50.0f), R, g);
+        g.editorType = 0;   // editor_open=F8 (a key)
+        g.editorMods = 0;
+        g.mods = kUtKeyModCtrl;
+        o = utPadInput(&s, 503, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
+        check(o.rewrite && o.act == kUtPadActNone,
+              "editor_open bound to a key: Ctrl+RIGHT DOWN on the pad is only consumed");
     }
 
     // ---------------------------------------------------------------------------------------
@@ -916,6 +992,41 @@ int main(int argc, char** argv) {
         check(kinds[kUtPadKindMat] == 1 && kinds[kUtPadKindGroup] == 28 && kinds[kUtPadKindOwn] == 1 &&
                   kinds[kUtPadKindNext] == 1,
               "a 28-button pad, paged: one MAT, 28 buttons, one OWN, one NEXT");
+        // THE EDIT BUTTON: logical G + 3, only while edit_button is on; NEXT and OWN unchanged
+        check(utPadButtonKind(26, 23, 0, 1) == kUtPadKindEdit && utPadButtonKind(26, 23, 1, 1) == kUtPadKindEdit &&
+                  utPadButtonKind(26, 23, 0, 0) == kUtPadKindNone && utPadButtonKind(26, 23, 1, 0) == kUtPadKindNone &&
+                  utPadButtonKind(26, 23, 0) == kUtPadKindNone,
+              "G + 3 is EDIT only while the button is on (paged or not); off - or the 3-argument form - none");
+        check(utPadButtonKind(25, 23, 1, 1) == kUtPadKindNext && utPadButtonKind(25, 23, 0, 1) == kUtPadKindNone &&
+                  utPadButtonKind(24, 23, 0, 1) == kUtPadKindOwn && utPadButtonKind(27, 23, 1, 1) == kUtPadKindNone,
+              "with EDIT: NEXT still G + 2 while paged only, OWN still G + 1, G + 4 nothing");
+        {
+            int ke[6] = {0, 0, 0, 0, 0, 0};
+            for (int i = -2; i < 40; ++i) ++ke[utPadButtonKind(i, 28, 1, 1)];
+            check(ke[kUtPadKindMat] == 1 && ke[kUtPadKindGroup] == 28 && ke[kUtPadKindOwn] == 1 &&
+                      ke[kUtPadKindNext] == 1 && ke[kUtPadKindEdit] == 1,
+                  "a 28-button pad, paged, with EDIT: one MAT, 28 buttons, one OWN, one NEXT, one EDIT");
+            // a screen pad publishing EDIT: a LEFT DOWN on its rect is the button action with that
+            // index (the press rules are index-blind; ut_plate's padClickTarget makes it EDIT)
+            UtPadScreenRects RE = R;
+            RE.buttonCount = 4;
+            RE.buttons[3] = RE.buttons[2];   // OWN keeps its cell
+            RE.buttons[2] = UtPadScreenButton{UtPadScreenRect{1766.0f, 70.0f, 60.0f, 24.0f}, 27};   // EDIT (G = 24)
+            UtPadInState se;
+            utPadInReset(&se);
+            const UtPadInGates ge = gates();
+            UtPadInOut oe = utPadInput(&se, 300, 0, ev(kUtEvtLeftDown, 1790.0f, 80.0f), RE, ge);
+            check(oe.act == kUtPadActButton && oe.button == 27 &&
+                      utPadButtonKind(oe.button, 24, 0, 1) == kUtPadKindEdit,
+                  "a LEFT DOWN on the screen pad's EDIT: the button action with logical 27 (EDIT of a 24-button pad)");
+            utPadInput(&se, 300, 1, ev(kUtEvtLeftUp, 1790.0f, 80.0f), RE, ge);
+            utPadInReset(&se);
+            oe = utPadInput(&se, 301, 0, ev(kUtEvtLeftDown, 1850.0f, 80.0f), RE, ge);
+            check(oe.act == kUtPadActButton && oe.button == 25 &&
+                      utPadButtonKind(oe.button, 24, 0, 1) == kUtPadKindOwn,
+                  "and OWN beside it is still OWN");
+            utPadInput(&se, 301, 1, ev(kUtEvtLeftUp, 1850.0f, 80.0f), RE, ge);
+        }
         // MAT on the screen pad acts like a button (the action is ut_plate's padClickTarget: -1)
         UtPadInState s;
         utPadInReset(&s);
@@ -963,10 +1074,10 @@ int main(int argc, char** argv) {
         // once a LEFT DOWN on the pad: the right press ends there and the LEFT DOWN is the editor's
         utPadInReset(&s);
         g = gates();
-        g.ctrl = 1;
+        g.mods = 1;
         o = utPadInput(&s, 320, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
         check(o.act == kUtPadActEditor && s.press == kUtPressRight, "Ctrl+RIGHT DOWN: the editor opens");
-        g.ctrl = 0;
+        g.mods = 0;
         g.editorOpen = 1;
         g.rightUp = 1;
         o = utPadInput(&s, 321, 0, ev(kUtEvtLeftDown, 1700.0f, 50.0f), R, g);
@@ -977,9 +1088,9 @@ int main(int argc, char** argv) {
         // a press the poll ends on a DOWN: that DOWN is judged on its own
         utPadInReset(&s);
         g = gates();
-        g.ctrl = 1;
+        g.mods = 1;
         o = utPadInput(&s, 330, 0, ev(kUtEvtRightDown, 1700.0f, 50.0f), R, g);
-        g.ctrl = 0;
+        g.mods = 0;
         g.rightUp = 1;
         o = utPadInput(&s, 330, 1, ev(kUtEvtMove, 1700.0f, 50.0f), R, g);
         o = utPadInput(&s, 331, 0, ev(kUtEvtMove, 1700.0f, 50.0f), R, g);
@@ -1262,7 +1373,9 @@ int main(int argc, char** argv) {
             memset(&g, 0, sizeof(g));
             g.fresh = 1;
             g.proven = 1;
-            g.ctrl = 1;
+            g.mods = 1;
+            g.editorType = kUtEvtRightDown;
+            g.editorMods = 1;
             r.mx = sx;
             r.my = sy + 20.0f;
             update(&r);

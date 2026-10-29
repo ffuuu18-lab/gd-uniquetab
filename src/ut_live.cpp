@@ -5,7 +5,12 @@
 //
 // Invariants: this file writes engine memory only through the three located UIReagentItem
 // functions (Load / SetItem / SetLocalPosition), each under its own SEH guard, and one fault
-// disables the feature for the session; a display prototype, once created, is cached so no
+// disables the feature for the session - with TWO direct writes beside them: the compare byte
+// +0x7E (ut_tooltip, from showBox) and, at zoom_pct above 100 only, a shown box's widget size
+// +0x74/+0x78 (two floats, computed from the box's own texture, written after its SetItem /
+// SetLocalPosition and re-asserted once per liveTick and after the mod's own Sync - never from
+// the Draw detour, which stays paint-neutral; boxZoomApply / zoomReassert, under SEH, a fault =
+// the same session disable); a display prototype, once created, is cached so no
 // relayout leaks another; the group, the row and the owned-only latch are mod-owned (g_cfg is
 // replaced from the ini once a second) and reach the ini through one debounced path.
 
@@ -100,8 +105,14 @@ struct Group {
     int rows = 1;
     int genCols = 1;   // the G line's, as generated for the derived grid
     int genRows = 1;
-    int cellW = 32;
+    int cellW = 32;    // the G line's: the largest icon of the group, as generated
     int cellH = 32;
+    // The cell IN FORCE: cellW x cellH times the group's zoom (zoom_pct, clamped per group so one
+    // cell fits the grid in force - ut_layout.h utZoomFit). The pitch the boxes are laid out on,
+    // the plate the page asks for and the cell the editor snaps to. = cellW x cellH at zoom 100.
+    int zCellW = 32;
+    int zCellH = 32;
+    int zoom = 100;    // the group's zoom in force, 100..the key's
     std::vector<std::string> entries;  // box record paths, in order
     // The ITEM record each box shows, in the same order.  The reagent map is keyed by ITEM
     // record, never by box record, so this is what `recountOwned` and the filter look up.
@@ -475,6 +486,201 @@ bool readBoxPos(void* box, float* x, float* y) {
     }
 }
 
+// ---- the zoom: the box widget's own size ------------------------------------------------------
+// zoom_pct above 100 (ut_layout.h utZoomFit) draws a box's icon bigger by making the WIDGET bigger.
+// ReagentWindow::Draw maps the WHOLE texture onto the box rectangle box+0x6C..+0x78 (exe 0x1EDE20:
+// source {0, 0, texW, texH}, destination the widget rect), the hover / tooltip / pick-up hit test
+// reads the same four floats (0x1329D0..0x132A14), and the corner badges, the count text, the
+// rarity background and the dimming are anchored to that rectangle; the drop is window-level and
+// never reads it. Its w,h (+0x74/+0x78) are written by the engine only in the constructor and in
+// SetTexture (slot +0xB0: w,h = the texture's size times GetUIScaleFactor, and ONLY when the
+// texture pointer at +0x40 changes - 0x1EE67D returns at once for the same one). So the mod
+// writes them after the SetItem / SetLocalPosition of every box a zoomed page shows, always FROM
+// THE TEXTURE - floor(texW * scale * zoom / 100 + 0.5), the engine's own rounding - never by
+// multiplying the current w,h (an early-out SetTexture would compound it); and re-asserts them
+// once per liveTick and right after its own Sync (reagentAfterRelayout): another texture under a
+// box is measured again, a size the engine reset is written back. A box no zoomed page shows any
+// more gets its native size back (what SetTexture computes) before it is parked or shown at 100,
+// so the materials page and zoom_pct=100 are exactly the engine's own sizes. At 100 with no box
+// ever zoomed none of this runs: today's page byte for byte.
+const size_t kBoxTexOff = 0x40;   // GraphicsTexture*: SetTexture compares and stores it (0x1EE679)
+const size_t kBoxSizeOff = 0x74;  // w, h floats: SetTexture 0x1EE6A4 / 0x1EE6B6, 0x1EE824
+struct BoxZoom {
+    void* box = nullptr;          // the widget this entry describes (another widget = no entry)
+    const void* tex = nullptr;    // the texture the size was computed from
+    float w = 0.0f, h = 0.0f;     // what was written
+    int pct = 0;                  // 0 = nothing written (the engine's own size), else the zoom
+};
+std::vector<BoxZoom>* g_boxZoom = nullptr;   // per captured box, GAME THREAD
+volatile LONG g_zoomLive = 0;        // 1 while some entry has pct != 0 (the re-assert's gate)
+volatile LONG g_zoomWrites = 0;      // sizes written by showBox
+volatile LONG g_zoomReasserts = 0;   // sizes written back by the re-assert (the engine reset one)
+volatile LONG g_zoomRetex = 0;       // re-asserts that found another texture under a zoomed box
+volatile LONG g_zoomSaidEpoch = -1;  // the capture epoch the first write-back was said in
+volatile LONG g_zoomNoTexSaid = 0;   // "GraphicsTexture::GetWidth is not bound", once
+
+bool readBoxTexSize(void* box, const void** tex, float* w, float* h) {
+    __try {
+        const unsigned char* b = (const unsigned char*)box;
+        *tex = *(const void* const*)(b + kBoxTexOff);
+        const float* r = (const float*)(b + kBoxSizeOff);
+        *w = r[0];
+        *h = r[1];
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_faults);
+        return false;
+    }
+}
+
+bool writeBoxSize(void* box, float w, float h) {
+    __try {
+        float* r = (float*)((unsigned char*)box + kBoxSizeOff);
+        r[0] = w;
+        r[1] = h;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_faults);
+        return false;
+    }
+}
+
+bool texturePixels(const void* tex, int* w, int* h) {
+    __try {
+        *w = g_gd.TextureGetWidth((const GdTexture*)tex);
+        *h = g_gd.TextureGetHeight((const GdTexture*)tex);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        InterlockedIncrement(&g_faults);
+        return false;
+    }
+}
+
+// The factor SetTexture multiplies a box's texture by: GetUIScaleFactor (asked once per HUD
+// build), else the filler-box measurement - uiScaleCached's rule without ui_scale_pct, a number
+// the engine never sees.
+float boxSizeScale() {
+    const float m = g_uiScale, e = g_uiScaleEngine;
+    const bool okM = m >= 0.2f && m <= 8.0f, okE = e >= 0.2f && e <= 8.0f;
+    if (okE && okM) {
+        const float d = e > m ? e - m : m - e;
+        return d > 0.05f ? m : e;
+    }
+    if (okE) return e;
+    if (okM) return m;
+    return 1.0f;
+}
+
+// Box `i` shown at zoom `pct` (100 = the engine's own size). False = an engine access faulted.
+bool boxZoomApply(size_t i, int pct) {
+    if (!g_boxZoom || !g_boxes || i >= g_boxes->size()) return true;
+    void* box = (*g_boxes)[i];
+    if (!box) return true;
+    if (g_boxZoom->size() < g_boxes->size()) {
+        if (pct <= 100) return true;   // no entry: nothing was ever written to this box
+        try {
+            g_boxZoom->resize(g_boxes->size());
+        } catch (...) {
+            return true;   // no room for the state: the box keeps the engine's size
+        }
+    }
+    BoxZoom& z = (*g_boxZoom)[i];
+    if (z.box != box) z = BoxZoom();
+    if (pct <= 100 && z.pct == 0) return true;   // the engine's own size, untouched
+    if (!g_gd.TextureGetWidth || !g_gd.TextureGetHeight) {
+        if (!InterlockedExchange(&g_zoomNoTexSaid, 1))
+            logW("live: zoom_pct is not applied - GraphicsTexture::GetWidth/GetHeight are not "
+                 "bound in this Engine.dll, so a box's size cannot be computed from its texture");
+        z = BoxZoom();
+        return true;
+    }
+    const void* tex = nullptr;
+    float w = 0.0f, h = 0.0f;
+    if (!readBoxTexSize(box, &tex, &w, &h)) return false;
+    if (!tex) {   // no texture: SetTexture sizes the box again with the next one
+        z = BoxZoom();
+        return true;
+    }
+    int tw = 0, th = 0;
+    if (!texturePixels(tex, &tw, &th)) return false;
+    if (tw <= 0 || th <= 0 || tw > 4096 || th > 4096) {
+        z = BoxZoom();
+        return true;
+    }
+    const int zp = pct < 100 ? 100 : pct;
+    const float f = boxSizeScale() * ((float)zp / 100.0f);
+    const float nw = floorf((float)tw * f + 0.5f);   // SetTexture's own rounding
+    const float nh = floorf((float)th * f + 0.5f);
+    if (nw != w || nh != h) {
+        if (!writeBoxSize(box, nw, nh)) return false;
+        InterlockedIncrement(&g_zoomWrites);
+    }
+    if (zp <= 100) {
+        z = BoxZoom();   // back at the engine's own size: nothing to re-assert
+        return true;
+    }
+    z.box = box;
+    z.tex = tex;
+    z.w = nw;
+    z.h = nh;
+    z.pct = zp;
+    InterlockedExchange(&g_zoomLive, 1);
+    return true;
+}
+
+// GAME THREAD (liveTick, and applyLayout after reagentAfterRelayout). Every box a zoomed page
+// shows: another texture under it (ReagentWindow::Sync re-pointed it) is measured again, a size
+// the engine reset is written back. Two interlocked reads while nothing is zoomed.
+void zoomReassert(const char* when) {
+    if (!InterlockedCompareExchange(&g_zoomLive, 0, 0) || !g_boxZoom || !g_boxes) return;
+    const size_t n = g_boxZoom->size() < g_boxes->size() ? g_boxZoom->size() : g_boxes->size();
+    int live = 0, back = 0, retex = 0;
+    for (size_t i = 0; i < n; ++i) {
+        BoxZoom& z = (*g_boxZoom)[i];
+        if (!z.pct) continue;
+        void* box = (*g_boxes)[i];
+        if (z.box != box || !box) {
+            z = BoxZoom();
+            continue;
+        }
+        const void* tex = nullptr;
+        float w = 0.0f, h = 0.0f;
+        if (!readBoxTexSize(box, &tex, &w, &h)) {
+            disable("an engine read faulted while re-asserting a zoomed box size");
+            return;
+        }
+        if (tex != z.tex) {
+            ++retex;
+            if (!boxZoomApply(i, z.pct)) {
+                disable("an engine call faulted while re-measuring a zoomed box");
+                return;
+            }
+        } else if (w != z.w || h != z.h) {
+            if (!writeBoxSize(box, z.w, z.h)) {
+                disable("an engine write faulted while re-asserting a zoomed box size");
+                return;
+            }
+            ++back;
+        }
+        if (z.pct) ++live;
+    }
+    if (!live) InterlockedExchange(&g_zoomLive, 0);
+    if (back) InterlockedExchangeAdd(&g_zoomReasserts, back);
+    if (retex) InterlockedExchangeAdd(&g_zoomRetex, retex);
+    const LONG epoch = InterlockedCompareExchange(&g_captureEpoch, 0, 0);
+    if ((back || retex) && InterlockedExchange(&g_zoomSaidEpoch, epoch) != epoch) {
+        logD("live: zoom - %s: %d box size(s) the engine reset written back, %d box(es) with "
+             "another texture measured again (said once per HUD; the heartbeat's zoom= counts "
+             "every one)", when, back, retex);
+    }
+}
+
+// The zoom state belongs to the captured boxes: a new capture or a dead HUD drops it.
+void zoomForgetAll() {
+    if (g_boxZoom) g_boxZoom->clear();
+    InterlockedExchange(&g_zoomLive, 0);
+}
+
 // Show `record` in box `i`. `pos` (already multiplied by the UI scale, exactly as
 // UIReagentItem::Load multiplies itemBoxX/Y) is applied AFTER the SetItem that changes the
 // texture - SetTexture rewrites x,y,w,h together (exe 0x1EE824) and early-outs when the texture
@@ -489,7 +695,8 @@ bool readBoxPos(void* box, float* x, float* y) {
 // line, and `g.entries[k]` / `g.items[k]` are the two halves).  `storeDisplayProtoId` must be
 // asked with the ITEM record: a box record finds nothing in the journal and silently returns 0
 // for every stored item.  nullptr = the vanilla materials page, which must never be substituted.
-bool showBox(size_t i, const std::string& record, const float* pos, const char* itemRecord) {
+bool showBox(size_t i, const std::string& record, const float* pos, const char* itemRecord,
+             int zoomPct = 100) {
     void* box = (*g_boxes)[i];
     if (!box) return false;
     unsigned int id = 0;
@@ -527,6 +734,9 @@ bool showBox(size_t i, const std::string& record, const float* pos, const char* 
         return false;
     }
     if (pos && !callSetPos(box, pos[0], pos[1])) return false;
+    // The box's size at the page's zoom, from its texture (after the SetItem that may have
+    // re-pointed it); at 100 only a box a zoomed page left bigger is touched (its native size).
+    if (!boxZoomApply(i, zoomPct)) return false;
     // The ONE byte that makes the engine's own "Currently Equipped" comparison box appear over
     // the mod's tab.  The shared item-box rollover (exe 0x1EE880)
     // skips its whole compare block on `cmp byte [r12+0x7e],0` at 0x1EE9A4; the base item-box
@@ -560,6 +770,9 @@ bool showBox(size_t i, const std::string& record, const float* pos, const char* 
 bool hideBox(size_t i) {
     void* box = (*g_boxes)[i];
     if (!box) return false;
+    // A box a zoomed page showed gets the engine's own size back while its texture is still
+    // there to measure: the next SetItem of the same texture would keep the zoomed size.
+    if (!boxZoomApply(i, 100)) return false;
     if (!callSetItem(box, 0)) return false;
     const float s = g_uiScale > 0.0f ? g_uiScale : 1.0f;
     const float park = floorf(-4000.0f * s + 0.5f);   // the engine's own rounding
@@ -761,15 +974,16 @@ void applyLayout(int group, int row) {
             // Rounded exactly the way the engine rounds a position it stores itself
             // (SetTexture: floor(x + 0.5), exe 0x1EE7F0..0x1EE824), so a Sync that
             // re-SetItems the box between relayouts cannot shift it by half a pixel.
+            // The pitch is the cell IN FORCE (zCellW x zCellH: the generated cell at zoom 100).
             const float sc = g_uiScale > 0.0f ? g_uiScale : 1.0f;
             float xy[2];
-            xy[0] = floorf((float)(g_gridX + g.cellW * col) * sc + 0.5f);
-            xy[1] = floorf((float)(g_gridY + (g.cellH + g_rowGap) * rr) * sc + 0.5f);
+            xy[0] = floorf((float)(g_gridX + g.zCellW * col) * sc + 0.5f);
+            xy[1] = floorf((float)(g_gridY + (g.zCellH + g_rowGap) * rr) * sc + 0.5f);
             // `g.items[k]` is the ITEM record this box stands for - the key the journal and the
             // reagent map use. It can be empty (an `E` line with no second
             // field), and `showBox` treats that exactly like the vanilla page.
             const char* itemRec = k < g.items.size() ? g.items[k].c_str() : nullptr;
-            if (!showBox((size_t)j, g.entries[k], xy, itemRec)) {
+            if (!showBox((size_t)j, g.entries[k], xy, itemRec, g.zoom)) {
                 disable("an engine call faulted while showing a collection group");
                 return;
             }
@@ -789,28 +1003,36 @@ void applyLayout(int group, int row) {
     // What the label (liveViewInfo) reports about this layout.
     InterlockedExchange(&g_shownFiltered, filtered ? 1 : 0);
     InterlockedExchange(&g_shownCount, (LONG)shown);
-    char note[96];
+    char note[160];
     note[0] = 0;
     if (parked) _snprintf_s(note, sizeof(note), _TRUNCATE, " [layout editor: every box parked]");
     if (filtered) {
         _snprintf_s(note, sizeof(note), _TRUNCATE, " [owned only: %d of %zu entries shown]", shown,
                     pageGroup(group).entries.size());
     }
+    if (!parked && group >= 0 && pageGroup(group).zoom > 100) {
+        const size_t at = strlen(note);
+        _snprintf_s(note + at, sizeof(note) - at, _TRUNCATE, " [zoom %d%%: cells %dx%d]",
+                    pageGroup(group).zoom, pageGroup(group).zCellW, pageGroup(group).zCellH);
+    }
     logT("live: relayout #%ld group=%d \"%s\" firstRow=%d boxes=%zu/%zu protoCache=%zu scale=%.3f%s",
          t, group, label, row, used, n, g_protoCache->size(), g_uiScale, note);
     reagentAfterRelayout(group, used);  // the engine's own box-badge repaint
+    zoomReassert("after the relayout's Sync");   // a Sync that re-pointed a texture resized it
 
     // The plate follows the group, and the owned counters are recomputed HERE -
-    // one map walk per relayout, never one per frame.
-    const int cw = group < 0 ? 0 : pageGroup(group).cellW;
-    const int chh = group < 0 ? 0 : pageGroup(group).cellH;
+    // one map walk per relayout, never one per frame. The plate is the cell IN FORCE's (at a
+    // zoom the zoom's own layout set, ut_plate.cpp plateNames).
+    const int cw = group < 0 ? 0 : pageGroup(group).zCellW;
+    const int chh = group < 0 ? 0 : pageGroup(group).zCellH;
     plateApply(group, label, cw, chh);
     recountOwned(group);
 }
 
 // Every record that can ever be shown must fit, so the cache is sized from the data, not from
-// live_cache_max: 24 vanilla boxes + the loaded record count + 64, and `live_cache_max` may only
-// RAISE that (with the shipped data max(derived, 4096) happens to be 4096).  Past the cap each
+// live_cache_max: 24 vanilla boxes + the loaded record count + 64, and `live_cache_max` (4096)
+// may only RAISE that - with today's catalogues the derived half is the larger (the base game's
+// 7,184 records give 7,272), so the key is a floor nobody needs to touch.  Past the cap each
 // relayout re-runs UIReagentItem::Load -> CreateObjectFromFile and leaks one display prototype
 // per box.  The heartbeat reports both halves (`cached=N/CAP derived=D`).
 // The memoisation latches only once the data is in: a cacheCap() call made before
@@ -963,6 +1185,8 @@ bool loadGroups(const char* path) {
             if (g.rows < 1) g.rows = 1;
             g.genCols = g.cols;
             g.genRows = g.rows;
+            g.zCellW = g.cellW;   // zoom 100 until the first layout fits the groups
+            g.zCellH = g.cellH;
             if (glOk) {
                 g.id = gl.id;
                 g.tag = gl.tag;
@@ -1142,25 +1366,37 @@ void layoutCompute(const LaySig& sig, LiveLayout* out) {
     // The pad holds MAT, every BUTTON of the buttons file (one per group without one), OWN - or,
     // when no layout of them carries a size-6 caption, pages of them with a NEXT button
     // (ut_padpage.h).
+    // The EDIT button ([advanced] edit_button, default 1) is one more button before OWN; the
+    // settings file's reload bumps configGeneration, in the signature, so 0 re-lays the pad out.
     const int groups = panelPadButtonCount();
+    const int edit = g_cfg.editButton ? 1 : 0;
     {
         UtLayoutInput tryIn;
         UtRect tryUser[kUtLayParts];
-        out->pages = utPadPaginate(groups, [&](int n) {
+        out->pages = utPadPaginate(groups, edit, [&](int n) {
             src.buttons = n;
-            src.widestCtx = (n == groups + 2) ? panelButtonCaptions() : panelButtonCaptionsPaged();
+            src.widestCtx = panelButtonCaptionsFor(n == groups + 2 + edit ? 0 : 1, edit);
             return utLayoutFromSource(src, &tryIn, tryUser).pad.ok != 0;
         });
     }
     src.buttons = out->pages.buttons;
-    src.widestCtx = out->pages.pages > 1 ? panelButtonCaptionsPaged() : panelButtonCaptions();
+    src.widestCtx = panelButtonCaptionsFor(out->pages.pages > 1 ? 1 : 0, edit);
     out->L = utLayoutFromSource(src, &out->in, out->user);
+    // zoom_pct: the cells in force are magnified (applyGridLayout fits every group with it). The
+    // resolver above judged a user grid against the GENERATED largest cell (a grid too small for a
+    // magnified one lowers that group's zoom instead, utZoomFit); the editor's smallest grid is
+    // the largest cell as the page shows it at the zoom, so in.maxCellW/H carry that from here on
+    // (ut_panel.cpp editOpen hands them to utEditMinSizes, utEditCheck judges the edit with them).
+    out->zoom = utZoomPct(g_cfg.zoomPct);
+    if (out->zoom > kUtZoomMin)
+        utZoomLargestCell(out->L.rect[kUtLayGrid], sig.maxCellW, sig.maxCellH, sig.rowGap,
+                          out->zoom, &out->in.maxCellW, &out->in.maxCellH);
     const char* pm = configFamilyGet(st[3], out->cover);
     out->padmatSet = (pm && utRectParse(pm, &out->padmat)) ? 1 : 0;
     out->ok = 1;
 
     const UtLayout& L = out->L;
-    bool anyUser = out->padmatSet != 0;
+    bool anyUser = out->padmatSet != 0 || out->zoom > kUtZoomMin;
     for (int p = 0; p < kUtLayParts; ++p) {
         char msg[128];
         msg[0] = 0;
@@ -1239,6 +1475,11 @@ void layoutCompute(const LaySig& sig, LiveLayout* out) {
                     "; %d groups do not fit the pad - %d pages of %d with a NEXT button",
                     out->pages.groups, out->pages.pages, out->pages.perPage);
     }
+    if (out->zoom > kUtZoomMin) {
+        const size_t at = strlen(said);
+        _snprintf_s(said + at, sizeof(said) - at, _TRUNCATE, "; zoom_pct=%d (the cells magnified)",
+                    out->zoom);
+    }
     if (strcmp(said, g_laySaid) != 0) {
         strcpy_s(g_laySaid, sizeof(g_laySaid), said);
         if (anyUser) {
@@ -1262,30 +1503,44 @@ void applyGridLayout(const LiveLayout& lay) {
     const int oldCols = curOk ? pageGroup(cur).cols : 0;
     bool moved = gx != g_gridX || gy != g_gridY;
     int capped = 0;
-    for (size_t i = 0; i < g_groups->size(); ++i) {
-        Group& g = (*g_groups)[i];
-        const UtGrid gg =
-            utLiveGroupGrid(L, g.genCols, g.genRows, g.cellW, g.cellH, g_rowGap, g_nmax);
-        if (gg.capped) ++capped;
-        if (gg.cols != g.cols || gg.rows != g.rows) {
+    // zoom_pct: every group's cell in force is its cell magnified, lowered per group where one
+    // magnified cell would not fit the grid in force (utZoomFit); the grid is fitted again.
+    const int zoom = utZoomPct(lay.zoom);
+    int clamped = 0;
+    char clampedText[200];
+    clampedText[0] = 0;
+    auto fit = [&](Group& g) {
+        UtZoomFit zf;
+        const UtGrid gg = utLiveGroupGrid(L, g.genCols, g.genRows, g.cellW, g.cellH, g_rowGap,
+                                          g_nmax, zoom, &zf);
+        if (gg.cols != g.cols || gg.rows != g.rows || zf.cellW != g.zCellW ||
+            zf.cellH != g.zCellH || zf.pct != g.zoom) {
             g.cols = gg.cols;
             g.rows = gg.rows;
+            g.zCellW = zf.cellW;
+            g.zCellH = zf.cellH;
+            g.zoom = zf.pct;
             moved = true;
+        }
+        return gg;
+    };
+    for (size_t i = 0; i < g_groups->size(); ++i) {
+        Group& g = (*g_groups)[i];
+        const UtGrid gg = fit(g);
+        if (gg.capped) ++capped;
+        if (g.zoom < zoom) {
+            const size_t at = strlen(clampedText);
+            if (clamped < 6)
+                _snprintf_s(clampedText + at, sizeof(clampedText) - at, _TRUNCATE, "%s%s %d%% (%dx%d)",
+                            clamped ? ", " : "", g.label.c_str(), g.zoom, g.zCellW, g.zCellH);
+            ++clamped;
         }
     }
     // The pages of several-group buttons are fitted like any group (not counted in "capped",
     // which counts the table's groups as before).
     if (UnionTable* u = g_unions) {
         if (u->groups == g_groups) {
-            for (Group& g : u->view) {
-                const UtGrid gg =
-                    utLiveGroupGrid(L, g.genCols, g.genRows, g.cellW, g.cellH, g_rowGap, g_nmax);
-                if (gg.cols != g.cols || gg.rows != g.rows) {
-                    g.cols = gg.cols;
-                    g.rows = gg.rows;
-                    moved = true;
-                }
-            }
+            for (Group& g : u->view) fit(g);
         }
     }
     g_gridX = gx;
@@ -1299,11 +1554,20 @@ void applyGridLayout(const LiveLayout& lay) {
         }
     }
     if (curOk) InterlockedExchange(&g_relayoutWanted, 1);
-    logI("live: the grid in force is %s %d,%d,%d,%d on the %s cover - every group re-fitted (%d "
+    char zoomNote[48];
+    zoomNote[0] = 0;
+    if (zoom > kUtZoomMin)
+        _snprintf_s(zoomNote, sizeof(zoomNote), _TRUNCATE, " at zoom_pct=%d", zoom);
+    logI("live: the grid in force is %s %d,%d,%d,%d on the %s cover - every group re-fitted%s (%d "
          "capped at the frame's %d boxes)%s",
          user ? "the user's" : "the derived", L.rect[kUtLayGrid].x, L.rect[kUtLayGrid].y,
-         L.rect[kUtLayGrid].w, L.rect[kUtLayGrid].h, lay.cover, capped, g_nmax,
+         L.rect[kUtLayGrid].w, L.rect[kUtLayGrid].h, lay.cover, zoomNote, capped, g_nmax,
          curOk ? "; the page on screen is laid out again from its first visible item" : "");
+    if (clamped) {
+        logI("live: zoom_pct=%d - %d group(s) shown at a lower zoom, so one magnified cell fits the "
+             "grid %dx%d: %s%s", zoom, clamped, L.rect[kUtLayGrid].w, L.rect[kUtLayGrid].h,
+             clampedText, clamped > 6 ? ", ..." : "");
+    }
     if (user && !InterlockedExchange(&g_layPlateNoted, 1)) {
         logI("layout: a user grid is in force - the page keeps the plate generated for the derived "
              "grid, so its frames do not follow the moved boxes until layout plates exist");
@@ -1361,10 +1625,15 @@ void unionsSync(const LiveLayout& lay) {
                 const UtGrid dg = utGridFit(UtRect{0, 0, g_usableW, g_usableH}, c.w, c.h, g_rowGap, g_nmax);
                 v.genCols = dg.cols;
                 v.genRows = dg.rows;
-                const UtGrid gg = lay.ok ? utLiveGroupGrid(lay.L, v.genCols, v.genRows, c.w, c.h, g_rowGap, g_nmax)
+                UtZoomFit zf = {kUtZoomMin, c.w, c.h, 0};
+                const UtGrid gg = lay.ok ? utLiveGroupGrid(lay.L, v.genCols, v.genRows, c.w, c.h,
+                                                           g_rowGap, g_nmax, lay.zoom, &zf)
                                          : dg;
                 v.cols = gg.cols;
                 v.rows = gg.rows;
+                v.zCellW = zf.cellW;   // the cell in force (zoom_pct), as applyGridLayout fits it
+                v.zCellH = zf.cellH;
+                v.zoom = zf.pct;
                 if (u->view.size() < 8) {
                     logI("live: one grid per button - \"%s\" (groups %s, %zu items) is one page: cells "
                          "%dx%d, %d x %d%s",
@@ -1491,6 +1760,7 @@ bool liveInit(HMODULE selfModule) {
     g_vanPos = new std::vector<float>();
     g_protoCache = new std::unordered_map<std::string, unsigned int>();
     g_vis = new std::vector<int>();   // the owned-only index list
+    g_boxZoom = new std::vector<BoxZoom>();   // the zoomed boxes' sizes (zoom_pct)
     plateInit(selfModule);   // its own signature, its own late scan, its own log
 
     char path[MAX_PATH];
@@ -1631,6 +1901,7 @@ void liveBeginCapture() {
     }
     g_boxes->clear();
     if (g_vanPos) g_vanPos->clear();
+    zoomForgetAll();   // the sizes written belong to the old HUD's widgets
     g_protoCache->clear();  // the old prototypes belong to a HUD that no longer exists
     g_uiScale = 0.0f;
     // The scale is re-asked per HUD build - that is exactly when the options slider or the
@@ -1668,6 +1939,7 @@ void liveCancelCapture() {
     // (size == g_nmax) can never be met by a cancelled capture.
     if (g_boxes) g_boxes->clear();
     if (g_vanPos) g_vanPos->clear();
+    zoomForgetAll();
     InterlockedDecrement(&g_captureEpoch);
     logD("live: the box capture is cancelled - the frame record is not in the active database");
 }
@@ -1690,6 +1962,7 @@ void liveOnHudGone(const char* why) {
     utBoxesHudGone(&b);
     g_boxes->clear();   // b.captured == 0: every pointer in it belonged to the dead HUD
     if (g_vanPos) g_vanPos->clear();
+    zoomForgetAll();
     InterlockedExchange(&g_capturing, b.capturing ? 1 : 0);
     g_curGroup = b.curGroup;   // shows nothing; g_wantGroup/g_wantRow keep the user's choice
     // A repaint asked for against the dead HUD means nothing (liveBeginCapture says the same).
@@ -1825,6 +2098,9 @@ void liveTick(bool gameThread) {
             InterlockedExchange(&g_inRelayout, 0);
         }
     }
+    // zoom_pct: a size the engine reset under a zoomed box is written back (two interlocked reads
+    // and nothing else while no box is zoomed). Here, on the tick - never in the Draw detour.
+    zoomReassert("the tick");
     if (g_iniDirty && GetTickCount() - g_dirtyAt > 1200) {
         g_iniDirty = false;
         g_cfg.uniqGroup = g_curGroup;
@@ -1882,11 +2158,13 @@ static bool inputAllowed(bool plainWheel, const char* what) {
 
 bool liveMaterialsVisible() { return plateMaterialsVisible(); }
 
-bool liveHandleWheel(int ticks, bool ctrl) {
+bool liveHandleWheel(int ticks, bool buttons) {
     if (!liveActive() || !g_groups || g_groups->empty()) return false;
     if (ticks == 0) return false;
-    if (!inputAllowed(!ctrl, ctrl ? "Ctrl+wheel" : "wheel")) return false;
-    if (ctrl) {
+    // The cursor test belongs to the ROW wheel (rows_wheel), whatever its chord.
+    if (!inputAllowed(!buttons, buttons ? "the button wheel (button_wheel)" : "the row wheel (rows_wheel)"))
+        return false;
+    if (buttons) {
         // One step over the materials page and the pad's BUTTONS in the order the pad draws them
         // (the buttons file's), wrapping - never the group order (a group appended as the last
         // button, as DGD's Blueprints, is the last stop, not the one after its group index's
@@ -1912,12 +2190,13 @@ bool liveHandleWheel(int ticks, bool ctrl) {
     return true;
 }
 
-bool liveHandleKey(int vk, bool ctrl) {
+bool liveHandleStep(int action) {
     if (!liveActive() || !g_groups || g_groups->empty()) return false;
-    if (vk != VK_PRIOR && vk != VK_NEXT) return false;
-    if (!inputAllowed(false, ctrl ? "Ctrl+PageUp/Down" : "PageUp/Down")) return false;
-    const int dir = (vk == VK_PRIOR) ? -1 : 1;
-    if (ctrl) return liveHandleWheel(dir > 0 ? -1 : 1, true);
+    const bool buttons = action == kUtKeyActButtonPrev || action == kUtKeyActButtonNext;
+    if (!buttons && action != kUtKeyActRowsUp && action != kUtKeyActRowsDown) return false;
+    if (!inputAllowed(false, kUtKeyActions[action].name)) return false;
+    const int dir = (action == kUtKeyActRowsUp || action == kUtKeyActButtonPrev) ? -1 : 1;
+    if (buttons) return liveHandleWheel(dir > 0 ? -1 : 1, true);
     if (g_wantGroup < 0) return false;
     const Group& g = pageGroup(g_wantGroup);
     int row = g_wantRow + dir * g.rows;
@@ -2268,7 +2547,8 @@ bool liveLayoutGet(LiveLayout* out) {
                               !strcmp(next.cover, g_lay.cover) &&
                               !memcmp(&next.L, &g_lay.L, sizeof(next.L)) &&
                               next.padmatSet == g_lay.padmatSet &&
-                              (!next.padmatSet || utRectEq(next.padmat, g_lay.padmat));
+                              (!next.padmatSet || utRectEq(next.padmat, g_lay.padmat)) &&
+                              next.zoom == g_lay.zoom;
             if (!same) next.gen = prev + 1;
             g_lay = next;
             g_laySig = sig;
@@ -2286,8 +2566,8 @@ int liveCellSizes(int* w, int* h, int cap) {
     if (!g_groups) return 0;
     int n = 0;
     for (size_t i = 0; i < g_groups->size(); ++i) {
-        const int cw = (*g_groups)[i].cellW;
-        const int ch = (*g_groups)[i].cellH;
+        const int cw = (*g_groups)[i].zCellW;   // the cell in force (= the G line's at zoom 100)
+        const int ch = (*g_groups)[i].zCellH;
         bool seen = false;
         for (int j = 0; j < n && j < cap; ++j) {
             if (w[j] == cw && h[j] == ch) {
@@ -2336,8 +2616,8 @@ bool liveViewInfo(LiveView* out) {
     int all = 0;
     for (size_t i = 0; i < g_groups->size(); ++i) all += (int)(*g_groups)[i].entries.size();
     out->collection = all;
-    out->cellW = grp.cellW;
-    out->cellH = grp.cellH;
+    out->cellW = grp.zCellW;   // the cell in force: the editor snaps to it, the outline names it
+    out->cellH = grp.zCellH;
     out->cols = grp.cols;
     out->rows = grp.rows;
     // The LABEL and the PAD must agree, so the label takes the same number liveUiScale() gives
@@ -2382,6 +2662,13 @@ const char* liveStatus() {
                 InterlockedCompareExchange(&g_faults, 0, 0), uiScaleCached(),
                 InterlockedCompareExchange(&g_forcedRelayouts, 0, 0), ownedNodes, ownedEmpty,
                 g_uiScale, tableRows, tableCopies, tableOnly);
+    const LONG zw = InterlockedCompareExchange(&g_zoomWrites, 0, 0);
+    if (zw || utZoomPct(g_cfg.zoomPct) > kUtZoomMin) {
+        const size_t at = strlen(g_status);
+        _snprintf_s(g_status + at, sizeof(g_status) - at, _TRUNCATE, " zoom=%d/%ld/%ld/%ld",
+                    utZoomPct(g_cfg.zoomPct), zw, InterlockedCompareExchange(&g_zoomReasserts, 0, 0),
+                    InterlockedCompareExchange(&g_zoomRetex, 0, 0));
+    }
     return g_status;
 }
 

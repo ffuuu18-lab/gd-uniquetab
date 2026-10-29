@@ -17,6 +17,11 @@ rem         scratch mod folder under build\test\gen-mod.
 rem Every pass starts from an EMPTY scratch folder (:fresh at the end removes it and makes it again;
 rem the files passes 1 and 2 compare are deleted first), so a file an earlier run left behind - a
 rem flag-off plate, say - can never be counted or compared by this run.
+rem LINE ENDS: this file must be CRLF (.gitattributes checks every .bat out so). With LF-only
+rem line ends cmd resumes after a CALL :fresh at the wrong offset: the database-mod FOR blocks
+rem below ran as loose lines ('dbmod custom--m', '%%M: SKIPPED') and the passes after them ran a
+rem second time after the first ALL PASS. Each dbmod / mi-dbmod pass prints its own lines naming
+rem custom-reignofterror and custom-deathgrimdawn exactly once; ALL PASS is printed once.
 setlocal
 set "ROOT=%~dp0.."
 set "OUT=%ROOT%\build\test"
@@ -90,6 +95,15 @@ python "%ROOT%\tools\make_plates.py" --grid 105,120,333,460 --layout-hash %LH% -
 if errorlevel 1 (echo [test] FAIL: layout plates: tools\make_plates.py --grid failed & set RC=1 & goto :layout_done)
 "%OUT%\test_catalogue.exe" --layout-compare "%OUT%\gen-layout\plateroot" "%OUT%\gen-layout\py" "%OUT%\gen-layout\layout-names.txt"
 if errorlevel 1 set RC=1
+rem zoom_pct=150 under the derived grid (a layout of its own): make_plates.py --grid --zoom, byte for byte
+set "LZ="
+if exist "%OUT%\gen-layout\layout-zoom-hash.txt" set /p LZ=<"%OUT%\gen-layout\layout-zoom-hash.txt"
+if not defined LZ (echo [test] FAIL: layout plates: no zoom set to compare & set RC=1 & goto :zoom_done)
+python "%ROOT%\tools\make_plates.py" --grid 105,76,333,552 --zoom 150 --layout-hash %LZ% --out "%OUT%\gen-layout\py-zoom" > "%OUT%\gen-layout\py-zoom.log" 2>&1
+if errorlevel 1 (echo [test] FAIL: layout plates: tools\make_plates.py --grid --zoom failed & set RC=1 & goto :zoom_done)
+"%OUT%\test_catalogue.exe" --layout-compare "%OUT%\gen-layout\plateroot-zoom" "%OUT%\gen-layout\py-zoom" "%OUT%\gen-layout\layout-zoom-names.txt"
+if errorlevel 1 set RC=1
+:zoom_done
 rem the wide cover too (X-Mod 975x968, a flat ground): the same comparison
 set "LX="
 if exist "%OUT%\gen-layout\layout-975-hash.txt" set /p LX=<"%OUT%\gen-layout\layout-975-hash.txt"

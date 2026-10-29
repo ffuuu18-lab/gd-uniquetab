@@ -22,12 +22,18 @@
 //      the catalogue display name as UTF-8; both go through the same fold and the match is a
 //      plain substring. A silent bug here would make tier C answer "no" for ever.
 //
+//  12. ZOOM_PCT and the row: a zoom change is a cols change (vanilla Helms 5 x 8 at 100 %, 3 x 5
+//      of 96 px at 150 %, ut_layout.h utLiveGroupGrid - the call ut_live's applyGridLayout
+//      makes), and utRowKeep keeps the first visible item on screen from 100 to 150 and back with
+//      the owned-only filter on (rows in FILTERED units), clamped like any row after a take.
+//
 // Build: tools\build_test_rowfold.bat  (needs a vcvars64 shell; the .bat calls it itself)
 #include <stdio.h>
 #include <string.h>
 
 #include <string>
 
+#include "../src/ut_layout.h"   // utLiveGroupGrid / utRowKeep at a zoom
 #include "../src/ut_ownedfold.h"
 #include "../src/ut_rowmath.h"
 #include "../src/ut_padmat.h"
@@ -358,6 +364,50 @@ static void testPadMat() {
        !utRectsOverlap(UtRectF{0, 0, 10, 10}, UtRectF{10, 0, 10, 10}));
 }
 
+// ------------------------------------------------------------------ 12. zoom_pct and the row
+static void testZoomRowKeep() {
+    printf("\n12. zoom_pct - the first visible item kept from 100 %% to 150 %% and back, OWN on\n");
+    UtLayout L = {};
+    L.rect[kUtLayGrid] = {105, 76, 333, 552};   // vanilla's derived grid
+    UtZoomFit z100 = {}, z150 = {};
+    const UtGrid g100 = utLiveGroupGrid(L, 5, 8, 64, 64, kUtRowGap, 234, 100, &z100);
+    const UtGrid g150 = utLiveGroupGrid(L, 5, 8, 64, 64, kUtRowGap, 234, 150, &z150);
+    okInt("Helms at 100 %: the G line's 5 columns", g100.cols, 5);
+    okInt("Helms at 100 %: and its 8 rows", g100.rows, 8);
+    okInt("Helms at 150 %: 3 columns", g150.cols, 3);
+    okInt("Helms at 150 %: 5 rows", g150.rows, 5);
+    okInt("Helms at 150 %: cells of 96 px", z150.cellW, 96);
+    // the owned-only filter on: 200 owned Helms, rows are FILTERED rows
+    const int shown = 200;
+    const int max100 = utMaxRowOf(shown, g100.cols, g100.rows);
+    const int max150 = utMaxRowOf(shown, g150.cols, g150.rows);
+    okInt("200 owned at 100 %: the last first-row is 32", max100, 32);
+    okInt("200 owned at 150 %: the last first-row is 62", max150, 62);
+    int lost = 0, notTop = 0, drift = 0, far = 0;
+    for (int row = 0; row <= max100; ++row) {
+        const int first = row * g100.cols;   // the first visible item at 100 %
+        const int r150 = utClampRow(utRowKeep(row, g100.cols, g150.cols), max150);
+        if (first < r150 * g150.cols || first >= r150 * g150.cols + g150.cols * g150.rows) ++lost;
+        if (first >= r150 * g150.cols + g150.cols) ++notTop;   // not in the first row on screen
+        const int back = utClampRow(utRowKeep(r150, g150.cols, g100.cols), max100);
+        if (first < back * g100.cols || first >= back * g100.cols + g100.cols * g100.rows) ++lost;
+        if (back != row) ++drift;
+        if (back < row - 1 || back > row) ++far;
+    }
+    ok("100 -> 150: every first visible item is in the first row on screen", lost == 0 && notTop == 0);
+    char what[96];
+    snprintf(what, sizeof(what), "150 -> 100: back on screen; %d of %d rows come back one row up, none further",
+             drift, max100 + 1);
+    ok(what, lost == 0 && far == 0);
+    // a take while zoomed: 160 of the 200 go, the row past the end comes back to the last one
+    const int r = utRowKeep(max100, g100.cols, g150.cols);
+    okInt("the last 100 % row is row 53 at 150 %", r, 53);
+    okInt("40 left at 150 %: clamped to the last row, 9", utClampRow(r, utMaxRowOf(40, g150.cols, g150.rows)), 9);
+    okInt("nothing owned: row 0", utClampRow(r, utMaxRowOf(0, g150.cols, g150.rows)), 0);
+    // zoom 100 changes nothing: the same cols, the row kept as it is
+    okInt("100 -> 100: the row is the row", utRowKeep(17, g100.cols, g100.cols), 17);
+}
+
 int main() {
     printf("offline harness - the paging arithmetic and the tier-C case fold\n");
     printf("plus the owned fold's own arithmetic (src\\ut_ownedfold.h)\n");
@@ -368,6 +418,7 @@ int main() {
     testOwnedFold();
     testStartOrder();
     testPadMat();
+    testZoomRowKeep();
     printf("\n%s (%d failure(s) of %d checks)\n", g_fail ? "FAILED" : "PASSED", g_fail, g_run);
     return g_fail ? 1 : 0;
 }

@@ -7,10 +7,12 @@
 //   1..G       collection group i - 1, in uniq-groups.txt order, captioned by its G line's tag
 //   G + 1      the owned-only filter (OWN)
 //   G + 2      the next pad page (only while the pad is paged)
-// A pad that holds every button draws them in that order, so the vanilla table (G = 24) draws
-// the 26 buttons 1.1.0 drew, one for one. A pad with no layout whose smallest button carries a
-// size-6 caption is PAGED: each page draws MAT, K groups, NEXT and OWN (OWN stays the last,
-// double-wide cell), K the largest count that fits. The page on screen is the one holding the
+//   G + 3      the layout editor (EDIT; only while [advanced] edit_button=1, the default)
+// A pad that holds every button draws them in that order but for EDIT, which is drawn just
+// before OWN: OWN stays the last, double-wide cell. So the vanilla table (G = 24) without EDIT
+// draws the 26 buttons 1.1.0 drew, one for one, and with it MAT, the groups, EDIT, OWN. A pad
+// with no layout whose smallest button carries a size-6 caption is PAGED: each page draws MAT,
+// K groups, NEXT, EDIT (when on) and OWN, K the largest count that fits. The page on screen is the one holding the
 // group on screen; NEXT selects the first group of the next page (wrapping), so a click on it is
 // an ordinary group click and the pad follows the group.
 //
@@ -31,34 +33,45 @@ struct UtPadPages {
     int groups;    // G
     int perPage;   // K groups per page (G when not paged)
     int pages;     // 1 = not paged
-    int buttons;   // buttons drawn per page: G + 2, or K + 3 when paged
+    int buttons;   // buttons drawn per page: G + 2 + edit, or K + 3 + edit when paged
+    int edit;      // 1 = the EDIT button (logical G + 3) is on the pad
 };
 
 inline int utPadOwnIndex(const UtPadPages& p) { return p.groups + 1; }
 inline int utPadNextIndex(const UtPadPages& p) { return p.groups + 2; }
-// How many logical indexes exist (NEXT only while paged).
-inline int utPadLogicalCount(const UtPadPages& p) { return p.groups + (p.pages > 1 ? 3 : 2); }
+inline int utPadEditIndex(const UtPadPages& p) { return p.groups + 3; }
+// One past the largest logical index (NEXT only while paged, EDIT only while on - an unpaged
+// pad with EDIT has no button G + 2).
+inline int utPadLogicalCount(const UtPadPages& p) {
+    return p.edit ? p.groups + 4 : p.groups + (p.pages > 1 ? 3 : 2);
+}
 
 // `fits(n)` says whether the pad in force lays out n buttons with a readable caption. Every
-// button when they fit (and n <= kUtPadButtonsMax); else the largest K with K + 3 fitting; else
-// the whole table unpaged (the pad in force then draws nothing, as an unfitting pad always did).
+// button when they fit (and n <= kUtPadButtonsMax); else the largest K with K + 3 (+ EDIT)
+// fitting; else the whole table unpaged (the pad in force then draws nothing, as an unfitting
+// pad always did). `edit` = 1 adds the EDIT button to every page.
 template <class Fits>
-inline UtPadPages utPadPaginate(int groups, Fits fits) {
-    UtPadPages p = {groups < 0 ? 0 : groups, 0, 1, 0};
+inline UtPadPages utPadPaginate(int groups, int edit, Fits fits) {
+    UtPadPages p = {groups < 0 ? 0 : groups, 0, 1, 0, edit ? 1 : 0};
     p.perPage = p.groups;
-    p.buttons = p.groups + 2;
+    p.buttons = p.groups + 2 + p.edit;
     if (p.buttons <= kUtPadButtonsMax && fits(p.buttons)) return p;
     int k = p.groups - 1;
-    if (k > kUtPadButtonsMax - 3) k = kUtPadButtonsMax - 3;
+    if (k > kUtPadButtonsMax - 3 - p.edit) k = kUtPadButtonsMax - 3 - p.edit;
     for (; k >= 1; --k) {
-        if (fits(k + 3)) {
+        if (fits(k + 3 + p.edit)) {
             p.perPage = k;
             p.pages = (p.groups + k - 1) / k;
-            p.buttons = k + 3;
+            p.buttons = k + 3 + p.edit;
             return p;
         }
     }
     return p;
+}
+// The pad without the EDIT button.
+template <class Fits>
+inline UtPadPages utPadPaginate(int groups, Fits fits) {
+    return utPadPaginate(groups, 0, fits);
 }
 
 // The page group `group` is on (0 for the vanilla page and while not paged).
@@ -69,13 +82,15 @@ inline int utPadPageOf(const UtPadPages& p, int group) {
 }
 
 // The logical index drawn in `slot` (0 .. buttons - 1) of page `page`; -1 = an empty slot (the
-// last page's unused group cells) or a slot out of range.
+// last page's unused group cells) or a slot out of range. OWN is always the last slot (the wide
+// one), EDIT the slot before it while on, NEXT the slot before those while paged.
 inline int utPadSlotLogical(const UtPadPages& p, int page, int slot) {
     if (slot < 0 || slot >= p.buttons) return -1;
-    if (p.pages <= 1) return slot;
     if (slot == 0) return 0;
     if (slot == p.buttons - 1) return utPadOwnIndex(p);
-    if (slot == p.buttons - 2) return utPadNextIndex(p);
+    if (p.edit && slot == p.buttons - 2) return utPadEditIndex(p);
+    if (p.pages <= 1) return slot;
+    if (slot == p.buttons - 2 - p.edit) return utPadNextIndex(p);
     const int g = page * p.perPage + (slot - 1);
     return g < p.groups ? g + 1 : -1;
 }

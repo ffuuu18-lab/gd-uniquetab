@@ -46,12 +46,24 @@ static const char* const kLogLevels[] = {"error", "warn", "info", "debug", "trac
     {"layout", name, kUtCfgStr, 0, 0, 0, "", UT_OFF(member), UT_CAP(member), nullptr, cmt,     \
      kUtCfgWhenSet, screenValueOk}
 
+// A [keys] row: text checked by ut_keys.h's utKeyParse for its action, hidden (commented at its
+// default, live when changed), the main file only (configMainOnlyKey).
+#define UT_KEY(name, member, action, def, cmt)                                                  \
+    {"keys", name, kUtCfgStr, 0, 0, 0, def, UT_OFF(member), UT_CAP(member), nullptr, cmt,      \
+     kUtCfgHidden, keyValueOk<action>}
+
 namespace {
 const char* screenValueOk(const char* value) {
     UtScreenRect r;
     return utScreenRectParse(value, &r) ? nullptr
                                         : "not <corner>,x,y,w,h (tl, tr, bl or br, then four "
                                           "whole numbers from 0, w and h from 1)";
+}
+// Null when `value` is a legal binding for the action; else ut_keys.h's reason.
+template <int A>
+const char* keyValueOk(const char* value) {
+    UtKeyBind b;
+    return utKeyParse(value, A, &b);
 }
 }  // namespace
 
@@ -66,11 +78,31 @@ const UtCfgKey kUtCfgKeys[] = {
     UT_STR("general", "log_level", logLevel, "info", kLogLevels, 0,
            "how much goes in the log: error, warn, info, debug, trace"),
 
-    // ---- [layout] - the two screen keys the editor writes (absent until set) -----------------
+    // ---- [layout] - zoom_pct, a hidden row (commented at 100), then the two screen keys the
+    // editor writes (absent until set) ---------------------------------------------------------
+    UT_INT("layout", "zoom_pct", zoomPct, 100, 100, 200, UT_H | kUtCfgRefuse,
+           "the item icons bigger, in percent (100..200): fewer per screen, the icons magnified"),
     UT_SCREEN("pad_screen", padScreen,
               "the buttons pinned to a screen corner: tl|tr|bl|br,x,y,w,h in page pixels"),
     UT_SCREEN("label_screen", labelScreen,
               "the label pinned to a screen corner: tl|tr|bl|br,x,y,w,h in page pixels"),
+
+    // ---- [keys] - the keys and clicks the tab answers to; the main file only, one row each ----
+    // In UtKeyAction order (ut_keys.h): the conflict pass's "later row" is the later one here.
+    UT_KEY("rows_up", keyRowsUp, kUtKeyActRowsUp, "PageUp",
+           "one window of rows up on a collection page"),
+    UT_KEY("rows_down", keyRowsDown, kUtKeyActRowsDown, "PageDown",
+           "one window of rows down"),
+    UT_KEY("button_prev", keyButtonPrev, kUtKeyActButtonPrev, "Ctrl+PageUp",
+           "the button before the one on screen (MAT included)"),
+    UT_KEY("button_next", keyButtonNext, kUtKeyActButtonNext, "Ctrl+PageDown",
+           "the button after it"),
+    UT_KEY("rows_wheel", keyRowsWheel, kUtKeyActRowsWheel, "Wheel",
+           "the wheel over the page: one row"),
+    UT_KEY("button_wheel", keyButtonWheel, kUtKeyActButtonWheel, "Ctrl+Wheel",
+           "the wheel anywhere: one button"),
+    UT_KEY("editor_open", keyEditorOpen, kUtKeyActEditorOpen, "Ctrl+RightClick",
+           "on the buttons or a pinned label (or a key): the layout editor"),
 
     // ---- [advanced] - the commented blob, one row each ---------------------------------------
     UT_INT("advanced", "ui_scale_pct", uiScalePct, 0, 0, 300, UT_H,
@@ -95,6 +127,9 @@ const UtCfgKey kUtCfgKeys[] = {
             "1 = outline the grid, the buttons and the label with their numbers"),
     UT_BOOL("advanced", "layout_edit", layoutEdit, 0, UT_H,
             "1 = open the in-game layout editor on the next collection group (sets itself to 0)"),
+    UT_BOOL("advanced", "edit_button", editButton, 1, UT_H,
+            "1 = an EDIT button on the pad opens the layout editor; 0 = no button (the editor_open chord of [keys] "
+            "still opens it: Ctrl+right-click unless you change it)"),
     UT_STR("advanced", "journal_dir", journalDir, "", nullptr, UT_H,
            "where the collection file is kept (read at start-up). Empty = the mod's own folder"),
     UT_INT("advanced", "export_gds", exportGds, 1, 0, 2, UT_H,
@@ -113,7 +148,13 @@ const UtCfgSection kUtCfgSections[] = {
     {"general", ""},
     {"layout",
      "Where the item grid, the buttons and the label sit. The in-game editor writes these\n"
-     "lines: Ctrl+right-click on the buttons. Delete a line to get that part's default back."},
+     "lines: the EDIT button on the pad, or the editor_open chord of [keys] (Ctrl+right-click\n"
+     "unless you change it), opens the editor. Delete a line to get that part's default back."},
+    {"keys",
+     "The keys and clicks the tab answers to, commented out at their default. Remove the ';'\n"
+     "to change one: Ctrl, Shift or Alt and a key, joined by '+' (Alt+PageDown, Shift+Wheel,\n"
+     "F5), or none. A letter, a digit or Space needs Ctrl or Alt. They are read from this\n"
+     "file only, for every game."},
     {"advanced",
      "Every other setting, commented out at its default. Remove the ';' in front of one to\n"
      "change it; the line keeps its place. A value outside its range is clamped."},
@@ -168,8 +209,11 @@ std::string configCustomKey(const char* viewName) {
 }
 
 // journal_dir is read at start-up, before any custom game is known, and it is where the games'
-// journal folders live - so it is the one key a game's own file cannot carry.
-bool configMainOnlyKey(const char* key) { return key && !_stricmp(key, "journal_dir"); }
+// journal folders live - so a game's own file cannot carry it. The [keys] rows are the player's
+// hands, the same in every game: the main file's only.
+bool configMainOnlyKey(const char* key) {
+    return key && (!_stricmp(key, "journal_dir") || utKeyActionOf(key) >= 0);
+}
 
 bool configIsStateKey(const char* key) {
     return key && (!_stricmp(key, "uniq_group") || !_stricmp(key, "uniq_row") ||
@@ -476,8 +520,8 @@ size_t renderSettings(char* out, size_t cap, const UtConfig& src, const char* ga
     o.line("; ============================================================================");
     if (game) {
         o.line("; Unique Collection Tab - your settings for the custom game \"%s\".", game);
-        o.line("; While this game is played this file is the only one read: nothing comes from");
-        o.line("; the main uniquetab.ini, except journal_dir. It was copied from the main file's");
+        o.line("; While this game is played this file is the only one read: nothing comes from the");
+        o.line("; main uniquetab.ini but journal_dir and [keys]. It was copied from the main file's");
         o.line("; values once, when it was made. Delete it to copy them again.");
         o.line("; Edit it while the game runs: it is re-read once a second. Anything after a");
         o.line("; ';' is a comment.");
@@ -493,6 +537,7 @@ size_t renderSettings(char* out, size_t cap, const UtConfig& src, const char* ga
     const size_t col = blobColumn();
     for (int s = 0; s < kUtCfgSectionCount; ++s) {
         const char* name = kUtCfgSections[s].name;
+        if (game && !strcmp(name, "keys")) continue;   // the main file's only (configMainOnlyKey)
         o.line("");
         o.line("[%s]", name);
         if (!renderBlurb(&o, kUtCfgSections[s].blurb)) return 0;
@@ -733,6 +778,8 @@ struct UtIniScan {
     int stateVals[3];
     int notHere;          // a game's own file: journal_dir, which only the main file sets
     char notHereNames[200];
+    int keysHere;         // a game's own file: [keys] rows, which only the main file sets
+    char keysHereNames[200];
     int viewLines;        // [view:<name>] lines (the main file's old blocks), kept for the move
     int viewOverflow;
     ViewLine views[kMaxViewLines];
@@ -790,9 +837,16 @@ void applyOne(const UtCfgKey& k, const char* value, UtConfig* cfg) {
             // Too long for its member is refused too: a cut value could read as another one.
             const char* why = strlen(tmp) >= k.cap ? "too long for this setting" : k.check(tmp);
             if (why) {
-                logW("config: %s=%s is %s - ignored", k.name, tmp, why);
+                if (k.defStr[0])
+                    logW("config: %s=%s is %s - ignored, %s=%s stays", k.name, tmp, why, k.name,
+                         k.defStr);
+                else
+                    logW("config: %s=%s is %s - ignored", k.name, tmp, why);
                 _snprintf_s(tmp, sizeof(tmp), _TRUNCATE, "%s", k.defStr);
             }
+        } else if (k.check && k.defStr[0]) {
+            // an empty value of a checked row with a default (a [keys] row) is that default
+            _snprintf_s(tmp, sizeof(tmp), _TRUNCATE, "%s", k.defStr);
         }
         char* dst = strAt(cfg, k.off);
         _snprintf_s(dst, k.cap, _TRUNCATE, "%s", tmp);
@@ -802,7 +856,12 @@ void applyOne(const UtCfgKey& k, const char* value, UtConfig* cfg) {
     int v = raw;
     if (v < k.lo) v = k.lo;
     if (v > k.hi) v = k.hi;
-    if (v != raw) {
+    if (v != raw && (k.flags & kUtCfgRefuse)) {
+        char tmp[64];
+        trimmedCopy(value, tmp, sizeof(tmp));
+        logW("config: %s=%s is outside %d..%d - ignored, using %d", k.name, tmp, k.lo, k.hi, k.def);
+        v = k.def;
+    } else if (v != raw) {
         logW("config: %s=%d is outside %d..%d - using %d", k.name, raw, k.lo, k.hi, v);
     }
     *intAt(cfg, k.off) = v;
@@ -955,8 +1014,15 @@ void parseInto(char* buf, int mode, UtConfig* parsed, UtIniScan* scan) {
                 const UtCfgFamily* fam = idx < 0 ? configFamilyOf(key, nullptr) : nullptr;
                 const bool gameFile = mode == kParseView || mode == kParseViewOld;
                 if (idx >= 0 && gameFile && configMainOnlyKey(kUtCfgKeys[idx].name)) {
-                    ++scan->notHere;
-                    addName(scan->notHereNames, sizeof(scan->notHereNames), kUtCfgKeys[idx].name);
+                    if (utKeyActionOf(kUtCfgKeys[idx].name) >= 0) {
+                        ++scan->keysHere;
+                        addName(scan->keysHereNames, sizeof(scan->keysHereNames),
+                                kUtCfgKeys[idx].name);
+                    } else {
+                        ++scan->notHere;
+                        addName(scan->notHereNames, sizeof(scan->notHereNames),
+                                kUtCfgKeys[idx].name);
+                    }
                 } else if (idx >= 0) {
                     applyOne(kUtCfgKeys[idx], value, parsed);
                     if (!scan->seen[idx]) {
@@ -980,6 +1046,49 @@ void parseInto(char* buf, int mode, UtConfig* parsed, UtIniScan* scan) {
         }
         line = next;
     }
+}
+
+// ---- [keys]: the bindings in force, derived from the seven texts -----------------------------
+// The texts are already checked (applyOne kept the default for a refused one); this parses them
+// into c->keys and runs the conflict pass - two identical chords of one site: the later row is
+// none, one WARN naming both. Runs where the main file is parsed, so once per edit.
+const char* keyTextOf(const UtConfig& c, int action) {
+    switch (action) {
+        case kUtKeyActRowsUp: return c.keyRowsUp;
+        case kUtKeyActRowsDown: return c.keyRowsDown;
+        case kUtKeyActButtonPrev: return c.keyButtonPrev;
+        case kUtKeyActButtonNext: return c.keyButtonNext;
+        case kUtKeyActRowsWheel: return c.keyRowsWheel;
+        case kUtKeyActButtonWheel: return c.keyButtonWheel;
+        case kUtKeyActEditorOpen: return c.keyEditorOpen;
+        default: return "";
+    }
+}
+
+void deriveKeys(UtConfig* c) {
+    const char* texts[kUtKeyActCount];
+    for (int a = 0; a < kUtKeyActCount; ++a) texts[a] = keyTextOf(*c, a);
+    UtKeyConflict conf[kUtKeyActCount];
+    const int n = utKeysDerive(texts, &c->keys, conf, kUtKeyActCount);
+    for (int i = 0; i < n && i < kUtKeyActCount; ++i) {
+        char chord[64];
+        utKeyText(conf[i].chord, chord, sizeof(chord));
+        logW("config: %s=%s is the same %s as %s=%s - %s is off (none) until one of them changes",
+             kUtKeyActions[conf[i].later].name, texts[conf[i].later], chord,
+             kUtKeyActions[conf[i].earlier].name, texts[conf[i].earlier],
+             kUtKeyActions[conf[i].later].name);
+    }
+}
+
+// The main file's own rows (journal_dir, [keys]) and the bindings derived from them, from `main`.
+void copyMainOnly(UtConfig* dst, const UtConfig& main) {
+    for (int i = 0; i < kUtCfgKeyCount; ++i) {
+        const UtCfgKey& k = kUtCfgKeys[i];
+        if (!configMainOnlyKey(k.name)) continue;
+        if (k.type == kUtCfgStr) memcpy(strAt(dst, k.off), strAt(&main, k.off), k.cap);
+        else *intAt(dst, k.off) = *intAt(&main, k.off);
+    }
+    dst->keys = main.keys;
 }
 
 // ---- the master switch ----------------------------------------------------------------------
@@ -1350,7 +1459,8 @@ bool persistLines(const wchar_t* path, const char* const* keys, const char* cons
 // ---- the views: a custom game's own file and the state file ----------------------------------
 
 // THE SEED: what a custom game's own file is written with the first time it is entered, and what
-// a game file from an older build is completed from (once): the main file's values. The one-shot
+// a pre-complete game file (no ini_version line: the four-key files of ini_version <= 41) is
+// completed from (once): the main file's values. The one-shot
 // commands start at 0 (a command written in the main file is for the main views), and journal_dir
 // is never a game file's value (its line there is rendered commented).
 UtConfig seedFrom(const UtConfig& main) {
@@ -1366,10 +1476,11 @@ UtConfig seedFromMain() { return seedFrom(g_haveBase ? g_base : UtConfig()); }
 
 // g_cfg from its pieces. Under g_applyLock. True when it changed. While a custom game's own file
 // is read, it is the WHOLE configuration - the main file is not consulted, except for journal_dir
-// (read at start-up; the generation's journal inputs follow it too).
+// (read at start-up; the generation's journal inputs follow it too) and [keys] (the player's
+// hands, the same in every game).
 bool publishLocked() {
     UtConfig next = g_ovHave ? g_ovVals : g_base;
-    memcpy(next.journalDir, g_base.journalDir, sizeof(next.journalDir));
+    copyMainOnly(&next, g_base);   // journal_dir and [keys]: always the main file's
     next.uniqGroup = g_stGroup;
     next.uniqRow = g_stRow;
     next.ownedOnly = g_stOwned;
@@ -1414,10 +1525,14 @@ void restampOverlayLocked() {
 }
 
 // Reads the active game's own file into g_ov*. Under g_applyLock. A key the file does not name
-// is the compiled default. A file from an OLDER BUILD (another ini_version, or none: the four-key
-// files of ini_version <= 41) is migrated once: every line it has is kept, every other key comes
-// from the main file's values (the seed, not the defaults), and the file is rewritten whole in the
-// current template - one INFO line per game file.
+// is the compiled default. A file from an OLDER BUILD is migrated once and rewritten whole in the
+// current template - one INFO line per game file: every line it has is kept, and every other key
+// is
+//   - the COMPILED DEFAULT when the file names an ini_version (a complete file, 42 on: its
+//     hidden keys at their defaults are commented rows - "missing" - and must stay the defaults,
+//     never become the main file's values at the bump);
+//   - the main file's value (the seed) when it names none (the pre-complete four-key files of
+//     ini_version <= 41, which were completed from the main file by design).
 void loadOverlayLocked() {
     g_ovHave = false;
     g_ovVals = UtConfig();
@@ -1433,13 +1548,16 @@ void loadOverlayLocked() {
     g_ovHaveStamp = true;
     const int ver = sniffVersion(buf);
     const bool old = ver != UT_INI_VERSION;
-    UtConfig parsed = old ? seedFromMain() : UtConfig();
+    UtConfig parsed = old && ver < 0 ? seedFromMain() : UtConfig();
     UtIniScan scan;
     parseInto(buf, old ? kParseViewOld : kParseView, &parsed, &scan);
     free(buf);
     if (scan.notHere > 0)
         logW("config: journal_dir is read at start-up from the main uniquetab.ini - the line in "
              "\"%S\" is ignored", g_ovPath);
+    if (scan.keysHere > 0)
+        logW("config: [keys] is read from the main uniquetab.ini only, for every game - %d line(s) "
+             "in \"%S\" are ignored: %s", scan.keysHere, g_ovPath, scan.keysHereNames);
     if (scan.stateSeen)
         logW("config: uniq_group/uniq_row/owned_only are not settings - the mod keeps them in "
              "uniquetab.state; the line(s) in \"%S\" are ignored", g_ovPath);
@@ -1449,10 +1567,16 @@ void loadOverlayLocked() {
         char from[32];
         if (ver < 0) _snprintf_s(from, sizeof(from), _TRUNCATE, "no ini_version");
         else _snprintf_s(from, sizeof(from), _TRUNCATE, "ini_version=%d", ver);
-        logI("config: mods\\%s\\uniquetab.ini (%s) migrated to a complete file, ini_version=%d - "
-             "%d setting(s) and %d [layout] line(s) kept, every other value copied once from the "
-             "main uniquetab.ini",
-             g_ovKey, from, UT_INI_VERSION, scan.knownAll, scan.family);
+        if (ver < 0)
+            logI("config: mods\\%s\\uniquetab.ini (%s) migrated to a complete file, ini_version=%d - "
+                 "%d setting(s) and %d [layout] line(s) kept, every other value copied once from the "
+                 "main uniquetab.ini",
+                 g_ovKey, from, UT_INI_VERSION, scan.knownAll, scan.family);
+        else
+            logI("config: mods\\%s\\uniquetab.ini migrated from %s to %d - %d setting(s) and %d "
+                 "[layout] line(s) kept, every key it does not set at its default (the main "
+                 "uniquetab.ini is not read)",
+                 g_ovKey, from, UT_INI_VERSION, scan.knownAll, scan.family);
         if (scan.unknown > 0)
             logI("config: %d line(s) of mods\\%s\\uniquetab.ini this build does not have were "
                  "dropped: %s", scan.unknown, g_ovKey, scan.unknownNames);
@@ -1669,6 +1793,7 @@ bool configReload(const wchar_t* path) {
         UtIniScan scan;
         parseInto(buf, kParseMain, &parsed, &scan);
         free(buf);
+        deriveKeys(&parsed);   // [keys] -> parsed.keys, the conflict pass (its WARNs once per edit)
         if (g_rescueLatch) parsed.rescue = 1;
 
         // A VERSION BUMP MERGES. `parsed` already holds the user's value for every key that still
@@ -1825,12 +1950,14 @@ int configViewIntFor(const char* viewName, const char* key) {
             if (!e) break;
             p = e + 1;
         }
-        // a current file that does not name it: the compiled default (an older one is completed
-        // from the main file's values when it is migrated, so `v` stays the main file's)
-        if (!have && sniffVersion(buf) == UT_INI_VERSION) v = k.def;
+        // a file with an ini_version that does not name it: the compiled default (a file without
+        // one is completed from the main file's values when it is migrated, so `v` stays the
+        // main file's - loadOverlayLocked's rule)
+        if (!have && sniffVersion(buf) >= 0) v = k.def;
         free(buf);
     }
     ReleaseSRWLockShared(&g_applyLock);
+    if ((k.flags & kUtCfgRefuse) && (v < k.lo || v > k.hi)) return k.def;   // applyOne's rule
     return v < k.lo ? k.lo : (v > k.hi ? k.hi : v);
 }
 

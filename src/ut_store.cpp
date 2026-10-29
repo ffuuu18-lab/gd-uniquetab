@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ut_caps.h"     // the prototype cap and its ceiling, tested offline
 #include "ut_config.h"
 #include "ut_live.h"
 #include "ut_paintgate.h"
@@ -50,7 +51,7 @@ namespace {
 //
 // The box may be re-pointed at the map's prototype again a frame later, and that is CORRECT while
 // the map is still authoritative. The parity number is what carries the proof, not the pixel.
-const int kProtoCap = 320;  // mod-owned prototypes per world; the display cache's own bound idea
+const int kProtoCap = kUtProtoCapFloor;  // 320: the floor of the per-world prototype cap (ut_caps.h)
 
 std::unordered_map<std::string, unsigned int>* g_protoTable = nullptr;  // record -> mod-owned id
 volatile LONG g_protoBuilt = 0;
@@ -246,15 +247,19 @@ char g_status[240] = {0};
 
 // `kProtoCap = 320` is too small for a large collection (~500 records): browsing every category
 // in one world would hit the cap and stop painting owned boxes. The cap is derived instead, with
-// no new key:
+// no new key (ut_caps.h `utProtoCapFor`, tested offline):
 //
-//     cap = max(320, paintable * 2 + 64)
+//     cap     = max(320, paintable * 2 + 64)
+//     ceiling = max(320, paged * 2 + 64), at most 65,536
 //
 // and `paintable` is the number of rows that could ASK for a prototype in this world - every row
 // the journal marks stored plus every row it has not reconciled yet, NOT the rows with
 // count >= 1: that number is the TABLE's rows, which is 0 until something is deposited, and the
 // boxes that need a prototype over an older journal are the MAP-OWNED ones. Refusals still count
-// against it: that is what stops an unbuildable record leaking one Item per frame.
+// against it: that is what stops an unbuildable record leaking one Item per frame. `paged` is the
+// view's catalogue (its uniq-records.txt): no page can paint a record it does not have, so the
+// catalogue - not a fixed number - is what bounds the cap. (A fixed 4,096 stops painting a
+// 7,169-record collection part-way.) One prototype is an engine `Item`, at least 1,736 bytes.
 volatile LONG g_protoCapCache = 0;   // 0 = not derived in this world yet
 
 // The two numbers `storeStatus()` prints, published from the GAME thread so the worker's
@@ -278,18 +283,22 @@ int protoCapNow() {
     size_t entries = 0, stored = 0, notStored = 0, unknown = 0;
     journalCounts(&entries, &stored, &notStored, &unknown);
     const size_t paintable = stored + unknown;
-    size_t cap = paintable * 2 + 64;
-    if (cap < (size_t)kProtoCap) cap = (size_t)kProtoCap;
-    if (cap > 4096) cap = 4096;   // a mod-owned Item per record; 4096 is far past any collection
+    const int pagedNow = reagentPageRecordCount();
+    const size_t paged = pagedNow > 0 ? (size_t)pagedNow : 0;
+    const int cap = utProtoCapFor(paintable, paged);
+    // Latched only once the view's catalogue is in: before uniq-records.txt is read the ceiling
+    // is the memory one, and a world must not keep that for its life (the cacheCap() rule).
+    if (!paged) return cap;
     InterlockedExchange(&g_protoCapCache, (LONG)cap);
-    if (cap != (size_t)kProtoCap) {
-        logD("store: the private table's per-world prototype cap is %zu for this journal (%zu "
-             "rows could ask for a prototype: %zu stored, %zu not yet reconciled). The fixed 320 "
-             "would have stopped painting owned boxes part-way through a large "
-             "collection. Refusals still count against it.",
-             cap, paintable, stored, unknown);
+    if (cap != kProtoCap) {
+        logD("store: the private table's per-world prototype cap is %d for this journal (%zu "
+             "rows could ask for a prototype: %zu stored, %zu not yet reconciled; the view's "
+             "catalogue of %zu records ceilings it at %d). The fixed 320 would have stopped "
+             "painting owned boxes part-way through a large collection. Refusals still count "
+             "against it.",
+             cap, paintable, stored, unknown, paged, utProtoCapCeiling(paged));
     }
-    return (int)cap;
+    return cap;
 }
 
 // A deposit and a take both change the stack the display prototype must carry, so the cached one
@@ -548,7 +557,13 @@ const char* storeStatus() {
     // the GAME thread.
     const LONG rows = InterlockedCompareExchange(&g_tableRows, 0, 0);
     const LONG copies = InterlockedCompareExchange(&g_tableCopies, 0, 0);
-    _snprintf_s(g_status, sizeof(g_status), _TRUNCATE, "store: table=%ld/%ld", rows, copies);
+    // `protos=<spent>/<cap>`: the prototypes this world has built or refused, less the churn
+    // discount, against the derived cap (0 = not derived in this world yet).
+    const LONG spent = InterlockedCompareExchange(&g_protoBuilt, 0, 0) -
+                       InterlockedCompareExchange(&g_protoChurn, 0, 0);
+    const LONG pcap = InterlockedCompareExchange(&g_protoCapCache, 0, 0);
+    _snprintf_s(g_status, sizeof(g_status), _TRUNCATE, "store: table=%ld/%ld protos=%ld/%ld",
+                rows, copies, spent, pcap);
     return g_status;
 }
 

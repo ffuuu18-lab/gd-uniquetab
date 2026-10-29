@@ -2,6 +2,91 @@
 
 Newest first.
 
+## 1.2.1
+
+Requires Grim Dawn 1.3.0.8 or 1.3.1.1, 64-bit, with Ultimate ASI Loader.
+
+### New
+
+- **An EDIT button on the pad opens the layout editor** (`edit_button=0` under `[advanced]`
+  removes it). It sits just before OWN, which stays the last, double-wide button; in the base game
+  the pad keeps its 10 x 3 cells and its caption size, and only OWN moves one cell along. On the
+  game's own materials page EDIT first goes back to the last collection group you had open, then
+  the editor opens there. Ctrl+right-click (`editor_open` under `[keys]`, below) and
+  `layout_edit=1` still open the editor, with or without the button. Its word is `edit.caption`
+  under `[tab]` of the buttons file.
+- **Bigger item icons on the collection pages: `zoom_pct`** under `[layout]`, 100 to 200 (a
+  commented line at 100). `zoom_pct=150` draws every box one and a half times as big, the game's
+  own icon magnified - in the base game Helms in 96-pixel cells, 3 x 5 to a screen instead of
+  5 x 8 -; hovering, the tooltip, picking up and the corner badges follow the bigger boxes, the
+  frames under them are painted again for the new size, and the game's own materials page keeps
+  its normal size. Live within a second, per settings file (a custom game has its own value); a
+  group your own grid cannot hold at that size is shown at the largest size that fits. 200 is
+  twice the size and visibly soft. The game's own interface scale enlarges everything, the tab
+  included, but shows no more items per screen.
+- **Your own keys: `[keys]`** in the main `uniquetab.ini`, between `[layout]` and `[advanced]`:
+  `rows_up`, `rows_down`, `button_prev`, `button_next`, `rows_wheel`, `button_wheel` and
+  `editor_open`, each a commented line at the key it always was (PageUp, PageDown, Ctrl+PageUp,
+  Ctrl+PageDown, Wheel, Ctrl+Wheel, Ctrl+RightClick). Write Ctrl, Shift or Alt and a key joined by
+  `+` (`button_next=Ctrl+F3`, `rows_wheel=Alt+Wheel`), MiddleClick, Mouse4 or Mouse5 for a step, a
+  key for `editor_open` (it then opens the editor as EDIT does), or `none`. Live within a second;
+  read from the main file only and in force in every game - a `[keys]` line in a custom game's own
+  file is ignored with one line in the log. A letter, a digit, Space, Enter, Tab, Backspace or a
+  number-pad key needs Ctrl or Alt (the stash search box gets it too); Esc, Alt+F4, Alt+Tab,
+  Alt+Space and LeftClick are refused, and a line that does not read keeps its default with one
+  line in the log. The game still sees every key, so a key the game binds itself does both. With
+  the defaults the keys, the wheel and the click behave exactly as before.
+
+### Fixed
+
+- **The Lokarr set could not be stored.** Lokarr's Gaze, Coat, Mantle and Boots keep their records
+  outside the game's item folder, and the collection skipped everything there in the base game, so
+  the four had no box and a dropped piece could not be deposited. The base game's records are now
+  judged the way a custom game's always were - anywhere in the database, except the test records,
+  the gear monsters and townsfolk wear and the designers' blank templates - so these items are now
+  on their pages: the Lokarr set (Helms, Chest, Shoulders, Boots; its icons come from the game's
+  `Level Art.arc`), Wilhelm's Wondrous Wargem (Amulets), Gazer Man (Chest), the Totally Normal
+  Shield (One-Handed Maces, its three versions) and, with `collect_mi=1`, the quest rewards
+  Sister's Amulet of Lifegiving (Amulets) and Slith Primal Ring (Rings), one box per difficulty's
+  record. Leovinus' Ring stays on Rings. The base game has 197 pages with `collect_mi=1` (109
+  without). Reign of Terror and Grimarillion gain the same fifteen; DeathGrimDawn, whose own
+  database already had the Lokarr set and the Wargem, gains the other ten, and its Lokarr set -
+  storable there but on no page until now - is shown too. In Reign of Terror, Merman's Sprocket
+  (it uses the Lokarr boots' icon) is on the Boots pages now too.
+- **A collection of more than 4,096 records was counted and shown only up to 4,096**, and which
+  records depended on the order of the journal's lines: the label stopped at `coll 4096/...`, and
+  the records past the first 4,096 lines of `uniq-items.jsonl` were left out of the owned-only
+  filter and the search; a long session also stopped drawing owned boxes as owned after 4,096 of
+  them. Every bound is sized from the data now - from your collection file and from the game's
+  own pages -, so a full collection of any game, Grimarillion's 19,089 records included, is
+  counted and shown whole, in any order. Nothing in your collection file changes.
+- **Opening the caravan with a very large collection no longer hitches.** The journal's lookups
+  are indexed: each opening looked every row of `uniq-items.jsonl` up by searching the whole file
+  for it, which took about half a second with the base game's full collection and several seconds
+  at 20,000 records, and reading the file at start took as long again. Both take milliseconds now.
+  Nothing in your collection file changes.
+
+### Known
+
+- A box that shows the game's grey checker (or another placeholder) instead of an item picture
+  belongs to a mod's item record that names no icon, or names one the mod does not ship: the tab
+  draws the icon the record names, as the game's own windows do, so the item looks the same in
+  that mod's shops and in your inventory, and nothing in the tab can fix it.
+- When the pages are generated again because `collect_mi`, `plate_ground` or your groups file
+  changed, the log gives the reason as `the game was updated`; the regeneration is the expected
+  one, only the words are wrong.
+- "In your collection (another roll)" compares the prefix, the suffix and the seed only: the same
+  roll with another component or augment reads "In your collection".
+
+### Upgrading
+
+Nothing to do - the pages regenerate once at the next start (the log gives the reason: the mod was
+updated). Your collection is untouched; on a page that gained an item, the boxes after it move one
+place along. `uniquetab.ini` is rewritten once as `ini_version=44` with every value kept, gaining
+the commented `edit_button` and `zoom_pct` lines and the commented `[keys]` section; a custom
+game's own `mods\<name>\uniquetab.ini` keeps every line it has at its first entry, and a setting it
+does not set keeps its default.
+
 ## 1.2.0
 
 Requires Grim Dawn 1.3.0.8 or 1.3.1.1, 64-bit, with Ultimate ASI Loader.

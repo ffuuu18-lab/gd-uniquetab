@@ -7,15 +7,18 @@
 //
 // The catalogue is built from the VIEW: the base game's four databases plus the override layers
 // a ModView carries (/basemods, a custom game), last layer wins - the database the engine will
-// have. A record a mod layer wins is judged by the mod rules: a junk list instead of the
-// records/items/ path rule, a class the slot table does not know admitted as slot "other"
-// (Epic/Legendary only), a mod's own augments and components (ItemEnchantment, ItemRelic) at every
-// classification, and a classification catalogue.bin cannot store skipped with a warning.
+// have. Every layer's records are judged by one path rule: anywhere in the database but a junk
+// folder (test records, creatures, test maps, the endless dungeon's script entities, monster-worn
+// gear) - so the base game's few real items outside records/items/ (the Lokarr set, the quest
+// rewards, Wilhelm's Wondrous Wargem, Gazer Man) are collected like any other. A record a mod
+// layer wins is judged by the mod rules too: a class the slot table does not know admitted as
+// slot "other" (Epic/Legendary only), a mod's own augments and components (ItemEnchantment,
+// ItemRelic) at every classification, and a classification catalogue.bin cannot store skipped
+// with a warning.
 // Blueprints (ItemArtifactFormula, never the five other *Formula classes) are collected at every
 // classification in base and mod alike (Magical stored, packed as Epic), with their own scroll
-// icon (artifactFormulaBitmapName; the crafted item's only when that is empty). Every other base
-// record keeps the 1.1.0 rules exactly, so a view that overrides no item record writes the
-// vanilla bytes. Names come from the base Text_<lang>.arc, then the mod's text_en*.arc, then its
+// icon (artifactFormulaBitmapName; the crafted item's only when that is empty). A view that
+// overrides no item record writes the vanilla bytes. Names come from the base Text_<lang>.arc, then the mod's text_en*.arc, then its
 // text_<lang>*.arc over that; icons from the mod's archives or the base Items/UI ones.
 //
 // MONSTER INFREQUENTS (collect_mi=1, the default). The engine's own MI rule
@@ -86,6 +89,9 @@ struct GameData {
     ArzDatabase* db = nullptr;                                   // owned: the base game
     ArcSet* items = nullptr;                                     // owned
     ArcSet* ui = nullptr;                                        // owned
+    // owned, optional (null when the game folder has none): resources/Level Art.arc, where the
+    // icons of the Lokarr set live (its bitmaps are 'level art/buildings/signs/...')
+    ArcSet* levelArt = nullptr;
     const ModView* view = nullptr;                               // the layers above db
     std::unordered_map<std::string, std::string> tags;
     std::size_t modTags = 0;                                     // tags a mod layer set

@@ -40,6 +40,10 @@ pages_gen.cpp's grid() (cols = w // cw, rows = h // (ch + gap), rows walked back
 box count, the F line's), and every name carries the cover, the tag and _L<hash> (--layout-hash, the eight hex digits
 gen::layoutPlateHash computed for the set) - the reference test_catalogue --layout-plates compares
 the DLL's layout plates with, byte for byte.
+A ZOOM (--zoom <pct>, 100..200, with --grid - uniquetab.ini's zoom_pct): the set is painted for
+the MAGNIFIED cells - every cell size times pct / 100, rounded, lowered per cell size until one
+fits the rectangle (ut_layout.h utZoomFit), two that come out the same painted once - fitted to
+--grid like any user grid. The derived grid at a zoom passes its own x,y,w,h (the P line's).
 Nothing ships from here: the DLL paints the same set at run time (src/gen/plate_gen) into the
 game's own settings\ui\caravan\, one of the engine's texture override roots, and the
 catalogue harness compares its vanilla plates with these byte for byte.
@@ -374,6 +378,39 @@ def fit_rect(cells, w, h, gap, cap=None):
     return out
 
 
+def zoom_pct(pct):
+    """ut_layout.h utZoomPct: below 100 is 100, above 200 is 200."""
+    return 100 if pct < 100 else (200 if pct > 200 else pct)
+
+
+def zoom_cell(cell, pct):
+    """ut_layout.h utZoomCell: round(cell * pct / 100), half up, at least 1."""
+    cell = max(1, cell)
+    pct = zoom_pct(pct)
+    return cell if pct == 100 else (cell * pct + 50) // 100
+
+
+def zoom_fit(w, h, cw, ch, gap, pct):
+    """ut_layout.h utZoomFit: the key's zoom, lowered (never below 100) until one magnified cell
+    fits the w x h grid rectangle (width <= w, height + gap <= h) -> (pct, cellW, cellH)."""
+    cw, ch, gap = max(1, cw), max(1, ch), max(0, gap)
+    p = zoom_pct(pct)
+    while p > 100 and (zoom_cell(cw, p) > w or zoom_cell(ch, p) + gap > h):
+        p -= 1
+    return p, zoom_cell(cw, p), zoom_cell(ch, p)
+
+
+def zoom_cells(cells, w, h, gap, pct):
+    """gen::planLayoutPlates at a zoom: every cell size magnified and clamped to the rectangle,
+    two that come out the same are one plate, ascending by (cellW, cellH)."""
+    out = {}
+    for (cw, ch, cols, rows, labels) in cells:
+        _p, zw, zh = zoom_fit(w, h, cw, ch, gap, pct)
+        e = out.setdefault((zw, zh), [cols, rows, []])
+        e[2].extend(labels)
+    return [(cw, ch, v[0], v[1], v[2]) for (cw, ch), v in sorted(out.items())]
+
+
 def regrid(geo, cells, gap):
     """The cell grid a DERIVED rectangle gives, the way pages_gen.cpp's grid() computes it.
 
@@ -577,6 +614,11 @@ def main() -> int:
     layout_hash = args[args.index("--layout-hash") + 1] if "--layout-hash" in args else ""
     if user_grid and not layout_hash:
         raise SystemExit("--grid needs --layout-hash (the eight hex digits of the set)")
+    # uniquetab.ini's zoom_pct: the set of a zoom is painted for the magnified cells of --grid
+    # (the user's grid, or the derived one's x,y,w,h - a zoom is a layout of its own).
+    zoom = int(args[args.index("--zoom") + 1]) if "--zoom" in args else 100
+    if zoom != 100 and not user_grid:
+        raise SystemExit("--zoom needs --grid (the grid in force, the derived one's included)")
     groups_path = args[args.index("--groups") + 1] if "--groups" in args else None
     os.makedirs(out_dir, exist_ok=True)
 
@@ -632,6 +674,8 @@ def main() -> int:
     x0, y0 = geo.x0, geo.y0
     if user_grid:
         x0, y0 = user_grid[0], user_grid[1]
+        if zoom_pct(zoom) != 100:
+            cells = zoom_cells(cells, user_grid[2], user_grid[3], gap, zoom)
         cells = fit_rect(cells, user_grid[2], user_grid[3], gap)
     elif not vanilla_cover:
         cells = regrid(geo, cells, gap)

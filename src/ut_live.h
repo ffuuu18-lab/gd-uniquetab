@@ -103,9 +103,13 @@ void liveRelayoutVisible();
 // the Crafting Materials page is the one on screen (caravan+0x1728 == 3).
 bool liveMaterialsVisible();
 
-// Input. Returns true when the event was consumed. `ticks` > 0 is wheel-up.
-bool liveHandleWheel(int ticks, bool ctrl);
-bool liveHandleKey(int vk, bool ctrl);
+// Input ([keys]: the window procedure has already matched the chord to an action). Returns true
+// when the event was consumed. `ticks` > 0 is wheel-up; `buttons` = button_wheel (one pad button
+// per notch, the cursor anywhere), else rows_wheel (one row, the cursor over the page). The step
+// is kUtKeyActRowsUp / RowsDown (a window of rows) or ButtonPrev / ButtonNext (one pad button);
+// any other action is not consumed.
+bool liveHandleWheel(int ticks, bool buttons);
+bool liveHandleStep(int action);
 
 // The collection group the page is CURRENTLY SHOWING (the last relayout that actually ran), or
 // -1 for the vanilla Crafting Materials layout / when live paging is not armed. This is what the
@@ -232,7 +236,7 @@ struct LiveView {
     int owned;          // of them, present in the engine's reagent map (-1 = unknown)
     int ownedAll;       // records the map holds in total (-1 = unknown)
     int collection;     // records in the whole collection
-    int cellW, cellH;
+    int cellW, cellH;   // the cell IN FORCE: the G line's times the group's zoom (zoom_pct)
     float scale;        // the measured UI scale
     int cols, rows;     // the grid the page is laid out in (the user's grid_ when one is in force)
 };
@@ -257,6 +261,10 @@ struct LiveLayout {
     int padmatSet;                // padmat_<cover> parses
     UtRect padmat;
     UtPadPages pages;             // the pad's buttons for the group table (ut_padpage.h)
+    // zoom_pct in force (100..200, ut_layout.h utZoomPct): every group's cell is magnified by it,
+    // clamped per group (utZoomFit). Above 100, in.maxCellW/H are the largest cell AS SHOWN at
+    // it (the editor's smallest grid); the resolver ran with the generated one.
+    int zoom;
 };
 // Any thread. False (and ok = 0) while no valid UI scale is known.
 bool liveLayoutGet(LiveLayout* out);
@@ -267,7 +275,8 @@ bool liveLayoutGet(LiveLayout* out);
 // (only while one of the two keys is set). Kept across worlds; (0,0,..) = not known.
 void liveSetScreenView(int screenW, int screenH, float originX, float originY);
 
-// The DISTINCT (cellW, cellH) pairs the loaded groups use, in FIRST-APPEARANCE order (the loop
+// The DISTINCT (cellW, cellH) pairs the loaded groups use IN FORCE (zoom_pct magnifies them; at
+// 100 the G lines' own), in FIRST-APPEARANCE order (the loop
 // keeps group order, it does not sort - for the shipped uniq-groups.txt that is 64x64, 64x96,
 // 64x32, 32x32, 32x96, 64x128, 32x128). Writes at most `cap` pairs into w[]/h[] and returns how
 // many exist (which can exceed `cap`). 0 = the group file has not been read. ut_plate.cpp uses

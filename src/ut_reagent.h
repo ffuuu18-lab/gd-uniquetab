@@ -74,6 +74,10 @@ GdGameEngine* reagentGameEngine();
 // publishes, read as an atomic. No engine call.
 bool reagentTransferOpen();
 
+// How many records the active view's pages hold (its uniq-records.txt), 0 before it is read.
+// Any thread: a published count, never the set itself.
+int reagentPageRecordCount();
+
 // Object::GetObjectId behind the mod's usual SEH probe. 0 = unknown.
 unsigned int reagentSafeObjectId(const GdItem* item);
 

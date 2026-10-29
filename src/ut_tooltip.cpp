@@ -740,8 +740,8 @@ long tooltipInnerSuppressed() { return InterlockedCompareExchange(&g_innerSuppre
 namespace {
 
 // ---- "is this record already collected?", MEMOISED ----------------------------------------------
-// `journalHas` is NOT a cheap hash probe. It is a case-insensitive LINEAR scan of
-// up to 3,288 entries (`findEntry`, ut_rescue.cpp) taken under the journal's own critical section -
+// `journalHas` is NOT free. Its lookup is a hash probe (`findEntry`, ut_rescue.cpp's record
+// index), but it is taken under the journal's own critical section -
 // the SAME section `journalService` holds across the whole atomic file write (build the text in
 // memory, write the .tmp, FlushFileBuffers, rename), which the worker runs the moment a deposit
 // signals the journal event, i.e. exactly while the user is standing at the caravan hovering boxes.
@@ -783,7 +783,7 @@ int collectedState(const char* record) {
 
 // ---- "is it the SAME ROLL?", MEMOISED --------------------------------------------------------
 // Only for a record the collection holds (state 1) that the catalogue calls a monster infrequent:
-// the stored row's roll (journalRollOf, a linear scan under the journal lock) is asked at most
+// the stored row's roll (journalRollOf, one lookup under the journal lock) is asked at most
 // four times a second per record, exactly like collectedState. The KIND is read without loading
 // the catalogue (`mayLoad` false): this is the game thread, 60-144 times a second while hovering,
 // and an unknown kind simply keeps the plain collected line.

@@ -8,10 +8,10 @@ Build data/oracle/catalogue.json + catalogue-stats.md from the four .arz databas
 THE VIEW (--basemods, --custom): the catalogue is built from the database the engine will have -
 the four base databases, then mods/database.arz, then the custom game's database/*.arz, the
 last layer that has a record winning (src/gen/catalogue_gen.cpp does the same). A record a MOD
-layer wins is judged by the mod rules: JUNK_PREFIX/JUNK_PART instead of the records/items/ path
-rule, a class the slot table does not know admitted as slot "other" (Epic/Legendary only), and a
-classification catalogue.bin cannot store skipped with a warning. Base records keep the rules
-below exactly; a mod's own augments are admitted at every classification. Names: the base
+layer wins is judged by the mod rules: a class the slot table does not know admitted as slot
+"other" (Epic/Legendary only), and a classification catalogue.bin cannot store skipped with a
+warning; a mod's own augments are admitted at every classification. The path rule below
+(JUNK_PREFIX/JUNK_PART) is every layer's. Names: the base
 Text_<lang>.arc, then the mod's text_en*.arc, then its text_<lang>*.arc over it; icons: the
 mod's .arc files, then the base archives. The
 asserts below are the vanilla database's and are not checked in a view.
@@ -28,20 +28,27 @@ THE COLLECTION RULE:
     Rationale: a relic is a unique-tier item to the player whatever the record's rarity word says,
     and the b-series would otherwise be the one tier of relic with no box in the tab.
 
-Shipped-record filter (reproduces the grimtools 1.3.0.8 totals exactly:
+Shipped-record filter (the records/items/ part of it reproduces the grimtools 1.3.0.8 totals:
 equipment Epic 1,650 vs 1,649 and Legendary 1,546 vs 1,547, sum 3,196 = 3,196; relics Epic+
-Legendary 70 = 70 - grimtools lists no Rare relics, the 21 are measured from the game DB):
-  1. record path starts with `records/items/`      -> drops records/sandbox/** (dev test items),
-                                                      records/storyelements/**, records/endlessdungeon/**
-  2. path is not under `records/items/enemygear/`  -> monster-worn gear, never dropped
+Legendary 70 = 70 - grimtools lists no Rare relics, the 21 are measured from the game DB; the nine
+Legendary records outside records/items/ come on top, 3,205):
+  1. the path is in no junk folder (JUNK_PREFIX) -> drops records/sandbox/** (dev test items),
+     records/creatures/** (the gear NPCs wear), records/mod_testgrounds/**; anywhere else is in,
+     so the real items outside records/items/ are collected (the Lokarr set in
+     records/storyelements/signs/, the quest rewards in records/storyelements/rewards/, Wilhelm's
+     Wondrous Wargem, Gazer Man, the Totally Normal Shield's three versions in
+     records/endlessdungeon/scriptentities/ - the folder's other records are ScriptEntity and
+     Decoration props, which no rule collects)
+  2. no `/enemygear/` in the path (JUNK_PART)     -> monster-worn gear, never dropped
   3. the item's name tag resolves in Text_EN       -> drops leftovers with dangling tags
   4. FileDescription does not contain "BLANK"      -> drops the `?000/?100/?200/?300` template records
      ("BASE BLANK EPIC 2H AXE" etc.), exactly 4 per equipment slot per classification
 
-EXTRA_RECORDS is a small CURATED INCLUSION LIST that bypasses the four rules above
-for named items a player really owns but the rules drop - today exactly one, Leovinus' Ring.
-EXTRA_EXCLUDE names the developer test records that live beside it and must never be collectible.
-Both lists are asserted, so a game patch that moves either is loud instead of silent.
+EXTRA_RECORDS is a small CURATED INCLUSION LIST that bypasses the rank rule for named items a
+player really owns that are neither Epic nor Legendary - today exactly one, Leovinus' Ring
+(Common). EXTRA_EXCLUDE names the developer test records the four rules would admit and that must
+never be collectible. Both lists are asserted, so a game patch that moves either is loud instead
+of silent.
 
 MONSTER INFREQUENTS (--collect-mi = uniquetab.ini's collect_mi=1, the DLL's default; this tool's
 default stays off, so the flag-off cut needs no switch): every equipment
@@ -151,28 +158,27 @@ RELIC_EXPECT ={"Rare": 21, "Epic": 21, "Legendary": 49}     # 1.3.0.8 build 2482
 RELIC_EXPECT_TOTAL = 91
 
 # ------------------------------------------------------------ curated inclusion list
-# Records the four shipped-filter rules DROP but that a player can really own, so
-# the tab must have a box for them. Each entry bypasses `is_shipped()` entirely and is asserted
+# Records the rank rule DROPS (neither Epic nor Legendary, nor a relic) but that a player can
+# really own, so the tab must have a box for them. Each entry bypasses `is_shipped()` and is asserted
 # below: it must exist in the merged database, its name tag must resolve in Text_EN, and its
 # bitmap must be in `resources/Items.arc`. One line per record, with the reason it is here.
-# THIS IS A CURATED LIST, NOT A RULE - do not turn it into a path prefix. The folder it reaches
-# into also holds developer test items (see EXTRA_EXCLUDE), which is exactly why the shipped
-# filter drops the whole folder in the first place.
+# THIS IS A CURATED LIST, NOT A RULE - do not turn it into a path prefix or a rank. The folder it
+# reaches into also holds developer test items (see EXTRA_EXCLUDE).
 EXTRA_RECORDS = {
     # Leovinus' Ring - the fixed named ring the Shattered Realm hands out.
     #   Class ArmorJewelry_Ring, itemClassification Common, itemNameTag
     #   tagGDX2EndlessDungeon_S203, bitmap items/gearaccessories/rings/a001_ring.tex (32x32,
     #   gdx2), levelRequirement 10.
-    # Without this entry the ring cannot be deposited at all: it is neither Epic nor Legendary
-    # AND it does not live under records/items/, so it would never reach the catalogue, the gate
+    # Without this entry the ring cannot be deposited at all: it is neither Epic nor Legendary,
+    # so it would never reach the catalogue, the gate
     # byte would never be set on it, the drag would be refused and the shift-click would fall
     # through to the normal transfer stash.
     "records/endlessdungeon/items/a001_ring.dbr",
 }
 
 # The two DEVELOPER TEST records that share that folder. Both are `Legendary`
-# equipment and would sail through rules 2-4 if the path rule were ever loosened into a prefix,
-# so they are named and excluded explicitly and the build ASSERTS neither ever reaches `items`.
+# equipment and would sail through the four rules, so they are named and excluded explicitly and
+# the build ASSERTS neither ever reaches `items`.
 EXTRA_EXCLUDE = {
     # "Mildly Amusing Box" (tagGDX2ItemTest2) - ArmorProtective_Head, Legendary, bitmap
     # system/textures/z000_test.tex, which is not even in resources/Items.arc. GDX2 test record.
@@ -183,8 +189,8 @@ EXTRA_EXCLUDE = {
 }
 EXTRA_EXPECT_TOTAL = 1                                        # == len(EXTRA_RECORDS), asserted
 
-EQUIPMENT_EPICLEG_EXPECT = 3196                               # Epic/Legendary equipment records
-COLLECTION_EXPECT_TOTAL = 3288    # 3,196 Epic/Legendary equipment + 91 relics + 1 curated extra
+EQUIPMENT_EPICLEG_EXPECT = 3205                               # Epic/Legendary equipment records
+COLLECTION_EXPECT_TOTAL = 3297    # 3,205 Epic/Legendary equipment + 91 relics + 1 curated extra
 
 
 BLUEPRINT_CLASSES = ("ItemArtifactFormula", "ItemAscensionFormula", "AscendantAltarFormula",
@@ -195,9 +201,8 @@ BLUEPRINT_CLASSES = ("ItemArtifactFormula", "ItemAscensionFormula", "AscendantAl
 FORMULA_CLASS = "ItemArtifactFormula"
 
 
-# Where a record a MOD layer wins is never collected from (the custom-view path rule).
-JUNK_PREFIX = ("records/sandbox/", "records/creatures/", "records/mod_testgrounds/",
-               "records/endlessdungeon/scriptentities/")
+# Where a record is never collected from, in the base game and a mod layer alike (the path rule).
+JUNK_PREFIX = ("records/sandbox/", "records/creatures/", "records/mod_testgrounds/")
 JUNK_PART = "/enemygear/"
 STORABLE = ("Common", "Rare", "Epic", "Legendary")
 
@@ -224,6 +229,15 @@ def is_mi_candidate(key: str, cls: str, cla: str, file_description: str) -> bool
     unused, kept as the C++ signature keeps them."""
     del key, file_description
     return cla == "Rare" and cls in MI_CLASSES
+
+
+def load_level_art(game_dir: str):
+    """resources/Level Art.arc (., gdx1..3), where the Lokarr set's icons live ('level art/...'),
+    or None when the game folder has none (catalogue_gen.cpp GameData::load: optional)."""
+    try:
+        return arc.ArcSet.load(game_dir, os.path.join("resources", "Level Art.arc"))
+    except FileNotFoundError:
+        return None
 
 
 def is_junk(key: str) -> bool:
@@ -312,11 +326,11 @@ def bitmap_of(rec, cls: str) -> str:
     return ""
 
 
-def is_shipped(key: str, rec, cls: str, tags, db=None, mod_rule=False) -> bool:
-    if mod_rule:
-        if is_junk(key):
-            return False
-    elif not key.startswith("records/items/") or key.startswith("records/items/enemygear/"):
+def is_shipped(key: str, rec, cls: str, tags, db=None) -> bool:
+    """catalogue_gen.cpp isShipped: the same for every layer - not in a junk folder (is_junk), no
+    BLANK in the FileDescription, and a name tag the view's text resolves (a blueprint's: the
+    crafted item's)."""
+    if is_junk(key):
         return False
     if "BLANK" in arz.sfield(rec, "FileDescription").upper():
         return False
@@ -364,6 +378,7 @@ def build(game_dir: str, out_dir: str, basemods=False, custom=None, lang="EN", c
                         tags.update(arc.parse_tag_file(data))
     items_arc = arc.ArcSet.load(game_dir, os.path.join("resources", "Items.arc"))
     ui_arc = arc.ArcSet.load(game_dir, os.path.join("resources", "UI.arc"))
+    level_art_arc = load_level_art(game_dir)
     base_db = db
     if layers:
         db = LayeredDb(base_db, layers)
@@ -379,6 +394,8 @@ def build(game_dir: str, out_dir: str, basemods=False, custom=None, lang="EN", c
             return (True, "Items.arc:" + (items_arc.source_of(rest) or ""))
         if head == "ui" and rest in ui_arc:
             return (True, "UI.arc:" + (ui_arc.source_of(rest) or ""))
+        if head == "level art" and level_art_arc is not None and rest in level_art_arc:
+            return (True, "Level Art.arc:" + (level_art_arc.source_of(rest) or ""))
         if view is not None and (layers or view.arcs) and view_tex_size(view, bitmap):
             return (True, "mod")
         return (False, "")
@@ -491,7 +508,7 @@ def build(game_dir: str, out_dir: str, basemods=False, custom=None, lang="EN", c
             admit = is_extra or ((is_relic or mod_augment or is_formula or cla in ("Epic", "Legendary")
                                   or (collect_mi and is_mi_candidate(
                                       key, cls, cla, arz.sfield(rec, "FileDescription"))))
-                                 and is_shipped(key, rec, cls, tags, db, True))
+                                 and is_shipped(key, rec, cls, tags, db))
             if not admit:
                 continue
             if not storable(cls, cla):
@@ -587,7 +604,7 @@ def build(game_dir: str, out_dir: str, basemods=False, custom=None, lang="EN", c
         "archives": [{"tag": a.tag, "records": len(a), "path": a.path} for a in db.archives],
         "mergedRecords": len(db),
         "textTags": len(tags),
-        "shippedFilter": ["path startswith records/items/", "not records/items/enemygear/",
+        "shippedFilter": ["path in no junk folder (JUNK_PREFIX)", "no /enemygear/ in the path",
                           "name tag resolves in Text_EN", "FileDescription has no BLANK"],
         "collectionRule": "equipment: itemClassification Epic or Legendary; "
                           "relics (Class ItemArtifact): EVERY classification; "
@@ -597,7 +614,8 @@ def build(game_dir: str, out_dir: str, basemods=False, custom=None, lang="EN", c
         "relicsByClassification": dict(sorted(relic_seen.items())),
         "extraRecords": sorted(EXTRA_RECORDS),
         "extraExcluded": sorted(EXTRA_EXCLUDE),
-        "bitmapRule": "resource path 'items/<rest>' -> Items.arc entry '<rest>'; "
+        "bitmapRule": "resource path 'items/<rest>' -> Items.arc entry '<rest>', 'level art/<rest>' -> "
+                      "Level Art.arc entry '<rest>'; "
                       "'ui/<rest>' -> UI.arc entry '<rest>' (leading segment dropped)",
         "uniqueRaresIdentified": False,
         "uniqueRaresNote": "No DBR field distinguishes a Monster Infrequent from a 'unique rare'. "
@@ -656,7 +674,7 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     A("A game patch that changes any of them fails the build loudly; the fix is to re-read the")
     A("counts and update the constants, never to silence the assert.\n")
     A("- **curated inclusions** (`EXTRA_RECORDS`): a hand-written list of records")
-    A("  the shipped filter drops but a player can really own. It bypasses the four rules below")
+    A("  the rank rule drops (neither Epic nor Legendary) but a player can really own. It bypasses the four rules below")
     A("  and is asserted the same way (the record must exist, its name tag must resolve, its")
     A("  bitmap must be in `resources/Items.arc`).\n")
     extras = [e for e in items if e.get("isExtra")]
@@ -664,7 +682,7 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     A("|---|---|---|---|---|")
     for e in sorted(extras, key=lambda x: x["record"]):
         A("| `%s` (%s) | `%s` | %s | %s | Shattered Realm named reward a player can own but the"
-          " shipped filter drops |"
+          " rank rule drops |"
           % (e["record"], e["name"], e["class"], e["itemClassification"], slot_of(e["class"])))
     A("")
     A("`EXTRA_EXCLUDE` names the developer test records in the same folder that must NEVER be")
@@ -673,14 +691,14 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     for r in sorted(EXTRA_EXCLUDE):
         A("- `%s`" % r)
     A("")
-    A("## Shipped-record filter (unchanged)\n")
+    A("## Shipped-record filter\n")
     A("A raw scan of the merged database finds far more Epic/Legendary records than grimtools lists.")
     A("Four rules bring the two into agreement; each was verified by inspecting the records it drops.")
     A("They apply to relics too - they are what keeps the 12 `records/sandbox/jakub/**` test relics out.\n")
     A("| # | Rule | What it removes |")
     A("|---|------|-----------------|")
-    A("| 1 | path starts with `records/items/` | dev/test items under `records/sandbox/**` (44 Epic+Leg equipment records, e.g. `records/sandbox/jim/legendary sets/...`), `records/storyelements/signs/signh.dbr`, `records/endlessdungeon/items/z001_test.dbr` |")
-    A("| 2 | path not under `records/items/enemygear/` | monster-worn gear (`gear_witchgod_boss01_head.dbr` etc.), never dropped as loot |")
+    A("| 1 | path in no junk folder (`records/sandbox/`, `records/creatures/`, `records/mod_testgrounds/`) | dev/test items under `records/sandbox/**` (44 Epic+Leg equipment records, e.g. `records/sandbox/jim/legendary sets/...`), the gear NPCs wear (`records/creatures/npcs/npcgear/*`). Anywhere else is in: the real items outside `records/items/` - the Lokarr set (`records/storyelements/signs/sign{h,t,s,f}.dbr`), Wilhelm's Wondrous Wargem, Gazer Man, the Totally Normal Shield (`records/endlessdungeon/scriptentities/portal_s01..03.dbr`), and the Rare quest rewards - are collected like every other record |")
+    A("| 2 | no `/enemygear/` in the path | monster-worn gear (`gear_witchgod_boss01_head.dbr` etc.), never dropped as loot |")
     A("| 3 | the record's name tag resolves in Text_EN | records whose `itemNameTag` / `description` is a dangling tag |")
     A("| 4 | `FileDescription` contains no \"BLANK\" | the designer template records, exactly 4 per equipment slot per classification: `c000/c100/c200/c300_axe2h.dbr` all say `BASE BLANK EPIC 2H AXE`, share tag `tagWeaponMelee2hC000` and sit at level 1 |")
     A("")
@@ -724,7 +742,8 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     A("")
     A("### Remaining per-slot differences")
     A("")
-    A("The two headline sums agree (Epic +1, Legendary -1, sum exactly 3,196), but a few slots still")
+    A("Over `records/items/` the two headline sums agree (Epic +1, Legendary -1, sum exactly 3,196;")
+    A("the +6 Legendary above are the six records outside that folder), but a few slots still")
     A("disagree by a handful of records. They cancel out, which points at grimtools filing some items")
     A("under a different slot than the record's `Class` (its class ids c10..c49 are its own taxonomy),")
     A("not at extra or missing records here. The biggest single gap is daggers (-6 Legendary) against")
@@ -765,7 +784,7 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     A("")
     A(f"| bucket | records | distinct names |")
     A("|---|---:|---:|")
-    A(f"| `records/items/**` Rare equipment, non-faction (MI + unique rares) | {len(mis)} | {len({e['name'] for e in mis})} |")
+    A(f"| Rare equipment outside `records/items/faction/` (MI + unique rares) | {len(mis)} | {len({e['name'] for e in mis})} |")
     A(f"| `records/items/faction/**` Rare equipment (faction store) | {len(faction_rares)} | {len({e['name'] for e in faction_rares})} |")
     A(f"| grimtools 'Monster Infrequents' | {GRIMTOOLS_TOTALS['monster_infrequent_records']} | 562 (unverified) |")
     A(f"| grimtools 'Unique rare items' | {GRIMTOOLS_TOTALS['unique_rare_items']} | |")
@@ -790,7 +809,7 @@ def write_stats(path, db, tags, items, mis, faction_rares, sets, rejected, meta)
     have = len(items) - len(nobmp)
     missing = len([e for e in miss if e["bitmap"]])
     A(f"- Epic/Legendary entries with a bitmap: {have} / {len(items)}")
-    A(f"- of those, the .tex resource was found in Items.arc / UI.arc: {have - missing} (missing: {missing})")
+    A(f"- of those, the .tex resource was found in Items.arc / UI.arc / Level Art.arc: {have - missing} (missing: {missing})")
     A(f"- entries with no bitmap field at all: {len(nobmp)} "
       f"({', '.join(sorted({e['class'] for e in nobmp})) if nobmp else '-'})")
     if [e for e in miss if e["bitmap"]][:10]:

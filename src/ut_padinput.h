@@ -29,17 +29,19 @@
 //     the item on the ground, so the click is eaten and the item stays on the cursor;
 //   * while a press lasts every event passed on has its button bytes cleared, whatever its type
 //     and wherever it is (the rectangles going stale mid-press do not end it);
-//   * the press's own UP (LEFT UP, or RIGHT UP for a Ctrl+right press) is rewritten and ends it;
+//   * the press's own UP (LEFT UP, or RIGHT UP for a right press) is rewritten and ends it;
 //   * THE POLLED RELEASE ends a press whose UP never came: once the polled button has been up for
 //     two whole Update generations (an UP queued in the generation the poll first saw up, or in
 //     the next, still ends it normally). "400 ms without events" cannot fire - the device's
 //     Update appends a MOVE every tick - so the poll is the fallback;
 //   * a second LEFT DOWN while a left press is still open (its UP was lost) ends the old press and
 //     is judged on its own;
-//   * Ctrl+RIGHT DOWN inside the pad or the label -> handed to the layout editor's entry (the one
-//     the in-window Ctrl+right-click reaches), rewritten, and its RIGHT UP rewritten too; a plain
-//     RIGHT DOWN inside them is consumed too, with no action (the player's right-click skill
-//     must not fire under the pad); the wheel passes;
+//   * THE EDITOR CHORD (editor_open of [keys], Ctrl+RightClick by default: the gates carry its
+//     DOWN type and modifiers, and the modifiers held): its RIGHT DOWN inside the pad or the
+//     label -> handed to the layout editor's entry (the one the in-window chord reaches),
+//     rewritten, and its RIGHT UP rewritten too; any other RIGHT DOWN inside them (a plain one;
+//     every one when editor_open is a key) is consumed too, with no action (the player's
+//     right-click skill must not fire under the pad); the wheel passes;
 //   * while the layout editor is OPEN: LEFT DOWN inside the rectangles is handed to the editor
 //     (not to a button) and starts an editor press, during which every MOVE and the LEFT UP are
 //     handed to the editor too; a MOVE or a stray LEFT UP inside the rectangles with no press is
@@ -184,7 +186,8 @@ inline bool utPadScreenWindowFresh(const UtPadScreenRects& r, unsigned long long
 
 // ---- what a logical button does (ut_padpage.h's numbering) -------------------------------------
 // 0 = MAT (the game's own materials page), 1..G = a button of groups, G + 1 = OWN, G + 2 = NEXT
-// (only while the pad is paged). `buttons` = G, the pad's buttons between MAT and OWN. The screen
+// (only while the pad is paged), G + 3 = EDIT (only while `edit`: the layout editor). `buttons`
+// = G, the pad's buttons between MAT and OWN. The screen
 // pad's click (ut_plate scrButton) and the in-window pad's map MAT through this - the group
 // lookup has no group for logical 0 (looked up as a group, a MAT click on the screen pad would be
 // "a button that maps to no group" and do nothing).
@@ -193,15 +196,17 @@ enum UtPadButtonKind {
     kUtPadKindMat,
     kUtPadKindGroup,
     kUtPadKindOwn,
-    kUtPadKindNext
+    kUtPadKindNext,
+    kUtPadKindEdit        // the layout editor's button: opens the editor, selects no group
 };
 
-inline int utPadButtonKind(int index, int buttons, int paged) {
+inline int utPadButtonKind(int index, int buttons, int paged, int edit = 0) {
     if (buttons < 0) buttons = 0;
     if (index == 0) return kUtPadKindMat;
     if (index >= 1 && index <= buttons) return kUtPadKindGroup;
     if (index == buttons + 1) return kUtPadKindOwn;
     if (index == buttons + 2 && paged) return kUtPadKindNext;
+    if (index == buttons + 3 && edit) return kUtPadKindEdit;
     return kUtPadKindNone;
 }
 
@@ -211,7 +216,7 @@ enum UtPadPress {
     kUtPressButton = 1,   // LEFT DOWN on a button: its action ran
     kUtPressKept = 2,     // LEFT DOWN on the ground / the label / with an item: consumed, no action
     kUtPressEditor = 3,   // LEFT DOWN handed to the open layout editor: its drag
-    kUtPressRight = 4,    // Ctrl+RIGHT DOWN: the editor's entry
+    kUtPressRight = 4,    // RIGHT DOWN: the editor chord's entry, or consumed
 };
 
 enum UtPadAct {
@@ -234,7 +239,7 @@ enum UtPadWhy {
     kUtPadWhyGround,          // LEFT DOWN on the pad's ground or the label
     kUtPadWhyCursorItem,      // a DOWN with an item on the cursor
     kUtPadWhyEditor,          // handed to the layout editor
-    kUtPadWhyCtrlRight,       // Ctrl+RIGHT DOWN: the editor's entry
+    kUtPadWhyCtrlRight,       // the editor chord's RIGHT DOWN: the editor's entry
     kUtPadWhyHeld,            // an event passed on during a press: bytes cleared
     kUtPadWhyUp,              // the press's own UP
     kUtPadWhyWindow,          // inside the open editor's window rect - the window's own
@@ -246,12 +251,16 @@ struct UtPadInEvent {
     float x, y;   // client px
 };
 
-// What the caller knows about the world right now. Every field is 0/1.
+// What the caller knows about the world right now. Every field is 0/1 but the editor chord's
+// three (mods, editorType, editorMods).
 struct UtPadInGates {
     int fresh;        // utPadScreenRectsFresh(published, now)
     int proven;       // the event space is proven (a probe agreed with GetCursorPos)
     int cursorItem;   // an item is on the cursor, or the read failed (unknown = an item)
-    int ctrl;         // Ctrl is down
+    int mods;         // the modifiers held at this event: 1 Ctrl, 2 Shift, 4 Alt (ut_keys.h's bits)
+    int editorType;   // the editor chord ([keys] editor_open): the DOWN type it is bound to
+                      // (kUtEvtRightDown), 0 = not a click (bound to a key, or none)
+    int editorMods;   // its modifiers: ALL of them held opens, extra ones allowed
     int editorOpen;   // the layout editor is open
     int leftUp;       // POLLED: the logical left button is up now (swapped buttons honoured)
     int rightUp;      // POLLED: the logical right button is up now
@@ -299,6 +308,12 @@ inline UtPadInOut fresh() {
     memset(&o, 0, sizeof(o));
     o.button = -1;
     return o;
+}
+
+// The editor chord: this DOWN is editor_open's click with all of its modifiers held (extra ones
+// allowed) - ut_keys.h's utKeyClickMatches, which test_padinput proves equal over every input.
+inline bool editorChord(const UtPadInGates& g, int type) {
+    return g.editorType != 0 && type == g.editorType && (g.editorMods & ~g.mods) == 0;
 }
 
 // No press is open: the rules for an event that may start one.
@@ -355,10 +370,11 @@ inline void decideIdle(UtPadInState* s, const UtPadInEvent& e, const UtPadScreen
             o->rewrite = 1;
             s->press = kUtPressRight;
             s->upSince = 0;
-            if (!g.ctrl) {
-                // A PLAIN right click on the pad or the label: consumed with no
-                // action, so the player's right-click skill never fires at a point under the
-                // pad; its RIGHT UP is rewritten by the right press like the Ctrl one's.
+            if (!editorChord(g, e.type)) {
+                // A right click that is not the editor chord on the pad or the label (a PLAIN one
+                // with the default Ctrl+RightClick, every one when editor_open is a key): consumed
+                // with no action, so the player's right-click skill never fires at a point under
+                // the pad; its RIGHT UP is rewritten by the right press like the chord's.
                 o->why = kUtPadWhyGround;
                 return;
             }

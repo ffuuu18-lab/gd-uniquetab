@@ -179,6 +179,7 @@ void layPublish(const char* viewName_, int pw, int ph, const std::string& hash, 
 struct LayCfg {
     UtCfgFamilyStore grid, pad, label;
     int padY, padH, padGap, labelSize, captionMax, plateSwap;
+    int zoomPct;   // zoom_pct: a zoom above 100 is a layout of its own (the magnified cells)
     char ground[8];
     char padScreen[sizeof(g_cfg.padScreen)], labelScreen[sizeof(g_cfg.labelScreen)];
 };
@@ -197,6 +198,7 @@ bool layCfgCopy(LayCfg* out) {
             c->labelSize = panelLabelSizeInForce();
             c->captionMax = panelCaptionMaxInForce();
             c->plateSwap = g_cfg.plateSwap;
+            c->zoomPct = g_cfg.zoomPct;
             memcpy(c->ground, g_cfg.plateGround, sizeof(c->ground));
             memcpy(c->padScreen, g_cfg.padScreen, sizeof(c->padScreen));
             memcpy(c->labelScreen, g_cfg.labelScreen, sizeof(c->labelScreen));
@@ -283,8 +285,12 @@ bool layWantNow(LayWant& w, std::string* why) {
     // derived grid, never this set (utPlateSetChoice).
     src.padScreen = c.padScreen;
     src.labelScreen = c.labelScreen;
+    // zoom_pct above 100: the grid in force (the derived one included) gets a set of its own for
+    // the magnified cells, "grid_<cover>=x,y,w,h zoom=<pct>" (utLayoutPlatesGrid); `user` then
+    // means "a layout set is in force", as on the live page (utLiveGridKind).
+    src.zoom = c.zoomPct;
     UtRect r;
-    char canon[64];
+    char canon[80];
     w.user = utLayoutPlatesGrid(src, &r, canon, sizeof(canon)) != 0;
     if (w.user) {
         w.grid.x = r.x;
@@ -292,6 +298,7 @@ bool layWantNow(LayWant& w, std::string* why) {
         w.grid.w = r.w;
         w.grid.h = r.h;
         w.grid.text = std::string("grid_") + cover + "=" + canon;
+        w.grid.zoom = utZoomPct(c.zoomPct);
     }
     return true;
 }

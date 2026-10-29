@@ -96,8 +96,9 @@ int main(int argc, char** argv) {
                 path, cat.formatVersion(), cat.byteSize(), cat.itemCount(), cat.setCount());
     CHECK_EQ(cat.formatVersion(), Catalogue::kFormatVersion, "format version");
     CHECK(cat.loaded(), "catalogue reports loaded");
-    CHECK_EQ(cat.itemCount(), 7301,
-             "item count (4,088 + the 304 Magical/Rare blueprints of 1.2.0 + the 2,909 monster infrequents)");
+    CHECK_EQ(cat.itemCount(), 7316,
+             "item count (4,088 + the 304 Magical/Rare blueprints of 1.2.0 + the 9 Legendary and 6 Rare "
+             "items outside records/items/ of 1.2.1 + the 2,909 monster infrequents of records/items/)");
 
     // -------------------------------------------------------- group breakdown
     rule("items per slot group");
@@ -117,11 +118,11 @@ int main(int argc, char** argv) {
                     g, slotGroupName(group), r.count, r.first, epic, r.count - epic);
     }
     CHECK_EQ(groupTotal, cat.itemCount(), "sum of group ranges");
-    CHECK_EQ(equipmentGroups, 6106, "equipment items (groups Helm..Medal: 3,197 uniques + 2,909 MIs)");
+    CHECK_EQ(equipmentGroups, 6121, "equipment items (groups Helm..Medal: 3,206 uniques + 2,915 MIs)");
     CHECK_EQ(cat.groupRange(SlotGroup::Relic).count, 91, "relic items");
-    CHECK_EQ(cat.equipmentCount(), 6106, "header equipment count");
+    CHECK_EQ(cat.equipmentCount(), 6121, "header equipment count");
     CHECK_EQ(cat.relicCount(), 91, "header relic count");
-    CHECK_EQ(cat.defaultVisibleCount(), 6197, "header default-visible count");
+    CHECK_EQ(cat.defaultVisibleCount(), 6212, "header default-visible count");
 
     std::size_t defaultVisible = 0, legendaryDefault = 0, setPieces = 0, withBitmap = 0;
     for (const ItemView& it : cat.items()) {
@@ -134,8 +135,8 @@ int main(int argc, char** argv) {
     }
     std::printf("  default visible %zu (legendary %zu), set pieces %zu, with bitmap %zu\n",
                 defaultVisible, legendaryDefault, setPieces, withBitmap);
-    CHECK_EQ(defaultVisible, 6197, "items flagged DefaultVisible");
-    CHECK_EQ(setPieces, 757, "items flagged SetPiece");
+    CHECK_EQ(defaultVisible, 6212, "items flagged DefaultVisible");
+    CHECK_EQ(setPieces, 761, "items flagged SetPiece (the Lokarr set's four included)");
 
     // --------------------------------------------------------- record lookup
     rule("record -> index map");
@@ -171,7 +172,7 @@ int main(int argc, char** argv) {
                 cat.setCount(), memberLinks,
                 static_cast<int>(cat.sets()[0].name.size()), cat.sets()[0].name.data(),
                 cat.sets()[0].memberCount);
-    CHECK_EQ(cat.setCount(), 201, "set count");
+    CHECK_EQ(cat.setCount(), 202, "set count (Lokarr's Spoils included)");
     CHECK_EQ(memberLinks, setPieces, "set member links == set pieces");
 
     // -------------------------------------------------- rejecting bad buffers
@@ -257,9 +258,9 @@ int main(int argc, char** argv) {
     std::printf("  visible items %d, columns %d, rows %d, contentHeight %d, maxScroll %d\n",
                 grid.visibleItemCount(), grid.columns(), grid.rows(),
                 grid.contentHeight(), grid.maxScroll());
-    CHECK_EQ(grid.visibleItemCount(), 6197, "default filter shows equipment + relics");
+    CHECK_EQ(grid.visibleItemCount(), 6212, "default filter shows equipment + relics");
     CHECK_EQ(grid.columns(), 7, "columns in a 320 px wide grid");
-    CHECK_EQ(grid.rows(), (6197 + 6) / 7, "rows");
+    CHECK_EQ(grid.rows(), (6212 + 6) / 7, "rows");
     CHECK_EQ(grid.contentHeight(), grid.rows() * 42 - 2, "content height");
     CHECK_EQ(grid.maxScroll(), grid.contentHeight() - 608, "max scroll");
     CHECK_EQ(grid.scrollOffset(), 0, "initial scroll");
@@ -482,7 +483,7 @@ int main(int argc, char** argv) {
     missingOnly.owned = OwnedFilter::MissingOnly;
     grid.relayout(transferGrid, missingOnly, &owned);
     std::printf("  missing-only: %d items\n", grid.visibleItemCount());
-    CHECK_EQ(grid.visibleItemCount(), 6197 - 5, "missing-only filter");
+    CHECK_EQ(grid.visibleItemCount(), 6212 - 5, "missing-only filter");
 
     Filters legendaryOnly = filters;
     legendaryOnly.classificationMask = 1u << static_cast<int>(Classification::Legendary);
@@ -539,7 +540,7 @@ int main(int argc, char** argv) {
             for (const ItemView& it : off.items()) if (catIsMi(it)) ++offMi;
             std::printf("  %s: %zu items, %zu monster infrequents\n", offPath.c_str(), off.itemCount(), offMi);
             CHECK_EQ(offMi, 0, "the flag-off catalogue marks no entry MI");
-            CHECK_EQ(off.itemCount(), 4392, "the flag-off catalogue: 4,392 items");
+            CHECK_EQ(off.itemCount(), 4401, "the flag-off catalogue: 4,401 items");
             std::size_t onMi = 0, rareMi = 0, misplaced = 0;
             for (int g = 0; g < kSlotGroupCount; ++g) {
                 const GroupRange r = on.groupRange(static_cast<SlotGroup>(g));
@@ -557,8 +558,9 @@ int main(int argc, char** argv) {
             }
             std::printf("  %s: %zu items, %zu monster infrequents\n", path, on.itemCount(), onMi);
             CHECK_EQ(off.formatVersion(), Catalogue::kFormatVersion, "the flag-off catalogue is format 1 too");
-            CHECK_EQ(onMi, 2909, "the flag-on catalogue marks every Rare equipment record: 2,909 MIs "
-                                 "(the census's 2,393 + 466 faction + 50 crafted)");
+            CHECK_EQ(onMi, 2915, "the flag-on catalogue marks every Rare equipment record: 2,915 MIs "
+                                 "(the census's 2,393 + 466 faction + 50 crafted + the 6 quest rewards "
+                                 "outside records/items/)");
             CHECK_EQ(rareMi, onMi, "every MI is equipment in a slot group (Helm..Medal)");
             CHECK_EQ(misplaced, 0, "inside each group the MIs come after the uniques");
             CHECK_EQ(on.itemCount(), off.itemCount() + onMi, "the flag-off items + the MIs");

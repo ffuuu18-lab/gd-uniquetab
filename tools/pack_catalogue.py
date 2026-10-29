@@ -383,11 +383,11 @@ def print_summary(blob: bytes, stats: dict, src: str, dst: str) -> None:
     print("  format version %d, header %d B, item entry %d B, set entry %d B"
           % (FORMAT_VERSION, HEADER_SIZE, ITEM_ENTRY_SIZE, SET_ENTRY_SIZE))
     print("  items            %6d" % stats["items"])
-    print("  equipment        %6d   (expected 3197 = 3196 Epic/Legendary + 1 curated extra)"
+    print("  equipment        %6d   (flag off: 3206 = 3205 Epic/Legendary + 1 curated extra)"
           % stats["equipment"])
     print("  relics           %6d   (expected 91 = 21 Rare + 21 Epic + 49 Legendary)"
           % stats["relics"])
-    print("  default visible  %6d   (equipment + relics, expected 3288)" % stats["defaultVisible"])
+    print("  default visible  %6d   (equipment + relics, flag off: 3297)" % stats["defaultVisible"])
     print("  item sets        %6d  with %d member links" % (stats["sets"], stats["setMembers"]))
     print("  strings          %6d unique, %d B" % (stats["strings"], stats["stringBytes"]))
     print("  total size       %6d B (%.2f MB)" % (stats["bytes"], stats["bytes"] / 1048576.0))

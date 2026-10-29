@@ -242,6 +242,8 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
                 bool got = g.items->read(key, data, kTexHeader);
                 if (!got && key.compare(0, 6, "items/") == 0)
                     got = g.items->read(key.substr(6), data, kTexHeader);
+                if (!got && g.levelArt && key.compare(0, 10, "level art/") == 0)
+                    got = g.levelArt->read(key.substr(10), data, kTexHeader);
                 if (got) v.first = texSize(data, v.second.first, v.second.second);
             }
             s = sizes.emplace(it.bitmap, v).first;

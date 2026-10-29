@@ -235,6 +235,7 @@ std::string inputFingerprint(const std::string& gameDir, const std::string& lang
     for (const char* s : kSub) {
         rel.push_back(std::string(s) + "resources\\Items.arc");
         rel.push_back(std::string(s) + "resources\\UI.arc");
+        rel.push_back(std::string(s) + "resources\\Level Art.arc");
         rel.push_back(std::string(s) + "resources\\Text_" + lang + ".arc");
     }
     // The basemod layer is an input like any other, and so is the flag that turns it on:
@@ -269,7 +270,12 @@ std::string inputFingerprint(const std::string& gameDir, const std::string& lang
     // is the view's own (ut::utFrameBoxes: the cover's fit, 160..512), so every view regenerates
     // once with its frame and the grids fitted under it. The user's grid override is not an
     // input: it only moves the plates, which carry their own hash (ensureLayoutPlates).
-    std::string fp = "GDUT-STAMP 9\nlang=" + lang + "\n";
+    // 10 = the base game's records are judged by the junk list too, not the records/items/ path
+    // rule (its real items outside that folder - the Lokarr set, the quest rewards - are
+    // collected), and Level Art.arc is an icon archive (the Lokarr set's icons); 11 = the
+    // endless dungeon's script entities are no longer a junk folder (the Totally Normal Shield's
+    // three versions are collected).
+    std::string fp = "GDUT-STAMP 11\nlang=" + lang + "\n";
     if (basemods) fp += "basemods=1\n";
     // A custom view's plate names always carry its tag; the line makes a view generated
     // before that rule regenerate once, and leaves the start-up view's stamp as it was.
@@ -729,13 +735,25 @@ bool planLayoutPlates(const std::string& outDir, const LayoutGrid& grid,
     }
     const ut::UtRect r = {grid.x, grid.y, grid.w, grid.h};
     for (const CellGrid& s : sizes) {
-        // under the view's frame (the F line), exactly as the live page fits it (g_nmax)
-        const ut::UtGrid fit = ut::utGridFit(r, s.cellW, s.cellH, plan.rowGap, frameBoxes);
+        // At a zoom the cell the live page shows (ut::utLiveGroupGrid): magnified, clamped so one
+        // fits the rectangle; two generated sizes may give one shown size (one plate). At 100
+        // the generated cell, as before.
+        const ut::UtZoomFit z = ut::utZoomFit(r, s.cellW, s.cellH, plan.rowGap, grid.zoom);
         CellGrid c = s;
+        c.cellW = z.cellW;
+        c.cellH = z.cellH;
+        bool have = false;
+        for (const CellGrid& o : plan.cells) have = have || (o.cellW == c.cellW && o.cellH == c.cellH);
+        if (have) continue;
+        // under the view's frame (the F line), exactly as the live page fits it (g_nmax)
+        const ut::UtGrid fit = ut::utGridFit(r, c.cellW, c.cellH, plan.rowGap, frameBoxes);
         c.cols = fit.cols;
         c.rows = fit.rows;
         plan.cells.push_back(c);
     }
+    std::sort(plan.cells.begin(), plan.cells.end(), [](const CellGrid& a, const CellGrid& b) {
+        return a.cellW != b.cellW ? a.cellW < b.cellW : a.cellH < b.cellH;
+    });
     plan.geo.x0 = grid.x;
     plan.geo.y0 = grid.y;
     plan.geo.usableW = grid.w;

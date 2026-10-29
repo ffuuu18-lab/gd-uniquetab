@@ -30,7 +30,9 @@ What is emitted
       (src/gen/ut_groups_default.h); readers also take the older line without them.
 
 Selection - THE COLLECTION RULE:
-  * every Epic/Legendary EQUIPMENT record in data/oracle/catalogue.json (unchanged), and
+  * every Epic/Legendary EQUIPMENT record in data/oracle/catalogue.json (the records outside
+    records/items/ the junk list leaves included: the Lokarr set, Wilhelm's Wondrous Wargem,
+    Gazer Man, the Totally Normal Shield's three versions), and
   * every RELIC (`isRelic`, Class ItemArtifact) at ANY classification - the 21 Rare b-series
     relics joined the 21 Epic and 49 Legendary ones, so the Relics group holds 91 and the
     collection 3,287 records (was 70 and 3,266), and
@@ -87,7 +89,7 @@ VIEW = None          # ui_geometry.View of --basemods / --custom; None = the bas
 RELIC_EXPECT_TOTAL = 91           # 21 Rare + 21 Epic + 49 Legendary, records/items/gearrelic/
 EXTRA_EXPECT_TOTAL = 1            # build_catalogue.py's EXTRA_RECORDS
 BLUEPRINT_EXPECT_TOTAL = 914      # every shipped ItemArtifactFormula (925) but Crate's 11 test ones
-COLLECTION_EXPECT_TOTAL = 4202    # 3,196 Epic/Leg equipment + 91 relics + 1 curated extra + 914 blueprints
+COLLECTION_EXPECT_TOTAL = 4211    # 3,205 Epic/Leg equipment + 91 relics + 1 curated extra + 914 blueprints
 
 MATERIAL_WINDOW = "records/ui/caravan/caravan_materialwindow.dbr"
 PLAIN_PLATE = "records/ui/caravan/caravan_transfercoverimage.dbr"
@@ -710,6 +712,7 @@ class Bitmaps:
 
     def __init__(self):
         self.arc = ArcSet.load(GAME, "resources/Items.arc")
+        self.level_art = build_catalogue.load_level_art(GAME)   # optional, None without it
         self.cache = {}
 
     def size(self, bitmap):
@@ -728,6 +731,8 @@ class Bitmaps:
         data = self.arc.read(key)
         if data is None and key.startswith("items/"):
             data = self.arc.read(key[len("items/"):])
+        if data is None and self.level_art is not None and key.startswith("level art/"):
+            data = self.level_art.read(key[len("level art/"):])
         size = tex_size(data)
         self.cache[bitmap] = size
         return size

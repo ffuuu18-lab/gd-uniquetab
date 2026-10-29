@@ -1352,8 +1352,8 @@ int viewPass(const std::string& root) {
     check(r.generated && r.view == "custom-lootascension", "the Baul view generates");
     check(r.overlay.find("frame at 513,70 with 180 boxes") != std::string::npos,
           "the frame is where Baul's materials page is, with all 180 boxes (the 346x625 cover's fit)");
-    check(r.summary.find(" on 236 pages ") != std::string::npos,
-          "236 pages with collect_mi=1, the default (130 with it off: 115 + 15 of Blueprints, 4 x 16 of 64x32)");
+    check(r.summary.find(" on 237 pages ") != std::string::npos,
+          "237 pages with collect_mi=1, the default (132 with it off: 117 + 15 of Blueprints, 4 x 16 of 64x32)");
     check(r.plates.find("cut at 605,71") != std::string::npos,
           "the ground is the 346x625 cut of Baul's window art at 605,71");
     check(r.plateGround.find("a flat 060606") != std::string::npos,
@@ -1374,7 +1374,7 @@ int viewPass(const std::string& root) {
         check(w.ok && w.frameX == 513 && w.frameY == 70,
               "the WRITTEN frame record puts the page at 513,70");
         check(w.frameBoxes == 180, "the written frame lists all 180 boxes");
-        check(w.pages == 236, "the written archive holds 236 collection pages");
+        check(w.pages == 237, "the written archive holds 237 collection pages");
         check(w.minX == 128 && w.minY == 76 && w.maxX < 128 + 310 && w.maxY < 76 + 550,
               "every written page box is on the derived grid (origin 128,76, 310x550)");
         check(s.ok && s.frameX == 0 && s.frameY == 88 && s.frameBoxes == 234 &&
@@ -1397,7 +1397,7 @@ int viewPass(const std::string& root) {
     std::vector<std::uint8_t> stamp;
     check(readAll(viewDir + "\\catalogue.stamp", stamp), "the view folder has its own stamp");
     const std::string stampText(stamp.begin(), stamp.end());
-    check(stampText.find("GDUT-STAMP 9\n") == 0, "stamp format 9 (the frame's box count is the view's own)");
+    check(stampText.find("GDUT-STAMP 11\n") == 0, "stamp format 11 (the junk list without the script entities)");
     check(stampText.find("\ngroups=builtin:") != std::string::npos && stampText.find("+user:") == std::string::npos,
           "with no groups file the stamp names the built-in groups (by their text's hash) alone");
     check(stampText.find("\nplates=tagged\n") != std::string::npos,
@@ -1628,8 +1628,9 @@ int countLayoutFiles(const std::string& plateDir) {
 
 // The grid in force for a grid_ value over the view's P line, as the layout-plates thread resolves
 // it: through ut::utLayoutPlatesGrid, the function layWantNow calls, so the two never drift (no
-// screen key here - the fixtures set none).
-bool resolveGrid(const std::string& outDir, const char* value, gen::LayoutGrid* lg) {
+// screen key here - the fixtures set none). `zoom`: zoom_pct (a zoom above 100 resolves the
+// derived grid too - value null - into a set of its own, as layWantNow does).
+bool resolveGrid(const std::string& outDir, const char* value, gen::LayoutGrid* lg, int zoom = 100) {
     gen::UiGeometry geo;
     int mw = 0, mh = 0, gap = 2;
     if (!gen::readGroupsGeometry(outDir + "\\uniq-groups.txt", geo, &mw, &mh, &gap, nullptr))
@@ -1640,14 +1641,25 @@ bool resolveGrid(const std::string& outDir, const char* value, gen::LayoutGrid* 
     src.maxCellW = mw; src.maxCellH = mh; src.rowGap = gap;
     src.grid = value;
     src.padY = 25; src.padH = 14; src.padGap = 1; src.labelSize = 13; src.captionMax = 14;
+    src.zoom = zoom;
     ut::UtRect r;
-    char canon[64];
+    char canon[80];
     if (!ut::utLayoutPlatesGrid(src, &r, canon, sizeof canon)) return false;
     lg->x = r.x; lg->y = r.y; lg->w = r.w; lg->h = r.h;
     char cover[32];
     std::snprintf(cover, sizeof cover, "%dx%d", geo.plateW, geo.plateH);
     lg->text = std::string("grid_") + cover + "=" + canon;
+    lg->zoom = ut::utZoomPct(zoom);
     return true;
+}
+
+// "<cw>x<ch>:<cols>x<rows> ..." of a plan's cells, for the zoom checks.
+std::string planCells(const gen::LayoutPlan& p) {
+    std::string t;
+    for (const gen::CellGrid& c : p.cells)
+        t += (t.empty() ? "" : " ") + std::to_string(c.cellW) + "x" + std::to_string(c.cellH) + ":" +
+             std::to_string(c.cols) + "x" + std::to_string(c.rows);
+    return t;
 }
 
 DWORD WINAPI holdGenLock(LPVOID) {
@@ -1833,6 +1845,76 @@ int layoutPlates(const std::string& dataDir, const std::string& outDir) {
                                        std::to_string(waited) + " ms)");
     }
 
+    // 7b. zoom_pct: a zoom is a layout of its own. The derived grid at 150 gets a set for the
+    // magnified cells (48 / 96 px for the 32 / 64 px groups), painted, found again, superseded by
+    // another zoom and removed when the zoom is back at 100; a small user grid clamps the zoom of
+    // its wide groups, and two cells that come out the same are one plate.
+    {
+        gen::LayoutGrid z100, z150, z200, u100;
+        check(!resolveGrid(modDir, nullptr, &z100, 100),
+              "zoom_pct=100 under the derived grid: no layout set (the derived plates stay)");
+        const bool r150 = resolveGrid(modDir, nullptr, &z150, 150);
+        const bool r200 = resolveGrid(modDir, nullptr, &z200, 200);
+        check(r150 && r200 && z150.text == "grid_438x627=105,76,333,552 zoom=150" &&
+                  z150.zoom == 150 && z150.x == 105 && z150.y == 76 && z150.w == 333 &&
+                  z150.h == 552 && z200.text == "grid_438x627=105,76,333,552 zoom=200",
+              "zoom_pct=150 / 200 under the derived grid are the sets " + z150.text + " / " + z200.text);
+        gen::LayoutPlan p150, p200, pu;
+        std::string e;
+        const bool pl150 = gen::planLayoutPlates(modDir, z150, "", "", p150, &e);
+        const bool pl200 = gen::planLayoutPlates(modDir, z200, "", "", p200, &e);
+        std::printf("[test] layout plates: zoom 150 cells %s; zoom 200 cells %s\n",
+                    planCells(p150).c_str(), planCells(p200).c_str());
+        check(pl150 && planCells(p150) == "48x48:6x11 48x144:6x3 96x48:3x11 96x96:3x5 96x144:3x3 96x192:3x2",
+              "zoom 150: the six vanilla cells magnified and fitted to 333 x 552 (Helms 96x96 3 x 5)");
+        check(pl200 && planCells(p200) == "64x64:5x8 64x192:5x2 128x64:2x8 128x128:2x4 128x192:2x2 128x256:2x2",
+              "zoom 200: every cell fits the derived grid (128x256 at the largest), none clamped");
+        // the same rectangle as a user grid at 100 is another set (no zoom in the text, the cells
+        // as generated)
+        check(resolveGrid(modDir, "105,76,333,552", &u100) && u100.text == "grid_438x627=105,76,333,552" &&
+                  gen::planLayoutPlates(modDir, u100, "", "", pu, &e) && pu.hash != p150.hash &&
+                  p150.hash != p200.hash,
+              "the zoom is in the hash: 100 / 150 / 200 over one rectangle are three sets");
+        // a narrow user grid at 200: the 64 px wide groups are clamped to 100 (65 px would not fit
+        // 64), the 32 px ones magnified to 64 - 32x32 and 64x64 both show 64x64: one plate
+        gen::LayoutGrid zn;
+        gen::LayoutPlan pn;
+        const bool rn = resolveGrid(modDir, "105,76,64,552", &zn, 200) &&
+                        gen::planLayoutPlates(modDir, zn, "", "", pn, &e);
+        check(rn && zn.text == "grid_438x627=105,76,64,552 zoom=200" &&
+                  planCells(pn) == "64x32:1x16 64x64:1x8 64x96:1x5 64x128:1x4 64x192:1x2",
+              "a 64 px wide user grid at 200: the clamp keeps 64 px cells, five plates for six sizes (" +
+                  planCells(pn) + ")");
+        // painted, found, superseded, removed
+        ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &z150, rep);
+        const std::string h150 = rep.hash;
+        bool named = ok && rep.names.size() == kVanillaPlates;
+        for (const std::string& nm : rep.names) named = named && nm.find("_438x627_L" + h150) != std::string::npos;
+        check(ok && rep.painted && rep.hash == p150.hash && named &&
+                  exists(plateDir + "\\uniq_plate_96x96_438x627_L" + h150 + ".tex"),
+              "zoom 150 paints its " + std::to_string(rep.names.size()) + " plates _L" + h150 +
+                  " (uniq_plate_96x96_438x627_L" + h150 + " for Helms)");
+        ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &z150, rep);
+        check(ok && rep.upToDate && !rep.painted && rep.hash == h150,
+              "zoom 150 again finds its set on disk");
+        ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &z200, rep);
+        check(ok && rep.painted && rep.hash == p200.hash && rep.removed == kVanillaPlates &&
+                  !exists(plateDir + "\\uniq_plate_96x96_438x627_L" + h150 + ".tex"),
+              "zoom 200 paints _L" + rep.hash + " and removes the " + std::to_string(rep.removed) +
+                  " plates of zoom 150");
+        ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, nullptr, rep);
+        int sameDerived = 0;
+        for (const char* c : {"32x32", "32x96", "64x32", "64x64", "64x96", "64x128"}) {
+            std::vector<std::uint8_t> x, y;
+            const std::string leaf = std::string("uniq_plate_") + c + ".tex";
+            if (readAll(plateDir + "\\" + leaf, x) && readAll(dataDir + "\\oracle\\plates\\" + leaf, y) && x == y)
+                ++sameDerived;
+        }
+        check(ok && rep.removed == kVanillaPlates && countLayoutFiles(plateDir) == 0 &&
+                  sameDerived == kVanillaPlates,
+              "back at 100: the zoom's plates go, the derived ones are still the oracle's");
+    }
+
     // 8. the set the Python reference is compared with (left on disk for --layout-compare)
     ok = gen::ensureLayoutPlatesGuarded(game, modDir, plateDir, "EN", "", v, &a, rep);
     check(ok && rep.painted && rep.hash == hashA, "grid_438x627=105,120,333,460 painted again (" +
@@ -1842,6 +1924,23 @@ int layoutPlates(const std::string& dataDir, const std::string& outDir) {
         if (f) { std::fputs(hashA.c_str(), f); std::fclose(f); }
         f = std::fopen((outDir + "\\layout-names.txt").c_str(), "wb");
         if (f) { for (const std::string& nm : namesA) std::fprintf(f, "%s\n", nm.c_str()); std::fclose(f); }
+    }
+    // 8b. the zoom set the Python reference is compared with (make_plates.py --grid --zoom), in a
+    // plate folder of its own so set A above stays on disk beside it
+    {
+        const std::string zoomDir = outDir + "\\plateroot-zoom";
+        CreateDirectoryA(zoomDir.c_str(), nullptr);
+        gen::LayoutGrid z150;
+        gen::LayoutPlatesReport zr;
+        ok = resolveGrid(modDir, nullptr, &z150, 150) &&
+             gen::ensureLayoutPlatesGuarded(game, modDir, zoomDir, "EN", "", v, &z150, zr);
+        check(ok && zr.painted && zr.names.size() == kVanillaPlates,
+              "zoom 150 painted for the Python comparison (" + std::to_string(zr.names.size()) + " plates _L" +
+                  zr.hash + ")");
+        FILE* f = std::fopen((outDir + "\\layout-zoom-hash.txt").c_str(), "wb");
+        if (f) { std::fputs(zr.hash.c_str(), f); std::fclose(f); }
+        f = std::fopen((outDir + "\\layout-zoom-names.txt").c_str(), "wb");
+        if (f) { for (const std::string& nm : zr.names) std::fprintf(f, "%s\n", nm.c_str()); std::fclose(f); }
     }
 
     // 9. the timing on the other covers: Baul (346x625) and a wide one (X-Mod 975x968)
@@ -1870,7 +1969,7 @@ int layoutPlates(const std::string& dataDir, const std::string& outDir) {
             FILE* f = std::fopen((vdir + "\\uniq-groups.txt").c_str(), "wb");
             if (f) { std::fwrite(po.groups.data(), 1, po.groups.size(), f); std::fclose(f); }
             f = std::fopen((vdir + "\\catalogue.stamp").c_str(), "wb");
-            if (f) { std::fputs("GDUT-STAMP 9\nharness view\n", f); std::fclose(f); }
+            if (f) { std::fputs("GDUT-STAMP 11\nharness view\n", f); std::fclose(f); }
             gen::LayoutGrid lg;
             if (!resolveGrid(vdir, w.grid, &lg)) {
                 check(false, std::string("the grid ") + w.grid + " does not resolve on " + w.c->label);
@@ -2302,13 +2401,13 @@ int vanilla(const std::string& dataDir, const std::string& outDir) {
     }
     std::printf("[test] mi: collect_mi=1 vanilla catalogue %zu items (%zu monster infrequents), %zu B\n",
                 st.items, st.mi, st.bytes);
-    ok(st.mi == 2909 && rareEquip == st.mi,
-       "2,909 monster infrequents (every Rare equipment record: the census's 2,393 + 466 faction + 50 crafted) - " +
+    ok(st.mi == 2915 && rareEquip == st.mi,
+       "2,915 monster infrequents (every Rare equipment record: the census's 2,393 + 466 faction + 50 crafted + the 6 quest rewards outside records/items/) - " +
            std::to_string(st.mi));
     ok(faction == 466 && crafted == 50,
        "the faction-store rares (" + std::to_string(faction) + ") and the blacksmith-crafted ones (" +
            std::to_string(crafted) + ") are collected too");
-    ok(st.items == 4392 + st.mi, "the flag-off catalogue's 4,392 items + the MIs");
+    ok(st.items == 4401 + st.mi, "the flag-off catalogue's 4,401 items + the MIs");
     {
         std::vector<std::uint8_t> want;
         if (!readAll(fx + "\\catalogue.bin", want)) { ok(false, "data\\oracle\\catalogue.bin is there"); }
@@ -2335,6 +2434,9 @@ int vanilla(const std::string& dataDir, const std::string& outDir) {
     if (!gen::generatePages(g, items, po, &err, nullptr, &on)) return fail(err.c_str());
     std::printf("[test] mi: pages %zu records on %zu pages in %zu groups (%zu skipped, no icon)\n",
                 po.itemCount, po.pageCount, po.groupList.size(), po.skipped);
+    ok(po.skipped == 0 && po.itemCount == 7126 && po.pageCount == 197,
+       "every collected record is paged - 7,126 boxes on 197 pages, 0 skipped: the reference folder's "
+       "Level Art.arc gives the Lokarr set its icons (" + std::to_string(po.skipped) + " skipped)");
     printGLines(po.groups, "mi");
     const char* names[3] = {"uniq-records.txt", "uniq-pages.txt", "uniq-groups.txt"};
     const std::string* texts[3] = {&po.records, &po.pages, &po.groups};
@@ -2397,7 +2499,7 @@ int vanilla(const std::string& dataDir, const std::string& outDir) {
             const std::string k = utg::normPath(it.record);
             if (k == helm || k == ring) ownedIn = true;
         }
-        ok(off.size() == 4392 && offMi == 0 && !ownedIn,
+        ok(off.size() == 4401 && offMi == 0 && !ownedIn,
            "the flag-off catalogue holds no MI, the two owned ones neither: " + std::to_string(off.size()) + " items");
         gen::GroupsInput offIn;
         offIn.set = def;

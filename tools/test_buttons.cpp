@@ -977,11 +977,11 @@ void testLivePad() {
     en.tag = ruTag;   // never asked in English
     g_ruGame.calls = 0;
     utt::UtTextPad p = utt::utTextResolvePad(en, in);
-    bool same = p.caps.size() == in.size() + 3 && p.names.size() == in.size() && p.caps[0] == "MAT" &&
-                p.caps[in.size() + 1] == "OWN" && p.caps[in.size() + 2] == ">>";
+    bool same = p.caps.size() == in.size() + 4 && p.names.size() == in.size() && p.caps[0] == "MAT" &&
+                p.caps[in.size() + 1] == "OWN" && p.caps[in.size() + 2] == ">>" && p.caps[in.size() + 3] == "EDIT";
     for (std::size_t i = 0; same && i < in.size(); ++i) same = p.caps[i + 1] == in[i].tag && p.names[i] == in[i].label;
     check(same && p.skipped.empty() && g_ruGame.calls == 0,
-          "English, no file: MAT, the 24 tags, OWN, >>; the names are the labels");
+          "English, no file: MAT, the 24 tags, OWN, >>, EDIT; the names are the labels");
     // The identity gate: a game in another language with no file draws the same built-in
     // English - the game's words are never asked, whatever its fonts have
     utt::UtTextContext rn;
@@ -1007,7 +1007,8 @@ void testLivePad() {
     rot.push_back({"retired", "RET", "Retired"});
     p = utt::utTextResolvePad(en, rot);
     check(p.caps[25] == "RUN" && p.names[24] == "Runewords" && p.capSrc[25] == utt::kSrcCategory &&
-              p.caps[26] == "CHA" && p.capSrc[26] == utt::kSrcDerived && p.caps[27] == "RET" && p.caps.back() == ">>",
+              p.caps[26] == "CHA" && p.capSrc[26] == utt::kSrcDerived && p.caps[27] == "RET" &&
+              p.caps[p.caps.size() - 2] == ">>" && p.caps.back() == "EDIT",
           "a mod's groups: the G line's tag and label; a missing tag derived from the id");
 
     // [text.ru] by [style] language = ru: Cyrillic captions and names through the glyph callback,
@@ -1033,13 +1034,13 @@ void testLivePad() {
     utt::UtTextFile fNo = mustParse(ruText, "the [text.ru] fixture without [style] language");
     ru.file = &fNo;
     const utt::UtTextPad pNo = utt::utTextResolvePad(ru, in);
-    check(pNo.caps[1] == "HEL" && pNo.caps.back() == "NXT" && pNo.names[0] == "Helms" && pNo.names[23] == "Relics!" &&
+    check(pNo.caps[1] == "HEL" && pNo.caps[pNo.caps.size() - 2] == "NXT" && pNo.names[0] == "Helms" && pNo.names[23] == "Relics!" &&
               pNo.skipped.empty(),
           "no [style] language on a Russian game: [text.ru] (and its @game) ignored, [text] and the built-ins");
     ru.file = &f;
     const std::size_t head = 1, chest = 3, feet = 7, legs = 6, dagger = 14, relic = 24;
     check(p.caps[head] == kShLM && p.caps[chest] == kRuNGR && p.capSrc[head] == utt::kSrcLanguage &&
-              p.caps.back() == kRuNGR && p.caps[2] == "SHO" && p.skipped.empty(),
+              p.caps[p.caps.size() - 2] == kRuNGR && p.caps[2] == "SHO" && p.skipped.empty(),
           "[text.ru] captions in Cyrillic, [text.ru] over [text] for NEXT, the rest the tags");
     check(p.names[head - 1] == kRuShlemy && p.nameSrc[head - 1] == utt::kSrcGameTag && p.names[chest - 1] == kRuNagrud &&
               p.names[feet - 1] == kRuObuv && p.names[legs - 1] == kRuPonozhi && p.names[dagger - 1] == kRuObuv &&
@@ -1051,7 +1052,7 @@ void testLivePad() {
     Font ascii = {{false, false, false}};
     ru.glyphCtx = &ascii;
     p = utt::utTextResolvePad(ru, in);
-    check(p.caps[head] == "HEL" && p.caps[chest] == "CHE" && p.caps.back() == "NXT" && p.names[head - 1] == "Helms" &&
+    check(p.caps[head] == "HEL" && p.caps[chest] == "CHE" && p.caps[p.caps.size() - 2] == "NXT" && p.names[head - 1] == "Helms" &&
               p.names[dagger - 1] == "Daggers",
           "a font without the letters: back to [text], then the built-in English");
     check(p.skipped.size() >= 6 && p.skipped[0].find("U+") != std::string::npos &&
@@ -1380,7 +1381,7 @@ void testResolve() {
     Font none = {{false, false, false}};
     c.glyphCtx = &none;
     utb::UtbPad p = utb::utbResolvePad(c, s, g);
-    check(p.caps == std::vector<std::string>({"MAT", "RNG", kShLM, "OWN", ">>"}) && p.names.size() == 2 &&
+    check(p.caps == std::vector<std::string>({"MAT", "RNG", kShLM, "OWN", ">>", "EDIT"}) && p.names.size() == 2 &&
               p.names[0] == "Rings & Amulets" && p.names[1] == "Helms" && p.sizes[1] == 9 &&
               p.fonts[2] == "fonts/ru/savapromedium.fnt" && p.skipped.size() == 1 &&
               p.skipped[0].find("[RNG] caption: U+0428") == 0,
@@ -1708,6 +1709,49 @@ void testDefaultAndIdentity(const std::string& root) {
                   utt::utTextKeyName(utt::kTextTooltipRoll, "") == "tooltip.roll" &&
                   utt::utTextFontOf(utt::kTextTooltipRoll) == utt::kFontTooltip,
               "tooltip.roll: the key, the tooltip font (" + terr + ")");
+    }
+    // [tab] edit.caption: the EDIT button's word (the layout editor's button, [advanced]
+    // edit_button). Read like tooltip.roll, never written: the generated file keeps its bytes.
+    {
+        const std::vector<std::string>& order = utb::utbTabOrder();
+        bool notListed = true;
+        for (const std::string& k : order) notListed = notListed && k != "edit.caption";
+        check(notListed && utb::utbDefaultText(utb::utbViewTitle(""), {}).find("edit.caption") == std::string::npos &&
+                  utb::utbBuiltinDefaults().tab.count("edit.caption") == 0,
+              "edit.caption: not in utbTabOrder, not in the built-in defaults, the generated file does not list it");
+        const utt::UtTextBuiltin* e = utt::utTextBuiltinEdit();
+        check(utt::utTextBuiltinById("edit") == e && std::string(e->caption) == "EDIT" &&
+                  std::string(e->name) == "Layout editor",
+              "the built-in: id edit, caption EDIT, name \"Layout editor\" (outside the 27-row table)");
+        std::string tk;
+        bool st = true;
+        check(utb::utbTabKeyToText("edit.caption", &tk, &st) && tk == "caption.edit" && !st &&
+                  utb::utbTextKeyToTab("caption.edit") == "edit.caption",
+              "edit.caption <-> caption.edit, like mat/own/next.caption");
+        utt::UtTextContext none;
+        const utt::UtTextPick e0 = utt::utTextResolve(none, utt::kTextCaption, "edit");
+        check(e0.text == "EDIT" && e0.source == utt::kSrcBuiltin, "no file: EDIT, built in");
+        utb::UtbFile ef = mustParseB("[tab]\nedit.caption = Edit\n[HEL]\ngroups = head\n", "an edit.caption");
+        check(ef.words.common.count("caption.edit") == 1 && ef.words.common.at("caption.edit").text == "Edit",
+              "[tab] edit.caption is parsed into caption.edit");
+        const std::vector<utb::UtbGroupIn> eg = bTable(builtinTable());
+        utb::UtbSet es;
+        std::string eerr;
+        check(utb::utbResolve(ef, eg, {}, es, &eerr), "that file resolves (" + eerr + ")");
+        utt::UtTextContext ec;
+        ec.file = &ef.words;
+        const utb::UtbPad ep = utb::utbResolvePad(ec, es, eg);
+        check(ep.caps.size() == es.buttons.size() + 4 && ep.caps[0] == "MAT" && ep.caps[1] == "HEL" &&
+                  ep.caps[2] == "OWN" && ep.caps[3] == ">>" && ep.caps[4] == "Edit" && ep.capFile == 1 &&
+                  ep.sizes.size() == ep.caps.size() && ep.fonts.size() == ep.caps.size() && ep.sizes[4] == -1,
+              "the pad: MAT, the buttons, OWN, NEXT, then EDIT - its caption from [tab] edit.caption");
+        mustRefuseB("[tab]\nedit.caption = \"\"\n", 2, "empty", "an empty edit.caption");
+        mustRefuseB("[tab]\nedit.caption = ABCDEFGHIJKLM\n", 2, "\"edit.caption\": longer than 12",
+                    "an edit.caption over 12 units");
+        utb::UtbFile tagEdt = mustParseB("[EDT]\ngroups = head\n[EDI]\ngroups = feet\n", "[EDT] and [EDI] buttons");
+        check(!utb::utbReservedTag("EDT") && !utb::utbReservedTag("EDI") && tagEdt.buttons.size() == 2 &&
+                  tagEdt.buttons[0].tag == "EDT",
+              "EDT / EDI stay legal tags (a player's existing button is never refused)");
     }
     check(utb::utbDefaultText(utb::utbViewTitle("reignofterror"), {}).find("in the custom game reignofterror.") != std::string::npos &&
               utb::utbDefaultText(utb::utbViewTitle(""), {}).find("in the main campaign.") != std::string::npos,

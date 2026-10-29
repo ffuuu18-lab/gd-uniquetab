@@ -2589,6 +2589,135 @@ static int caseMain(const char* mode, const char* arg) {
         return 0;
     }
 
+    // (n) MIXED-CASE DUPLICATES ON DISK. A hand-edited file names one record three times, in
+    // three spellings, between two others. The reader's duplicate check - answered by the
+    // journal's record index now, by a scan before - keeps what it always kept: ONE row, at the
+    // FIRST line's position, holding the LAST line's content and spelling. Every spelling finds
+    // it, every mutation finds it, the write puts it back in that place. Nothing in this case
+    // asks the index directly: it asserts the behaviour (main's audit checks the index after
+    // every one of these operations).
+    if (!strcmp(mode, "--case-dupcase")) {
+        const char* a1 = "records/items/gearhead/d010_head.dbr";
+        const char* a2 = "RECORDS/ITEMS/GEARHEAD/D010_HEAD.DBR";
+        const char* a3 = "Records/Items/GearHead/d010_Head.dbr";
+        const char* b = "records/items/gearchest/d011_chest.dbr";
+        const char* c = "records/items/gearlegs/d012_legs.dbr";
+        const char* d = "records/items/gearfeet/d013_feet.dbr";
+        char jsonPath[MAX_PATH];
+        _snprintf_s(jsonPath, sizeof(jsonPath), _TRUNCATE, "%s\\uniq-items.jsonl", outDir);
+        std::string text =
+            "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":5,\"stored\":5,"
+            "\"notStored\":0,\"unknown\":0,\"tableCopies\":12,\"saveVariant\":0}\n";
+        struct Row {
+            const char* record;
+            unsigned int stack, count;
+        };
+        const Row rows[] = {{a1, 1, 1}, {b, 2, 2}, {a2, 3, 3}, {c, 1, 1}, {a3, 7, 5}};
+        for (const Row& r : rows) {
+            char line[256];
+            _snprintf_s(line, sizeof(line), _TRUNCATE,
+                        "{\"record\":\"%s\",\"stack\":%u,\"stored\":true,\"count\":%u,\"len\":0}\n",
+                        r.record, r.stack, r.count);
+            text += line;
+        }
+        check(spit(jsonPath, text), "the file with one record in three spellings is written");
+        if (!ut::journalInit(nullptr)) {
+            printf("  [FAIL] journalInit\n");
+            return 1;
+        }
+        static char recs[16][256];
+        int n = ut::journalRecords(recs, 16);
+        check(n == 3, "three rows: the three spellings are ONE record, case-insensitively");
+        check(n == 3 && !strcmp(recs[0], a3) && !strcmp(recs[1], b) && !strcmp(recs[2], c),
+              "in the FIRST line's place, spelled as the LAST line spells it");
+        const char* spellings[] = {a1, a2, a3, "rEcOrDs/iTeMs/gEaRhEaD/D010_hEaD.dBr"};
+        bool allFive = true;
+        for (const char* sp : spellings) {
+            unsigned int count = 0, stack = 0;
+            int stored = -9;
+            if (!ut::journalTableRow(sp, &count, &stored, &stack) || count != 5 || stack != 7 ||
+                stored != ut::UT_STORED_YES)
+                allFive = false;
+        }
+        check(allFive, "every spelling finds that row, with the LAST line's count 5 and stack 7");
+        check(!ut::journalHas("records\\items\\gearhead\\d010_head.dbr"),
+              "a backslash is still a different record (the fold is case, nothing else)");
+        check(ut::journalFlushNow(), "the journal is written");
+        std::string back;
+        check(slurp(ut::journalPath(), &back), "and reads back");
+        const size_t pa = back.find(a3), pb = back.find(b), pc = back.find(c);
+        check(pa != std::string::npos && pb != std::string::npos && pc != std::string::npos &&
+                  pa < pb && pb < pc && back.find(a1) == std::string::npos &&
+                  back.find(a2) == std::string::npos && countRecordLines(back) == 3,
+              "three lines on disk, in that order, the record spelled as the last line spelled it");
+        // A re-deposit in another spelling replaces the row in place and keeps its count.
+        ut::UtReplicaCapture cap;
+        fill(&cap, a1, 4, 0);
+        check(ut::journalUpsert(cap), "a re-deposit spelled the first line's way is taken");
+        n = ut::journalRecords(recs, 16);
+        unsigned int count = 0, stack = 0;
+        check(n == 3 && !strcmp(recs[0], a1) && ut::journalTableRow(a2, &count, nullptr, &stack) &&
+                  count == 5 && stack == 4,
+              "it REPLACES row 0 (now spelled as deposited), its count survives, nothing is added");
+        check(ut::journalSetCount(a3, 2) && ut::journalTableRow(a1, &count, nullptr, nullptr) &&
+                  count == 2,
+              "a count set through one spelling is read through another");
+        check(ut::journalMarkStored("RECORDS/ITEMS/GEARCHEST/D011_CHEST.DBR", true),
+              "the reconcile's mark finds a row through an upper-cased record");
+        check(ut::journalRemove("Records/Items/GearLegs/D012_Legs.dbr") &&
+                  ut::journalCount() == 2 && !ut::journalHas(c) && ut::journalHas(b) &&
+                  ut::journalHas(a2),
+              "a remove through a mixed-case record takes exactly that row");
+        fill(&cap, d, 1, 0);
+        check(ut::journalUpsertCount(cap, 1) && ut::journalCount() == 3 && ut::journalHas(d),
+              "a new record is appended");
+        check(ut::journalSetCount(b, 0) && ut::journalMarkStored(b, false), "a row taken to zero");
+        char names[8][256];
+        char why[512];
+        const int dropped = ut::journalPruneNotStored(names, 8, why, sizeof(why));
+        n = ut::journalRecords(recs, 16);
+        check(dropped == 1 && !strcmp(names[0], b) && n == 2 && !strcmp(recs[0], a1) &&
+                  !strcmp(recs[1], d),
+              "the prune drops that one row, and the rows after it are still found");
+        check(ut::journalHas(a3) && ut::journalHas(d) && !ut::journalHas(b),
+              "every row left is found by its record, and the dropped one is not");
+        // GROWTH: 100 more rows - the index doubles at half full, twice - each deposited in one
+        // spelling and asked for in the other; then every third one removed again (each remove
+        // moves the rows after it up one).
+        int grownOk = 0, removedOk = 0;
+        for (int i = 0; i < 100; ++i) {
+            char lower[96], upper[96];
+            _snprintf_s(lower, sizeof(lower), _TRUNCATE, "records/items/grow/g%03d_ring.dbr", i);
+            _snprintf_s(upper, sizeof(upper), _TRUNCATE, "RECORDS/ITEMS/GROW/G%03d_RING.DBR", i);
+            fill(&cap, (i & 1) ? lower : upper, 1, 0);
+            if (ut::journalUpsertCount(cap, 1) && ut::journalHas((i & 1) ? upper : lower))
+                ++grownOk;
+        }
+        for (int i = 0; i < 100; i += 3) {
+            char mixed[96];
+            _snprintf_s(mixed, sizeof(mixed), _TRUNCATE, "Records/Items/Grow/G%03d_Ring.dbr", i);
+            if (ut::journalRemove(mixed)) ++removedOk;
+        }
+        bool restFound = true;
+        for (int i = 0; i < 100; ++i) {
+            char lower[96];
+            _snprintf_s(lower, sizeof(lower), _TRUNCATE, "records/items/grow/g%03d_ring.dbr", i);
+            unsigned int c1 = 0;
+            const bool has = ut::journalTableRow(lower, &c1, nullptr, nullptr);
+            if (has != (i % 3 != 0) || (has && c1 != 1)) restFound = false;
+        }
+        check(grownOk == 100 && removedOk == 34 && ut::journalCount() == 2 + 100 - 34 && restFound,
+              "100 rows deposited in one case and found in the other, 34 removed through a third "
+              "spelling, and exactly the other 66 still found, each with its count");
+        char idx[256];
+        check(ut::journalIndexCheck(idx, sizeof(idx)), "the index answers what a scan answers");
+        if (idx[0]) printf("      %s\n", idx);
+        ut::logFlush();
+        printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail,
+               g_fail == 1 ? "" : "s");
+        return g_fail ? 1 : 0;
+    }
+
     if (!strcmp(mode, "--case-reconcile")) {
         if (!ut::journalInit(nullptr)) {
             printf("  [FAIL] journalInit\n");
@@ -2794,7 +2923,32 @@ static int logFlushCase() {
     return g_fail ? 1 : 0;
 }
 
+static int mainBody(int argc, char** argv);
+
+// THE JOURNAL'S RECORD INDEX (ut_rescue.cpp): every mode below runs with the audit on, so every
+// mutation of every case - the read, an upsert, a remove, a count, a mark, a rollback, a prune, a
+// mode or view switch, the binary migration - checks that the index answers what a scan of the
+// rows answers before it lets go of the lock. One more check at the end. A failure fails the
+// process, whatever the case itself said.
 int main(int argc, char** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    ut::journalTestIndexAudit(1);
+    const int rc = mainBody(argc, argv);
+    long runs = 0;
+    char why[256] = {0}, now[256] = {0};
+    const long fails = ut::journalTestIndexAuditReport(&runs, why, sizeof(why));
+    const bool atEnd = ut::journalIndexCheck(now, sizeof(now));
+    printf("  the record index: %ld check%s after the journal's mutations, %ld failed; at the end "
+           "%s\n",
+           runs, runs == 1 ? "" : "s", fails, atEnd ? "equal to a scan" : "NOT equal to a scan");
+    if (fails || !atEnd) {
+        printf("  [FAIL] the record index disagrees with a scan: %s\n", fails ? why : now);
+        return 1;
+    }
+    return rc;
+}
+
+static int mainBody(int argc, char** argv) {
     // Unbuffered, so that when a check CRASHES the last line printed is the last line that ran.
     // Redirected output is block-buffered otherwise and the tail - the interesting part - is lost.
     setvbuf(stdout, nullptr, _IONBF, 0);
@@ -2830,6 +2984,7 @@ int main(int argc, char** argv) {
          !strcmp(argv[1], "--case-unreadable") || !strcmp(argv[1], "--case-hostile") ||
          !strcmp(argv[1], "--case-upgrade") || !strcmp(argv[1], "--case-upgraded") ||
          !strcmp(argv[1], "--case-reconcile") || !strcmp(argv[1], "--case-noreconcile") ||
+         !strcmp(argv[1], "--case-dupcase") ||
          !strcmp(argv[1], "--case-allstale") || !strcmp(argv[1], "--case-csv") ||
          !strcmp(argv[1], "--case-csvmode") || !strcmp(argv[1], "--case-csvempty") ||
          !strcmp(argv[1], "--dump-csv") || !strcmp(argv[1], "--case-gds") ||

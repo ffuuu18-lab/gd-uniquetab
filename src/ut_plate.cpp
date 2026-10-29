@@ -28,6 +28,7 @@
 #include "ut_config.h"
 #include "ut_live.h"
 #include "ut_bindings.h"
+#include "ut_caps.h"       // every bound a collection can reach, sized from the data
 #include "ut_log.h"
 #include "ut_paths.h"
 #include "ut_ownedfold.h"  // the owned fold's arithmetic, tested offline
@@ -204,11 +205,11 @@ struct PlateTex {
     //             if it is, the plates are served OUT OF THE MOD FOLDER and nothing has to be
     //             copied into the user's Documents folder at all.
     //   path    - "ui/caravan/uniq_plate_WxH.tex", the engine-relative name, which the resource
-    //             system resolves against its own roots (the loose-file override folder under
-    //             Documents\My Games\Grim Dawn\Settings is where the install step puts them
-    //             today). THE DOCUMENTED FALLBACK: an installation that already has them there
-    //             keeps working exactly as it did, with one extra failed lookup per plate size,
-    //             once per session.
+    //             system resolves against its own roots: the generator paints the plates into
+    //             the loose-file override root <game>\settings\ui\caravan\ (src\gen\generate.h),
+    //             so this is the candidate that finds them. THE DOCUMENTED FALLBACK: it costs one
+    //             failed modPath lookup per plate size before it, once per session, and nothing
+    //             else.
     // THE THIRD OPTION, NOT TAKEN, AND WHY - for whoever picks this up next. Engine.dll exports
     // `Engine::GetFileSystem`, and FileSystem exports `AddSource(Partition, string const&, char
     // const*, bool, bool, bool)` and `AddSourceArchive(Partition, string const&, char const*,
@@ -776,15 +777,17 @@ const GdTexture* fallbackPlate() {
 }
 
 // The live layout's grid as the plate set reads it (utPlateSetChoice): -1 = not resolved yet (no
-// UI scale), 0 = the derived grid, 1 = the user's grid_ line. Game thread (the plate probe and the
-// relayout), like every other liveLayoutGet caller there.
+// UI scale), 0 = the derived grid at zoom 100, 1 = a layout of its own - the user's grid_ line or a
+// zoom_pct above 100 (utLiveGridKind: the derived plates are painted for the generated cells, so
+// zoomed boxes get the zoom's own set, which the layout-plates thread paints for the derived grid
+// too). Game thread (the plate probe and the relayout), like every other liveLayoutGet caller there.
 int plateLiveGrid() {
     ut::LiveGeometry g;
     liveGeometry(&g);
     if (g.plateW <= 0 || g.plateH <= 0) return -1;   // no P line loaded: no cover, no grid yet
     LiveLayout lay;
     if (!liveLayoutGet(&lay)) return -1;
-    return lay.L.user[kUtLayGrid] ? 1 : 0;
+    return utLiveGridKind(lay.L.user[kUtLayGrid], lay.zoom);
 }
 
 // Which set the page shows now: the layout-plates thread's published set (layoutPlatesState)
@@ -1009,8 +1012,8 @@ void plateLayoutEdge() {
         logI("plate: a user grid's plates %s are being painted - the plain cover is shown until "
              "they are ready", pub);
     else
-        logI("plate: the live page has the user grid in force and no layout plates are published "
-             "for it - the plain cover is shown until they are");
+        logI("plate: the live page has the user grid or a zoom in force and no layout plates are "
+             "published for it - the plain cover is shown until they are");
     liveRelayoutVisible();   // plateApply chooses the shown group's plate again
 }
 
@@ -1222,10 +1225,13 @@ LONG g_ownedLoggedTableRows = -1;       // what the last line said, so the log s
 LONG g_ownedLoggedTableCopies = -1;
 LONG g_ownedLoggedTableOnly = -1;
 bool g_tableModeLogged = false;
-// The record buffer `journalRecords` copies into. GAME THREAD ONLY, allocated on the first walk
-// that finds the table owning anything - so a session that stores nothing allocates nothing.
-std::vector<char>* g_tableBuf = nullptr;
-const int kMaxTableRows = 4096;   // 3,288 records is the whole page file; 4,096 cannot be hit
+// The record buffer `journalCollectStored` copies into. GAME THREAD ONLY, allocated on the first
+// walk that finds the table owning anything, and SIZED FROM THE JOURNAL: the table's rows plus
+// 256, grown whenever a walk finds more (ut_caps.h `utTableWalk`), up to a ceiling that protects
+// memory only (65,536 rows x 260 B = 17 MB). A fixed 4,096-row buffer counts a 7,169-record
+// collection as 4,096 - and WHICH 4,096 follows the order of the journal's lines.
+UtTableBuf* g_tableBuf = nullptr;
+bool g_tableCeilingWarned = false;
 
 // ---- THE TRANSITION RULE, on the display side -----------------------------------------------
 // Stated once for the whole mod:
@@ -1290,31 +1296,58 @@ bool plateTableOwns() {
 // re-deposit, and a fingerprint that moved for that reason alone would ask for a relayout every
 // second for ever. False = the snapshot could not be taken at all, and then the caller keeps the
 // map-only answer - which can only UNDER-report a record, never invent one.
-bool plateTableFold(int* rows, int* copies, int* onlyTable, unsigned long long* mix) {
+//
+// `uncopied` is the rows the walk COUNTED but could not copy (the buffer at its memory ceiling, or
+// an allocation that failed): 0 for every collection a catalogue can hold. The caller adds them
+// to the label's number, so the count stays the truth; the owned filter and the search see the
+// copied rows only, and one WARN says so.
+bool plateTableFold(int* rows, int* copies, int* onlyTable, unsigned long long* mix,
+                    int* uncopied) {
     *rows = 0;
     *copies = 0;
     *onlyTable = 0;
     *mix = 0;
+    *uncopied = 0;
     if (!g_owned) return false;
     try {
-        // One allocation for both outputs of `journalCollectStored`: the records first, then the
-        // counts, which is why the row stride is 256 + 4 and not 256. kMaxTableRows * 256 is a
-        // multiple of 4, so the tail is aligned for the unsigned int array that starts there.
-        if (!g_tableBuf) {
-            g_tableBuf = new std::vector<char>((size_t)kMaxTableRows * (256 + sizeof(unsigned int)));
-        }
+        if (!g_tableBuf) g_tableBuf = new UtTableBuf();
     } catch (...) {
         return false;
     }
-    char (*recs)[256] = (char (*)[256]) & (*g_tableBuf)[0];
-    unsigned int* counts = (unsigned int*)&(*g_tableBuf)[(size_t)kMaxTableRows * 256];
-    // ONE call, ONE journal lock pair for the whole walk, and `counts[i]` is format 4's REAL
-    // count - copies that live ONLY in the mod's own file. Every
-    // MAP-OWNED row, including every legacy `"stored":true` row, is count 0 and
-    // `journalCollectStored` does not return it at all, so neither the heartbeat's `ownedTable=`
-    // nor the `owned: the private table holds ...` line can claim the table holds a collection it
-    // holds nothing of.
-    const int n = journalCollectStored(recs, counts, kMaxTableRows);
+    // ONE walk (one journal lock pair per try), and `counts[i]` is format 4's REAL count - copies
+    // that live ONLY in the mod's own file. Every MAP-OWNED row, including every legacy
+    // `"stored":true` row, is count 0 and `journalCollectStored` does not return it at all, so
+    // neither the heartbeat's `ownedTable=` nor the `owned: the private table holds ...` line can
+    // claim the table holds a collection it holds nothing of. The walk returns EVERY row and the
+    // buffer is sized from that count: the first walk of a session counts, allocates the table's
+    // rows + 256 and copies; a later one that finds more (deposits) grows it and walks again. A
+    // table that holds nothing allocates nothing.
+    const UtTableWalk w = utTableWalk(g_tableBuf, 0,
+                                      [](char (*o)[256], unsigned int* c, int cap) {
+                                          return journalCollectStored(o, c, cap);
+                                      });
+    if (w.grewTo) {
+        logD("owned: the private table's walk buffer holds %d rows now (was %d; %d table rows; "
+             "%zu bytes) - sized from the journal, it grows with it",
+             w.grewTo, w.grewFrom, w.rows, (size_t)w.grewTo * kUtTableStride);
+    }
+    if (w.truncated && !g_tableCeilingWarned) {
+        g_tableCeilingWarned = true;
+        logW("***** owned: the private table holds %d rows and the walk copied %d (%s) - the "
+             "label still counts all %d; the owned filter and the search see the first %d *****",
+             w.rows, w.copied,
+             w.allocFailed ? "the buffer could not be allocated"
+                           : "the 65,536-row memory ceiling",
+             w.rows, w.copied);
+    }
+    char (*recs)[256] = g_tableBuf->recs();
+    unsigned int* counts = g_tableBuf->counts();
+    const int n = w.copied;
+    if (w.truncated) {
+        *uncopied = w.rows - w.copied;
+        // The rows past the buffer still move the fingerprint: a deposit there must relayout.
+        utOwnedMixRow(mix, "#rows", (unsigned int)w.rows);
+    }
     for (int i = 0; i < n; ++i) {
         const unsigned int count = counts[i];
         // count >= 1 is the ONLY authorisation to call a record owned: a row at count
@@ -1377,6 +1410,8 @@ bool keyLooksLikeString(const unsigned char* base, size_t* sizeOut, const char**
 }
 
 // SEH-only: collect the node pointers, no C++ objects in this frame (MSVC forbids mixing).
+// Returns how many nodes the map HOLDS and writes the first min(that, cap); -1 = no map, or a walk
+// past kUtMapWalkCeiling nodes (a corrupt tree).
 int collectNodesSeh(const GdGameEngine* ge, const void** nodes, int cap) {
     int found = 0;
     __try {
@@ -1389,14 +1424,15 @@ int collectNodesSeh(const GdGameEngine* ge, const void** nodes, int cap) {
         int visited = 0;
         const ReagentNode* cur = head->parent;
         while ((cur && !cur->isnil) || sp > 0) {
-            if (++visited > 8192) return -1;
+            if (++visited > kUtMapWalkCeiling) return -1;
             while (cur && !cur->isnil) {
                 if (sp >= 64) return -1;
                 stack[sp++] = cur;
                 cur = cur->left;
             }
             const ReagentNode* n = stack[--sp];
-            if (found < cap) nodes[found++] = n;
+            if (found < cap) nodes[found] = n;
+            ++found;   // EVERY node is counted: the caller grows to the count (utCollectAll)
             cur = n->right;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -2012,18 +2048,40 @@ void logPassReason(int reason) {
 // What a click on the pad's logical button `btn` selects, for BOTH pads (the window's mouse slot
 // and the screen input): MAT -> -1, the game's own materials page (the group lookup knows no group
 // for logical 0, so without this rule MAT on the screen pad is "a button that maps to no group");
-// OWN -> kUtButtonFilterTarget; a button of groups and NEXT -> panelButtonTarget's group; < -1 =
-// none.
+// OWN -> kUtButtonFilterTarget; EDIT -> kUtButtonEditTarget (the layout editor); a button of
+// groups and NEXT -> panelButtonTarget's group; any other value < -1 = none.
 int padClickTarget(int btn, const char** label) {
     LiveLayout lay;
     const int kind = liveLayoutGet(&lay)
-                         ? utPadButtonKind(btn, lay.pages.groups, lay.pages.pages > 1 ? 1 : 0)
+                         ? utPadButtonKind(btn, lay.pages.groups, lay.pages.pages > 1 ? 1 : 0,
+                                           lay.pages.edit)
                          : (btn == 0 ? (int)kUtPadKindMat : (int)kUtPadKindGroup);
     if (kind == kUtPadKindMat) {
         if (label) *label = "the game's own materials page";
         return -1;
     }
+    if (kind == kUtPadKindEdit) {
+        if (label) *label = "the layout editor";
+        return kUtButtonEditTarget;
+    }
     return panelButtonTarget(btn, label);
+}
+
+// The EDIT button's click, for both routes: the latch (panelEditButton) and one INFO line. The
+// click is always the pad's (consumed): the editor opens on the pad's next frame.
+void padEditClick(int btn, const char* route) {
+    const int g = panelEditButton();
+    if (g >= 0)
+        logI("button [%s] clicked%s -> the layout editor, after the last collection group %d \"%s\" "
+             "(the materials page has no layout to edit)",
+             panelButtonTag(btn), route, g, liveGroupLabel(g));
+    else if (g == -1)
+        logI("button [%s] clicked%s -> the layout editor", panelButtonTag(btn), route);
+    else
+        logI("button [%s] clicked%s -> the layout editor: the live pager refused the last collection "
+             "group, so nothing opens (on a collection page, EDIT or the [keys] editor_open chord "
+             "opens it)",
+             panelButtonTag(btn), route);
 }
 
 void mouseDecide(void* window, const void* evt, const float* offset, MouseAct* a) {
@@ -2141,9 +2199,9 @@ void mouseDecide(void* window, const void* evt, const float* offset, MouseAct* a
     const bool keepIt = c.act == kUtPadClickKeep;
     const char* label = nullptr;
     const int target = keepIt ? -2 : padClickTarget(btn, &label);
-    // kUtButtonFilterTarget is the OWN button - a legal target that selects no
-    // group.  Everything below (-2 and lower) is still an index the table does not know.
-    if (!keepIt && target < -1 && target != kUtButtonFilterTarget) {
+    // kUtButtonFilterTarget is the OWN button and kUtButtonEditTarget the EDIT button - legal
+    // targets that select no group. Every other value below -1 is an index the table does not know.
+    if (!keepIt && target < -1 && target != kUtButtonFilterTarget && target != kUtButtonEditTarget) {
         if (utPadRefusedAct(a->matPad ? 1 : 0) == kUtPadClickPass) {
             a->reason = PR_NO_BUTTON;
             return;
@@ -2177,18 +2235,23 @@ void mouseDecideGuarded(void* window, const void* evt, const float* offset, Mous
 }
 
 // ---- the layout editor's input (ut_panel) ----------------------------------------------------
-// RIGHT DOWN with Ctrl on the pad opens the editor; while it is open LEFT DOWN on its toolbar, a
+// The editor chord ([keys] editor_open, Ctrl+RightClick by default: its click with all of its
+// modifiers held) on the pad opens the editor; while it is open LEFT DOWN on its toolbar, a
 // handle or a rectangle is consumed and LEFT UP ends a drag (passed on). Between the two the drag
 // follows the cursor polled from the Draw tail, so it survives the cursor leaving the caravan.
-// Every other event, and every event while the editor is closed and Ctrl is up, is untouched.
+// Every other event, and every event while the editor is closed but the chord, is untouched.
 bool editMouse(void* window, const void* evt, const float* offset) {
     if (window != g_window || !evt || !offset) return false;
     if (!g_cfg.groupButtons || panelButtonsAreOff()) return false;
     int type = 0;
     float ex = 0.0f, ey = 0.0f;
     if (!readMouseEvent(evt, &type, &ex, &ey)) return false;
-    if (type == kUtMouseRightDown) {
-        if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return false;
+    const UtKeyBind editorOpen = g_cfg.keys.editorOpen;
+    if (editorOpen.kind == kUtKeyClick && type == editorOpen.code) {
+        const int mods = utKeyModsOf((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
+                                     (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+                                     (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+        if (!utKeyClickMatches(editorOpen, type, mods)) return false;
     } else if (type != kUtMouseLeftDown && type != kUtMouseLeftUp) {
         return false;
     } else if (!panelLayoutEditOpen()) {
@@ -2266,6 +2329,13 @@ bool __cdecl hk_WndMouse(void* window, const void* evt, const float* offset, voi
         if (!(InterlockedOr(&g_matKeepLogged, 1) & 1))
             logD("buttons: a click on the materials page's pad, on no button, was kept from the "
                  "box under it");
+        return false;
+    }
+    if (a.consume && a.target == kUtButtonEditTarget) {
+        // The EDIT button: always the pad's click; the editor opens on the pad's next frame.
+        panelButtonsNotePress(a.button);
+        padEditClick(a.button, "");
+        logD("the click was consumed; the engine's own handler was not called");
         return false;
     }
     const bool isFilter = a.target == kUtButtonFilterTarget;
@@ -2494,6 +2564,11 @@ void scrProbe(float ex, float ey) {
 void scrButton(int btn) {
     const char* label = nullptr;
     const int target = padClickTarget(btn, &label);
+    if (target == kUtButtonEditTarget) {
+        panelButtonsNotePress(btn);
+        padEditClick(btn, " on the screen pad");
+        return;
+    }
     const bool isFilter = target == kUtButtonFilterTarget;
     if (target < -1 && !isFilter) {
         scrLogOnce(1, "a click on a screen pad button that maps to no group was consumed with no "
@@ -2574,7 +2649,15 @@ void scrBody(unsigned char* out, int idx) {
         cursorItem = !(g_window && readCursorItem(g_window, &id)) || id != 0;
     }
     g.cursorItem = cursorItem ? 1 : 0;
-    g.ctrl = e.type == kUtEvtRightDown && (GetAsyncKeyState(VK_CONTROL) & 0x8000) ? 1 : 0;
+    // The editor chord: [keys] editor_open's click type and modifiers (0 = bound to a key, or
+    // none), and the modifiers held - read only for a DOWN of that type.
+    const UtKeyBind editorOpen = g_cfg.keys.editorOpen;
+    g.editorType = editorOpen.kind == kUtKeyClick ? editorOpen.code : 0;
+    g.editorMods = editorOpen.mods;
+    if (g.editorType != 0 && e.type == g.editorType)
+        g.mods = utKeyModsOf((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
+                             (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+                             (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
     g.editorDrag = editorDrag ? 1 : 0;
     // The open editor's window rect - a point inside it is the window's own (untouched;
     // a LEFT DOWN there only noted to the editor), whatever the grounds say.
@@ -4196,14 +4279,12 @@ int plateOwnedRefresh(bool force) {
                    : -1;
     }
     g_ownedAt = now;
-    static const int kMaxNodes = 4096;
+    // EVERY node of the engine's map: the vector is sized from the count the walk returns
+    // (ut_caps.h `utCollectAll`) - a legacy map of an older build can be past any fixed number.
     std::vector<const void*> nodes;
-    try {
-        nodes.resize(kMaxNodes);
-    } catch (...) {
-        return -1;
-    }
-    const int n = collectNodes(ge, &nodes[0], kMaxNodes);
+    const int n = utCollectAll(&nodes, [ge](const void** out, int cap) {
+        return collectNodes(ge, out, cap);
+    });
     if (n < 0) {
         InterlockedExchange(&g_ownedOk, 0);
         return -1;
@@ -4270,17 +4351,21 @@ int plateOwnedRefresh(bool force) {
     // false (a read-only journal, or none) nothing below runs and the snapshot is the map's alone.
     // The rows are folded into the SAME fingerprint, so a deposit into the table or a take
     // out of it moves `g_ownedGen` and asks for the relayout a map change asks for today.
-    int tRows = 0, tCopies = 0, tOnly = 0;
+    int tRows = 0, tCopies = 0, tOnly = 0, tUncopied = 0;
     unsigned long long tMix = 0;
-    if (plateTableOwns() && plateTableFold(&tRows, &tCopies, &tOnly, &tMix)) {
+    if (plateTableOwns() && plateTableFold(&tRows, &tCopies, &tOnly, &tMix, &tUncopied)) {
         for (int b = 0; b < 8; ++b) {
             fpr = (fpr ^ (unsigned long long)((tMix >> (b * 8)) & 0xFFu)) * 1099511628211ULL;
         }
     }
+    // Rows the fold counted and could not copy (only past the walk's memory ceiling) are table
+    // rows the map does not hold as far as anything here can tell: the label counts them.
+    tRows += tUncopied;
+    tOnly += tUncopied;
     InterlockedExchange(&g_ownedTableRows, (LONG)tRows);
     InterlockedExchange(&g_ownedTableCopies, (LONG)tCopies);
     InterlockedExchange(&g_ownedTableOnly, (LONG)tOnly);
-    const LONG total = (LONG)g_owned->size();
+    const LONG total = (LONG)g_owned->size() + (LONG)tUncopied;
     InterlockedExchange(&g_ownedTotal, total);
     InterlockedExchange(&g_ownedNodes, (LONG)nodeCount);
     InterlockedExchange(&g_ownedEmpty, (LONG)emptied);

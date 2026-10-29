@@ -1,5 +1,5 @@
 # package.ps1 - builds the release zip from a built tree.
-#   powershell -ExecutionPolicy Bypass -File tools\package.ps1 [-Version 1.2.0] [-Out out\]
+#   powershell -ExecutionPolicy Bypass -File tools\package.ps1 [-Version 1.2.1] [-Out out\]
 # Stages exactly what a player installs and zips it: x64\uniquetab.asi and the four documents
 # (README.md, CHANGELOG.md, LICENSE, THIRD_PARTY.md).
 # Nothing generated or derived from the game ships. The plugin creates x64\uniquetab\ itself and

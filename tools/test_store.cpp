@@ -30,7 +30,16 @@
 //                                              SURVIVES journalPruneNotStored
 //   10 format 4 round trip                  -> the counts survive a write and a re-read
 //   11 a format-3 file                      -> every row at count 0, nothing invented
-//   12 THE REHEARSAL                        -> a COPY of a real collection journal
+//   12 THE REHEARSAL                        -> a COPY of a real collection journal; FIXED over
+//                                              data\oracle\journals\all-items-mi.jsonl (every
+//                                              record of the base game, count 1: 7,111 rows,
+//                                              all counted, every one walked)
+//   20 EVERY BOUND FROM THE DATA (ut_caps.h) -> a 20,000-row synthetic journal, in order and
+//                                              shuffled: the walk buffer grows, the count is
+//                                              exact, the order of the lines does not matter;
+//                                              the prototype cap and the map walk derived; the
+//                                              record index checked against a scan, the read
+//                                              and 20,000 lookups timed
 //   14 THE PAINT GATE (ut_paintgate.h)      -> a count-1 row paints from a writable journal and
 //                                              NOT from a read-only one
 //   15 THE DEPOSIT GATE (ut_depositgate.h)  -> a deposit of one of our records goes into
@@ -49,14 +58,19 @@
 //
 // Build + run:  tools\build_test_store.bat   (everything happens under build\test)
 #include <ctype.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <windows.h>
 
+#include <algorithm>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "../src/ut_caps.h"
 #include "../src/ut_depositgate.h"
+#include "../src/ut_ownedfold.h"
 #include "../src/ut_pagegate.h"
 #include "../src/ut_paintgate.h"
 #include "../src/ut_rescue.h"
@@ -71,6 +85,20 @@ static int g_fail = 0;
 static void check(bool ok, const char* what) {
     printf("  %-72s %s\n", what, ok ? "OK" : "**FAIL**");
     if (!ok) ++g_fail;
+}
+
+// Milliseconds since `t0`, from the performance counter: GetTickCount's 16 ms steps cannot time
+// a hashed lookup pass at all.
+static LARGE_INTEGER qpcNow() {
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return t;
+}
+static double msSince(const LARGE_INTEGER& t0) {
+    LARGE_INTEGER f, t;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&t);
+    return (double)(t.QuadPart - t0.QuadPart) * 1000.0 / (double)f.QuadPart;
 }
 
 static bool slurp(const char* path, std::string* out) {
@@ -486,20 +514,59 @@ static int passLegacyFile(const char* what) {
 // their real file, read by the real reader, upgraded by the real writer, checked line for line.
 // The harness copies it in; the original is only ever READ. With no fixture the pass SKIPS
 // LOUDLY (exit 2), because a silent skip is how a harness comes to prove nothing.
-static int passLive() {
+// The collector the mod's own fold hands `utTableWalk` (ut_plate.cpp plateTableFold).
+static int collectStoredFn(char (*o)[256], unsigned int* c, int cap) {
+    return ut::journalCollectStored(o, c, cap);
+}
+
+// The header's own numbers ("entries":N ...), for the FIXED pass's exact expectations.
+static long long headerNumber(const std::string& text, const char* key) {
+    const std::string head = text.substr(0, text.find('\n'));
+    const std::string want = std::string("\"") + key + "\":";
+    const size_t at = head.find(want);
+    if (at == std::string::npos) return -1;
+    return _atoi64(head.c_str() + at + want.size());
+}
+
+// `fixed` = the suite's own fixture (data\oracle\journals\all-items-mi.jsonl): an empty file is
+// then a FAILURE, and every count must be exactly what the file's header says.
+static int passLive(bool fixed) {
+    std::string before;
+    if (fixed) {
+        char path[MAX_PATH] = {0};
+        const DWORD len = GetEnvironmentVariableA("UNIQUETAB_OUT", path, MAX_PATH);
+        if (len && len < MAX_PATH) strcat_s(path, MAX_PATH, "\\uniq-items.jsonl");
+        if (!slurp(path, &before)) {
+            printf("  [FAIL] the fixture copy %s cannot be read\n", path);
+            return 1;
+        }
+    }
     if (!ut::journalInit(nullptr)) {
         printf("  [FAIL] journalInit\n");
         return 1;
     }
     const size_t n = ut::journalCount();
     if (!n) {
+        if (fixed) {
+            printf("  [FAIL] the fixture journal read as EMPTY\n");
+            return 1;
+        }
         printf("  ***** SKIPPED - there is no live journal to rehearse against *****\n");
         return 2;
     }
-    printf("\n12. THE REHEARSAL: a real journal, %zu entries\n", n);
+    printf("\n12. THE REHEARSAL%s: a real journal, %zu entries\n", fixed ? " (FIXED)" : "", n);
     check(!ut::journalReadOnly(), "the live journal is NOT read-only to this build");
-    static char recs[3600][256];
-    const int got = ut::journalRecords(recs, 3600);
+    {
+        char why[256];
+        check(ut::journalIndexCheck(why, sizeof(why)),
+              "the journal's record index answers what a scan of its rows answers");
+        if (why[0]) printf("      %s\n", why);
+    }
+    // Sized from the journal, like every consumer in the mod: a fixed array of 3,600 rows cannot
+    // rehearse a full collection at all.
+    std::vector<char> recBytes((n + 64) * 256);
+    char (*recs)[256] = (char(*)[256]) & recBytes[0];
+    const int got = ut::journalRecords(recs, (int)(n + 64));
     check((size_t)got == n, "every record path came back");
     // THESE THREE CHECKS ASSERT INVARIANTS, NOT FACTS. A live journal legitimately carries rows
     // at count >= 1 and a non-zero `tableCopies` as soon as the private table has taken anything,
@@ -517,9 +584,49 @@ static int passLive() {
     ut::journalCounts(&entries, &stored, &notStored, &unknown);
     printf("  %zu entries: %zu stored, %zu not stored, %zu not yet reconciled\n", entries, stored,
            notStored, unknown);
+    // THE WALK THE LABEL IS BUILT FROM (ut_plate.cpp plateTableFold): sized from the journal's
+    // row count, and it must return EVERY table row - whatever their order in the file.
+    {
+        ut::UtTableBuf buf;
+        const ut::UtTableWalk w = ut::utTableWalk(&buf, (long long)n, collectStoredFn);
+        printf("  the owned walk: %d table rows counted, %d copied, buffer %d rows (%zu bytes)\n",
+               w.rows, w.copied, buf.cap, (size_t)buf.cap * ut::kUtTableStride);
+        check(w.rows == tableRows && w.copied == w.rows && !w.truncated,
+              "the owned walk counts AND copies every table row of the journal");
+        std::set<std::string> seen;
+        unsigned int walkSum = 0;
+        bool allCounted = true;
+        for (int i = 0; i < w.copied; ++i) {
+            seen.insert(buf.recs()[i]);
+            walkSum += buf.counts()[i];
+            if (!buf.counts()[i]) allCounted = false;
+        }
+        check((int)seen.size() == w.copied && allCounted && walkSum == collected,
+              "each walked row is a distinct record at count >= 1, and the counts add up to the "
+              "table's total");
+    }
+    if (fixed) {
+        const long long hEntries = headerNumber(before, "entries");
+        const long long hStored = headerNumber(before, "stored");
+        const long long hNot = headerNumber(before, "notStored");
+        const long long hUnknown = headerNumber(before, "unknown");
+        const long long hCopies = headerNumber(before, "tableCopies");
+        printf("  the fixture's header: %lld entries, %lld stored, %lld not stored, %lld not yet "
+               "reconciled, %lld table copies\n",
+               hEntries, hStored, hNot, hUnknown, hCopies);
+        check(hEntries > 4096, "the fixture is past the old fixed 4,096 rows");
+        check((long long)entries == hEntries && (long long)stored == hStored &&
+                  (long long)notStored == hNot && (long long)unknown == hUnknown,
+              "entries / stored / not stored / not reconciled are EXACTLY what the file says");
+        check((long long)tableRows == hStored && (long long)collected == hCopies,
+              "and every stored row is a table row: the label counts every one of them");
+    }
     unsigned int countSum = 0;
     int counted = 0;
     bool rowsReadable = true;
+    // Timed: one lookup per row is the shape of the caravan-open reconcile (journalReconcile
+    // asks storeCount and journalMarkStored for every row).
+    const LARGE_INTEGER lookupT0 = qpcNow();
     for (int i = 0; i < got; ++i) {
         unsigned int count = 99;
         int mark = -9;
@@ -534,6 +641,7 @@ static int passLive() {
             countSum += count;
         }
     }
+    printf("  %d per-row lookups took %.1f ms\n", got, msSince(lookupT0));
     check(rowsReadable, "EVERY row of the live journal reads back");
     check(counted == tableRows && countSum == collected,
           "and the per-row counts add up to exactly what the table says it holds - nothing "
@@ -1345,7 +1453,304 @@ static int passMi() {
     return g_fail ? 1 : 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// 20. EVERY BOUND FROM THE DATA - `src\ut_caps.h`
+// ---------------------------------------------------------------------------------------------
+// A collection of 7,169 records was counted as 4,096 and WHICH 4,096 followed the order of the
+// journal's lines: the fold's buffer was a fixed 4,096 rows. This pass writes a Grimarillion-sized
+// journal of 20,000 rows - synthetic record names under records/items/capstest/, which no
+// catalogue has, so the store holds them as rows like any other (the journal accepts any record
+// path; a row's identity is `"len":0`, the honest shape for a row with no prototype) - in file
+// order, or shuffled (`--shuffled`, its own folder, the same rows), and proves the walk the label
+// is built from: it grows from the data, counts exactly, and returns the same rows whatever the
+// order. The two runs check the same order-independent digest against the generator's own.
+static const int kCapsRows = 20000;
+
+static void capsRecord(int i, char* out, size_t cap) {
+    _snprintf_s(out, cap, _TRUNCATE, "records/items/capstest/caps_%05d.dbr", i);
+}
+static unsigned int capsCount(int i) { return 1u + (unsigned int)(i % 3); }
+
+static int fakeMapNodes = 0;   // the map `utCollectAll` walks below: this many nodes
+static int fakeMapCalls = 0;
+static int fakeMapWalk(int* out, int cap) {
+    ++fakeMapCalls;
+    if (fakeMapNodes < 0) return -1;
+    for (int i = 0; i < fakeMapNodes && i < cap; ++i) out[i] = i;
+    return fakeMapNodes;
+}
+
+static int emptyTableWalk(char (*o)[256], unsigned int* c, int cap) {
+    (void)o;
+    (void)c;
+    (void)cap;
+    return 0;
+}
+
+static int passCaps(bool shuffled) {
+    printf("\n20. EVERY BOUND FROM THE DATA: a %d-row synthetic journal, %s\n", kCapsRows,
+           shuffled ? "SHUFFLED" : "in record order");
+    // ---- the arithmetic ------------------------------------------------------------------------
+    check(ut::utRowsFor(7111, ut::kUtTableHeadroom, ut::kUtTableRowsCeiling) == 7367,
+          "the walk buffer for 7,111 rows is 7,111 + 256");
+    check(ut::utRowsFor(1000000, ut::kUtTableHeadroom, ut::kUtTableRowsCeiling) == 65536,
+          "and it stops at the 65,536-row memory ceiling (17 MB)");
+    check(ut::utProtoCapFor(0, 7184) == 320, "the prototype cap's floor is 320");
+    check(ut::utProtoCapFor(7111, 7184) == 14286, "7,111 stored rows ask for 7,111 x 2 + 64");
+    check(ut::utProtoCapCeiling(7184) == 14432 && ut::utProtoCapFor(20000, 7184) == 14432,
+          "the base game's 7,184 records ceiling it at 14,432 (the old fixed 4,096 is gone)");
+    check(ut::utProtoCapCeiling(19089) == 38242 && ut::utProtoCapFor(20000, 19089) == 38242,
+          "Grimarillion's 19,089 records ceiling it at 38,242");
+    check(ut::utProtoCapFor(20000, 0) == 40064,
+          "an unknown catalogue leaves the journal's own number, under the memory ceiling");
+    check(ut::utProtoCapFor(100000, 100000) == 65536, "which is 65,536");
+    {
+        // The fold's first walk of a session has no hint: it counts, then sizes. A table that
+        // holds nothing is one count-only walk and allocates nothing.
+        ut::UtTableBuf empty;
+        const ut::UtTableWalk w0 = ut::utTableWalk(&empty, 0, emptyTableWalk);
+        check(w0.rows == 0 && !w0.truncated && empty.cap == 0 && empty.bytes.empty(),
+              "an empty table allocates no walk buffer at all");
+    }
+    // ---- the map walk: every node, however many --------------------------------------------------
+    {
+        std::vector<int> nodes;
+        fakeMapNodes = 10000;
+        fakeMapCalls = 0;
+        const int n = ut::utCollectAll(&nodes, fakeMapWalk);
+        bool all = n == 10000 && (int)nodes.size() >= n;
+        for (int i = 0; all && i < n; ++i) all = nodes[i] == i;
+        check(all && fakeMapCalls == 2,
+              "a 10,000-node map is walked whole: the node vector grows from the count (2 walks)");
+        fakeMapNodes = 100;
+        fakeMapCalls = 0;
+        check(ut::utCollectAll(&nodes, fakeMapWalk) == 100 && fakeMapCalls == 1,
+              "a small map is one walk");
+        fakeMapNodes = -1;
+        check(ut::utCollectAll(&nodes, fakeMapWalk) < 0, "and a failed walk stays a failure");
+    }
+    // ---- the journal ----------------------------------------------------------------------------
+    std::vector<int> order((size_t)kCapsRows);
+    for (int i = 0; i < kCapsRows; ++i) order[(size_t)i] = i;
+    if (shuffled) {
+        unsigned long long x = 0x9E3779B97F4A7C15ULL;   // a fixed LCG: the same shuffle every run
+        for (int i = kCapsRows - 1; i > 0; --i) {
+            x = x * 6364136223846793005ULL + 1442695040888963407ULL;
+            const int j = (int)((x >> 33) % (unsigned long long)(i + 1));
+            std::swap(order[(size_t)i], order[(size_t)j]);
+        }
+    }
+    unsigned long long wantDigest = 0;
+    unsigned int wantCopies = 0;
+    std::string text;
+    for (int i = 0; i < kCapsRows; ++i) {
+        char rec[96];
+        capsRecord(i, rec, sizeof(rec));
+        wantDigest += ut::utOwnedRowHash(rec, capsCount(i));
+        wantCopies += capsCount(i);
+    }
+    {
+        char head[256];
+        _snprintf_s(head, sizeof(head), _TRUNCATE,
+                    "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":%d,\"stored\":%d,"
+                    "\"notStored\":0,\"unknown\":0,\"tableCopies\":%u,\"saveVariant\":0}\n",
+                    kCapsRows, kCapsRows, wantCopies);
+        text = head;
+    }
+    for (int k = 0; k < kCapsRows; ++k) {
+        const int i = order[(size_t)k];
+        char rec[96], line[256];
+        capsRecord(i, rec, sizeof(rec));
+        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                    "{\"record\":\"%s\",\"stored\":true,\"count\":%u,\"len\":0}\n", rec, capsCount(i));
+        text += line;
+    }
+    char path[MAX_PATH] = {0};
+    const DWORD len = GetEnvironmentVariableA("UNIQUETAB_OUT", path, MAX_PATH);
+    if (!len || len >= MAX_PATH) {
+        printf("  [FAIL] UNIQUETAB_OUT is not set\n");
+        return 1;
+    }
+    strcat_s(path, MAX_PATH, "\\uniq-items.jsonl");
+    check(spit(path, text), "the synthetic journal is written");
+    const LARGE_INTEGER t0 = qpcNow();
+    check(ut::journalInit(nullptr), "and read by the real reader");
+    printf("  read %zu rows in %.1f ms\n", ut::journalCount(), msSince(t0));
+    check(ut::journalCount() == (size_t)kCapsRows && !ut::journalReadOnly(),
+          "all 20,000 rows are in, writable");
+    {
+        char why[256];
+        check(ut::journalIndexCheck(why, sizeof(why)),
+              "the record index the reader built answers what a scan of the 20,000 rows answers");
+        if (why[0]) printf("      %s\n", why);
+    }
+    check(ut::journalCollectStored(nullptr, nullptr, 0) == kCapsRows,
+          "journalCollectStored counts every row");
+    {
+        // THE LOOKUPS, timed: every row once, in the generator's order (not the file's) - the
+        // shape of the caravan-open reconcile's `storeCount` - and then the reconcile's own two
+        // per row (the count, then the mark). Each must find its row with the generator's count.
+        char rec[96];
+        int found = 0, right = 0;
+        const LARGE_INTEGER l0 = qpcNow();
+        for (int i = 0; i < kCapsRows; ++i) {
+            capsRecord(i, rec, sizeof(rec));
+            unsigned int count = 0;
+            int mark = -9;
+            if (ut::journalTableRow(rec, &count, &mark, nullptr)) {
+                ++found;
+                if (count == capsCount(i) && mark == ut::UT_STORED_YES) ++right;
+            }
+        }
+        printf("  %d lookups took %.1f ms\n", kCapsRows, msSince(l0));
+        check(found == kCapsRows && right == kCapsRows,
+              "every one of the 20,000 rows is found by its record, with its own count");
+        int marked = 0;
+        const LARGE_INTEGER r0 = qpcNow();
+        for (int i = 0; i < kCapsRows; ++i) {
+            capsRecord(i, rec, sizeof(rec));
+            unsigned int count = 0;
+            if (ut::journalTableRow(rec, &count, nullptr, nullptr) && count >= 1 &&
+                ut::journalMarkStored(rec, true))
+                ++marked;
+        }
+        printf("  the reconcile's shape (a count and a mark per row, %d lookups) took %.1f ms\n",
+               2 * kCapsRows, msSince(r0));
+        check(marked == kCapsRows, "and every row is marked stored by its record");
+        capsRecord(kCapsRows, rec, sizeof(rec));
+        check(!ut::journalHas(rec) && !ut::journalTableRow(rec, nullptr, nullptr, nullptr),
+              "a record the journal does not hold is not found");
+    }
+    {
+        static char tiny[101][256];
+        static unsigned int tinyCounts[101];
+        memset(tiny[100], 'S', sizeof(tiny[100]));
+        tinyCounts[100] = 0xDEADBEEFu;
+        const int n = ut::journalCollectStored(tiny, tinyCounts, 100);
+        check(n == kCapsRows && tiny[100][0] == 'S' && tinyCounts[100] == 0xDEADBEEFu,
+              "and a 100-row buffer still gets the WHOLE count back, with nothing written past it");
+    }
+    // The walk the label is built from, with no hint: it must find out from the data.
+    ut::UtTableBuf buf;
+    const ut::UtTableWalk w = ut::utTableWalk(&buf, 0, collectStoredFn);
+    printf("  the owned walk: %d rows counted, %d copied, buffer %d -> %d rows (%zu bytes)\n",
+           w.rows, w.copied, w.grewFrom, w.grewTo, (size_t)buf.cap * ut::kUtTableStride);
+    check(w.grewTo >= kCapsRows && !w.truncated && w.rows == kCapsRows && w.copied == kCapsRows,
+          "the walk buffer GREW to the journal and copied every one of the 20,000 rows");
+    {
+        std::set<std::string> seen;
+        unsigned long long digest = 0;
+        unsigned int copies = 0;
+        bool known = true;
+        for (int i = 0; i < w.copied; ++i) {
+            seen.insert(buf.recs()[i]);
+            digest += ut::utOwnedRowHash(buf.recs()[i], buf.counts()[i]);
+            copies += buf.counts()[i];
+            if (strncmp(buf.recs()[i], "records/items/capstest/caps_", 28) != 0) known = false;
+        }
+        check((int)seen.size() == kCapsRows && known, "20,000 distinct records, all of them ours");
+        check(copies == wantCopies && copies == ut::journalCollectedTotal(),
+              "the copies add up EXACTLY (the label's collected total)");
+        check(digest == wantDigest,
+              "and the rows are the generator's own, record for record and count for count - "
+              "the same digest in file order and shuffled: the order of the lines does not matter");
+    }
+    {
+        const ut::UtTableWalk again = ut::utTableWalk(&buf, (long long)ut::journalCount(),
+                                                      collectStoredFn);
+        check(!again.grewTo && again.copied == kCapsRows, "a second walk needs no growth");
+    }
+    {
+        // What a fixed buffer did: the first 4,096 rows IN FILE ORDER, and nothing else.
+        ut::UtTableBuf old;
+        const ut::UtTableWalk cut = ut::utTableWalk(&old, kCapsRows, collectStoredFn, 4096);
+        bool fileOrder = cut.copied == 4096;
+        for (int k = 0; fileOrder && k < cut.copied; ++k) {
+            char rec[96];
+            capsRecord(order[(size_t)k], rec, sizeof(rec));
+            fileOrder = strcmp(rec, old.recs()[k]) == 0;
+        }
+        check(cut.truncated && cut.rows == kCapsRows && fileOrder,
+              "at a ceiling the count is still all 20,000 (the label adds the rest) and the copy "
+              "is the file's first rows - the order dependence a fixed cap had");
+    }
+    {
+        // A deposit adds rows during a session: the next walk grows from the journal's count.
+        const int before = buf.cap;
+        int added = 0;
+        for (int i = 0; i < 300; ++i) {
+            char rec[96];
+            _snprintf_s(rec, sizeof(rec), _TRUNCATE, "records/items/capstest/more_%03d.dbr", i);
+            ut::UtReplicaCapture cap;
+            fill(&cap, rec, 1);
+            if (ut::journalUpsertCount(cap, 1)) ++added;
+        }
+        const ut::UtTableWalk grown = ut::utTableWalk(&buf, (long long)ut::journalCount(),
+                                                      collectStoredFn);
+        printf("  after %d deposits: %d rows, buffer %d -> %d rows\n", added, grown.rows, before,
+               buf.cap);
+        check(added == 300 && grown.rows == kCapsRows + 300 && grown.copied == grown.rows &&
+                  buf.cap > before,
+              "300 deposits later the buffer has grown with the journal and every row is walked");
+        char why[256];
+        check(ut::journalIndexCheck(why, sizeof(why)),
+              "and the record index grew with them: it still answers what a scan answers");
+        if (why[0]) printf("      %s\n", why);
+    }
+    {
+        // The 300 appends grew the index (rebuilds at half full): an old row is still found.
+        char rec[96];
+        capsRecord(kCapsRows / 2, rec, sizeof(rec));
+        check(ut::journalTableRow(rec, nullptr, nullptr, nullptr) && ut::journalHas(rec),
+              "a row in the middle is found after the deposits");
+        // A remove moves every later row up one, so the index is rebuilt: its cost, timed (the
+        // legacy take path's journalDrop pays it once per take).
+        capsRecord(7, rec, sizeof(rec));
+        const size_t rowsBefore = ut::journalCount();
+        const LARGE_INTEGER d0 = qpcNow();
+        const bool gone = ut::journalRemove(rec);
+        printf("  one remove at %zu rows (the index rebuilt) took %.2f ms\n", rowsBefore,
+               msSince(d0));
+        char after[96];
+        capsRecord(8, after, sizeof(after));
+        unsigned int c8 = 0;
+        check(gone && ut::journalCount() == rowsBefore - 1 && !ut::journalHas(rec) &&
+                  ut::journalTableRow(after, &c8, nullptr, nullptr) && c8 == capsCount(8),
+              "a remove takes exactly its row, and the next row is still found with its count");
+        char why[256];
+        check(ut::journalIndexCheck(why, sizeof(why)),
+              "and the index still answers what a scan answers");
+        if (why[0]) printf("      %s\n", why);
+    }
+    ut::logFlush();
+    printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail, g_fail == 1 ? "" : "s");
+    return g_fail ? 1 : 0;
+}
+
+static int runMode(int argc, char** argv);
+
+// THE JOURNAL'S RECORD INDEX: every mode but --caps runs with the audit on (each mutation checks
+// the index against a scan before it lets go of the lock); --caps checks it explicitly at 20,000
+// rows. A failure fails the process.
 int main(int argc, char** argv) {
+    const bool audit = !(argc > 1 && !strcmp(argv[1], "--caps"));
+    if (audit) ut::journalTestIndexAudit(1);
+    const int rc = runMode(argc, argv);
+    long runs = 0;
+    char why[256] = {0}, now[256] = {0};
+    const long fails = ut::journalTestIndexAuditReport(&runs, why, sizeof(why));
+    const bool atEnd = ut::journalIndexCheck(now, sizeof(now));
+    printf("  the record index: %ld check%s after the journal's mutations, %ld failed; at the end "
+           "%s\n",
+           runs, runs == 1 ? "" : "s", fails, atEnd ? "equal to a scan" : "NOT equal to a scan");
+    if (fails || !atEnd) {
+        printf("  [FAIL] the record index disagrees with a scan: %s\n", fails ? why : now);
+        return 1;
+    }
+    return rc;
+}
+
+static int runMode(int argc, char** argv) {
     // An ABSOLUTE path, the way tools\test_journal.cpp does it. A relative `L"test_store.log"`
     // would resolve against the PROCESS's current directory, which is whatever shell called the
     // .bat - so running `tools\build_test_store.bat` by full path from the repo root would drop
@@ -1361,7 +1766,8 @@ int main(int argc, char** argv) {
     if (!strcmp(mode, "--deposit")) return passDepositGate();
     if (!strcmp(mode, "--reread")) return passReread();
     if (!strcmp(mode, "--legacy")) return passLegacyFile(argc > 2 ? argv[2] : "uniq-items.jsonl");
-    if (!strcmp(mode, "--live")) return passLive();
+    if (!strcmp(mode, "--live")) return passLive(argc > 2 && !strcmp(argv[2], "--fixed"));
+    if (!strcmp(mode, "--caps")) return passCaps(argc > 2 && !strcmp(argv[2], "--shuffled"));
     if (!strcmp(mode, "--modes")) return passModes();
     if (!strcmp(mode, "--views")) return passViews();
     if (!strcmp(mode, "--dbviews")) return passDbViews();
