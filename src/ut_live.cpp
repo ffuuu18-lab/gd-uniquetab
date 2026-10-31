@@ -135,6 +135,7 @@ int g_x0 = 105, g_y0 = 76, g_rowGap = 2;
 // The P line. The defaults are the vanilla derivation, so a group file written before the
 // line existed behaves exactly as it did.
 int g_usableW = 333, g_usableH = 552, g_plateW = 438, g_plateH = 627;
+int g_bmpX = 0, g_bmpY = 1;   // the cover's position in the page, from the P line
 bool g_geoDerived = false;
 // Where the grid is in force: the P line's origin, or the user's grid_ rectangle's top-left.
 int g_gridX = 105, g_gridY = 76;
@@ -1133,9 +1134,9 @@ bool loadGroups(const char* path) {
             if (f[4]) g_y0 = atoi(f[4]);
             if (f[5]) g_rowGap = atoi(f[5]);
         } else if (!strcmp(line, "P")) {
-            char* f[7] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
+            char* f[9] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
             char* p = rest;
-            for (int i = 0; i < 7; ++i) {
+            for (int i = 0; i < 9; ++i) {
                 f[i] = p;
                 char* t = strchr(p, '\t');
                 if (!t) break;
@@ -1156,6 +1157,11 @@ bool loadGroups(const char* path) {
                     g_usableH = v[3];
                     g_plateW = v[4];
                     g_plateH = v[5];
+                    // The cover's position: written out when the grid runs past the cover, else
+                    // it follows from the usable rectangle (ui_geometry's invariant).
+                    const bool bmp = f[7] && f[8] && f[8][0];
+                    g_bmpX = bmp ? atoi(f[7]) : g_x0 + g_usableW - g_plateW;
+                    g_bmpY = bmp ? atoi(f[8]) : g_y0 + g_usableH - g_plateH;
                     if (g_plateName) *g_plateName = f[6];
                     g_geoDerived = true;
                 }
@@ -1256,14 +1262,14 @@ bool loadGroups(const char* path) {
 // ini (configGeneration), the measured UI scale, the P line, the group table, the text measure.
 long g_layApplied = -1;   // GAME THREAD: the LiveLayout.gen the group grids were last fitted to
 SRWLOCK g_layLock = SRWLOCK_INIT;
-struct LaySig {             // compared with memcmp: no padding (8 + 4 + 4 + 16 * 4 = 80 bytes)
+struct LaySig {             // compared with memcmp: no padding (8 + 4 + 4 + 18 * 4 = 88 bytes)
     const void* groups;     // a view change swaps the table
     long cfgGen;
     float scale;
-    int x0, y0, usableW, usableH, plateW, plateH, maxCellW, maxCellH, rowGap, spare[3];
+    int x0, y0, usableW, usableH, plateW, plateH, maxCellW, maxCellH, rowGap, bmpX, bmpY, spare[3];
     int scrW, scrH;  float scrOx, scrOy;   // the screen and the window origin (screen keys only)
 };
-static_assert(sizeof(LaySig) == 80, "LaySig must have no padding");
+static_assert(sizeof(LaySig) == 88, "LaySig must have no padding");
 LaySig g_laySig;           // guarded by g_layLock, like the two below
 // The screen and the window's origin on it (liveSetScreenView): the Draw tail's thread writes,
 // laySigNow reads. Never reset on a world change - the next world's first frame keeps them.
@@ -1285,6 +1291,8 @@ LaySig laySigNow() {
     s.usableH = g_usableH;
     s.plateW = g_plateW;
     s.plateH = g_plateH;
+    s.bmpX = g_bmpX;
+    s.bmpY = g_bmpY;
     s.maxCellW = g_maxCellW;
     s.maxCellH = g_maxCellH;
     s.rowGap = g_rowGap;
@@ -1337,6 +1345,9 @@ void layoutCompute(const LaySig& sig, LiveLayout* out) {
     src.usableH = sig.usableH;
     src.plateW = sig.plateW;
     src.plateH = sig.plateH;
+    src.bmpX = sig.bmpX;
+    src.bmpY = sig.bmpY;
+    src.bmpKnown = 1;
     src.maxCellW = sig.maxCellW;
     src.maxCellH = sig.maxCellH;
     src.rowGap = sig.rowGap;

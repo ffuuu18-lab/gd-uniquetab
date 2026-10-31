@@ -4,6 +4,7 @@
 #include "gen/arz_reader.h"
 #include "gen/arz_writer.h"
 #include "gen/catalogue_gen.h"
+#include "gen/plate_gen.h"
 #include "gen/ui_geometry.h"
 #include "gen/ut_groups.h"
 #include "gen/ut_groups_default.h"
@@ -21,6 +22,7 @@ namespace {
 const char* const kMaterialWindow = "records/ui/caravan/caravan_materialwindow.dbr";
 const char* const kFrameRec = "records/ui/caravan/uniq_frame.dbr";
 const char* const kPlainPlate = "records/ui/caravan/caravan_transfercoverimage.dbr";
+const char* const kCoverRec = "records/ui/caravan/uniq_cover.dbr";
 const char* const kBoxTpl = "database/templates/ingameui/uireagentitem.tpl";
 const char* const kPageFmt = "records/ui/caravan/uniq_p%02d.dbr";
 const char* const kBoxFmt = "records/ui/caravan/reagents/uniq/p%02d/box_%02d.dbr";
@@ -130,9 +132,9 @@ std::vector<ArzOutField> boxFields(int x, int y, const std::string& item) {
 }
 
 // A page or the frame: every field of the materials window, with its box list replaced and -
-// for a page - the plain cover plate in place of the vanilla transfer plate.
+// when `plate` names one - that record in place of the vanilla transfer plate.
 std::vector<ArzOutField> windowFields(const ArzRecord& src, const std::vector<std::string>& boxes,
-                                      bool plainPlate) {
+                                      const std::string& plate) {
     std::vector<ArzOutField> out;
     bool hadBoxes = false;
     for (const ArzField& f : src.fields) {
@@ -143,9 +145,9 @@ std::vector<ArzOutField> windowFields(const ArzRecord& src, const std::vector<st
             o.type = kFtString;
             o.strs = boxes;
             hadBoxes = true;
-        } else if (plainPlate && f.name == "TransferPlate") {
+        } else if (!plate.empty() && f.name == "TransferPlate") {
             o.type = kFtString;
-            o.strs.push_back(kPlainPlate);
+            o.strs.push_back(plate);
         } else {
             o.raw = f.raw;
             o.strs = f.strs;
@@ -286,8 +288,10 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
                 if (cws[i] == gr.cw && chs[i] == gr.ch) { have = true; break; }
             if (!have) { cws.push_back(gr.cw); chs.push_back(gr.ch); }
         }
-        out.frameBoxes = ut::utFrameBoxes(out.geo.plateW, out.geo.plateH, cws.data(), chs.data(),
-                                          int(cws.size()), kRowGap);
+        // The budget is fitted to the cover, or to the grid's rectangle when that runs past it.
+        out.frameBoxes = ut::utFrameBoxes(std::max(out.geo.plateW, out.geo.usableW),
+                                          std::max(out.geo.plateH, out.geo.usableH), cws.data(),
+                                          chs.data(), int(cws.size()), kRowGap);
     }
     if (int(vanBoxes.size()) > out.frameBoxes) { if (error) *error = "more materials boxes than the frame holds"; return false; }
     for (Group& gr : groups) {
@@ -354,7 +358,7 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
                 out.boxRecords.push_back(box);
                 ++out.itemCount;
             }
-            arz.add(pageRec, windowFields(van, pageBoxes, true), winType, winTime);
+            arz.add(pageRec, windowFields(van, pageBoxes, kPlainPlate), winType, winTime);
         }
         PagesOutput::Group og;
         og.label = label;
@@ -374,7 +378,31 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
         arz.add(rec, boxFields(kHideXY, kHideXY, hideItem));
         frameBoxes.push_back(rec);
     }
-    arz.add(kFrameRec, windowFields(van, frameBoxes, false), winType, winTime);
+    // A page wider than its cover: the frame's plate is the painted cover plate of the page's
+    // size (plate_gen), so the engine freezes the plate widget's draw rectangle at the page -
+    // the record's own cover fields, with the plate's name and the page's position.
+    std::string frameCover;
+    if (out.geo.widePlate) {
+        ArzRecord crec;
+        if (!merged(g, mods, van.str("TransferPlate").c_str(), crec)) {
+            if (error) *error = "the materials page has no readable TransferPlate record";
+            return false;
+        }
+        std::vector<ArzOutField> cf;
+        for (const ArzField& f : crec.fields) {
+            if (f.name == "bitmapName" || f.name == "bitmapPositionX" || f.name == "bitmapPositionY") continue;
+            ArzOutField o;
+            o.name = f.name; o.type = f.type; o.raw = f.raw; o.strs = f.strs;
+            cf.push_back(std::move(o));
+        }
+        const std::string tag = groupsIn ? groupsIn->plateTag : std::string();
+        cf.push_back(outStr("bitmapName", "ui/caravan/" + plateCoverName(out.geo.plateW, out.geo.plateH, tag) + ".tex"));
+        cf.push_back(outInt("bitmapPositionX", out.geo.bmpX));
+        cf.push_back(outInt("bitmapPositionY", out.geo.bmpY));
+        arz.add(kCoverRec, cf);
+        frameCover = kCoverRec;
+    }
+    arz.add(kFrameRec, windowFields(van, frameBoxes, frameCover), winType, winTime);
     out.arz = arz.build();
     out.arzRecords = arz.recordCount();
     return true;

@@ -265,6 +265,9 @@ bool layWantNow(LayWant& w, std::string* why) {
     src.usableH = geo.usableH;
     src.plateW = geo.plateW;
     src.plateH = geo.plateH;
+    src.bmpX = geo.bmpX;
+    src.bmpY = geo.bmpY;
+    src.bmpKnown = 1;
     src.maxCellW = mw;
     src.maxCellH = mh;
     src.rowGap = gap;

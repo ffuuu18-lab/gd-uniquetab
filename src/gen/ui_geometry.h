@@ -117,6 +117,7 @@ struct UiGeometry {
     int usableW = 333, usableH = 552;  // the rectangle the grid is laid out in
     int plateW = 438, plateH = 627;    // the cover texture's real pixel size
     int bmpX = 0, bmpY = 1;            // the cover's bitmapPositionX/Y (plate_gen translates by it)
+    bool widePlate = false;            // the plate is the whole page (cover + a grid wider than it), not the cover
     std::string plate;                 // its bitmapName
     std::string tabStrip;              // "left" (vanilla) or "top" (both modded families)
     std::string note;                  // one line for the log

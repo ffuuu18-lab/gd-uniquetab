@@ -339,6 +339,13 @@ bool plateReadCover(const GameData& g, const ModView* mods, const std::string& b
     return texDecode(blob, out, why);
 }
 
+std::string plateCoverName(int plateW, int plateH, const std::string& plateTag) {
+    char name[160];
+    std::snprintf(name, sizeof name, "uniq_plate_cover_%dx%d%s%s", plateW, plateH,
+                  plateTag.empty() ? "" : "_", plateTag.c_str());
+    return name;
+}
+
 std::string plateLeafName(int cellW, int cellH, int plateW, int plateH, const std::string& plateTag,
                           const std::string& layoutHash) {
     // THE NAME. A custom view always carries the plate size and its tag, whatever its cover
@@ -393,7 +400,7 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
     const int matX = page.i32("WindowLocationX") + geo.bmpX;
     const int matY = page.i32("WindowLocationY") + geo.bmpY;
 
-    Image ground;
+    Image ground, under;   // under: the stash cover's pixels under the page, for the cover plate
     bool vanillaGround = false;
     std::vector<std::uint8_t> blob;
     if (!stashBitmap.empty() && readCover(g, mods, stashBitmap, blob)
@@ -414,6 +421,7 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
                           stashBitmap.c_str(), ground.w, ground.h, offX, offY);
             rep.ground = line;
             ground = c;
+            under = c;
             vanillaGround = false;   // the lattice is measured on the whole texture, not a cut
         } else {
             std::snprintf(line, sizeof line,
@@ -472,6 +480,7 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
         rep.fillRgb = rgb;
         rep.flat = true;
     }
+    if (under.w != geo.plateW || under.h != geo.plateH) under = ground;
     if (ground.w != geo.plateW || ground.h != geo.plateH) {
         // only the vanilla pair differs, and only by the one row the widget's rectangle wants
         if (ground.w < geo.plateW) {
@@ -551,6 +560,38 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
         }
         ++rep.painted;
         rep.frames += std::size_t(n);
+    }
+    // THE COVER PLATE of a widened page: what was under the page, with the record's own cover
+    // blended on at its own place, so the Crafting Materials page looks as it did. Derived set only.
+    if (geo.widePlate && layoutHash.empty()) {
+        img = under;
+        ArzRecord crec;
+        Image art;
+        if (rec(page.str("TransferPlate"), crec) && readCover(g, mods, crec.str("bitmapName"), blob)
+            && texDecode(blob, art, &why)) {
+            const int cx = crec.i32("bitmapPositionX") - geo.bmpX, cy = crec.i32("bitmapPositionY") - geo.bmpY;
+            for (int y = 0; y < art.h; ++y) {
+                if (cy + y < 0 || cy + y >= img.h) continue;
+                for (int x = 0; x < art.w; ++x) {
+                    if (cx + x < 0 || cx + x >= img.w) continue;
+                    const std::uint8_t* s = art.at(x, y);
+                    std::uint8_t* d = img.at(cx + x, cy + y);
+                    const int a = s[3];
+                    for (int k = 0; k < 3; ++k) d[k] = std::uint8_t((s[k] * a + d[k] * (255 - a) + 127) / 255);
+                    d[3] = 255;
+                }
+            }
+        } else {
+            rep.warnings.push_back("the page's own cover could not be read for the cover plate (" +
+                                   (why.empty() ? std::string("no such texture") : why) + ")");
+        }
+        texEncode(img, tex);
+        const std::string name = plateCoverName(geo.plateW, geo.plateH, plateTag);
+        if (sink && !sink(name, tex, CellGrid(), 0, ctx)) {
+            if (error) *error = std::string("the plate ") + name + " could not be handed over";
+            return false;
+        }
+        ++rep.painted;
     }
     return true;
 }

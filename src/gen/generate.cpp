@@ -275,7 +275,7 @@ std::string inputFingerprint(const std::string& gameDir, const std::string& lang
     // collected), and Level Art.arc is an icon archive (the Lokarr set's icons); 11 = the
     // endless dungeon's script entities are no longer a junk folder (the Totally Normal Shield's
     // three versions are collected).
-    std::string fp = "GDUT-STAMP 11\nlang=" + lang + "\n";
+    std::string fp = "GDUT-STAMP 13\nlang=" + lang + "\n";
     if (basemods) fp += "basemods=1\n";
     // A custom view's plate names always carry its tag; the line makes a view generated
     // before that rule regenerate once, and leaves the start-up view's stamp as it was.
@@ -403,6 +403,7 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
     GroupsInput gin;
     gin.set = &groupSet;
     gin.viewKeys = utg::viewKeysFor(v.name());
+    gin.plateTag = v.tag();
     // the groups' monster-infrequent blocks ([view:collect_mi], ut_groups_default.h) are on only
     // with the flag: off, no MI is in the catalogue and no block pages one (a stored one waits in
     // the journal, counted below and on the label)
@@ -679,9 +680,10 @@ bool readGroupsGeometry(const std::string& groupsPath, UiGeometry& geo, int* max
             geo.plateW = std::atoi(f[5].c_str());
             geo.plateH = std::atoi(f[6].c_str());
             geo.plate = f.size() >= 8 ? f[7] : std::string();
-            // ui_geometry: usableW = plateW - (x0 - bitmapPositionX)
-            geo.bmpX = geo.x0 + geo.usableW - geo.plateW;
-            geo.bmpY = geo.y0 + geo.usableH - geo.plateH;
+            // ui_geometry: usableW = plateW - (x0 - bitmapPositionX), unless the line carries
+            // the cover's position itself (a grid that runs past its cover).
+            geo.bmpX = f.size() >= 10 ? std::atoi(f[8].c_str()) : geo.x0 + geo.usableW - geo.plateW;
+            geo.bmpY = f.size() >= 10 ? std::atoi(f[9].c_str()) : geo.y0 + geo.usableH - geo.plateH;
             haveP = geo.plateW > 0 && geo.plateH > 0;
         } else if (f[0] == "F" && f.size() >= 7) {
             nmax = std::atoi(f[2].c_str());

@@ -1169,6 +1169,7 @@ inline bool utPadDefaultInBand(int padY, int padH, int padGap, UtRect* out) {
 // = no key) and the [advanced] pad keys.
 struct UtLayoutSource {
     int x0, y0, usableW, usableH, plateW, plateH;   // the P line
+    int bmpX, bmpY, bmpKnown;   // the cover's position when the P line carries it (bmpKnown), else derived
     int maxCellW, maxCellH, rowGap;
     const char* grid;     // grid_<W>x<H>, or null
     const char* pad;      // pad_<W>x<H>
@@ -1201,7 +1202,8 @@ inline UtLayout utLayoutFromSource(const UtLayoutSource& src, UtLayoutInput* in,
                                    UtRect userStore[kUtLayParts]) {
     UtLayoutInput& I = *in;
     I = UtLayoutInput{};
-    I.plate = utPlateRectFromP(src.x0, src.y0, src.usableW, src.usableH, src.plateW, src.plateH);
+    I.plate = src.bmpKnown ? UtRect{src.bmpX, src.bmpY, src.plateW, src.plateH}
+                           : utPlateRectFromP(src.x0, src.y0, src.usableW, src.usableH, src.plateW, src.plateH);
     const UtRect grid = {src.x0, src.y0, src.usableW, src.usableH};
     I.def[kUtLayGrid] = grid;
     UtRect pad;

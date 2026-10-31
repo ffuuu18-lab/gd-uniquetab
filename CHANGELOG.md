@@ -2,6 +2,25 @@
 
 Newest first.
 
+## 1.2.1.1
+
+Requires Grim Dawn 1.3.0.8 or 1.3.1.1, 64-bit, with Ultimate ASI Loader.
+
+### Fixed
+
+- **A caravan whose stash grid is wider than its materials cover (Loot Ascension's Baul UI) now
+  gets the whole window.** The collection grid used to sit in the 346 x 625 corner the materials
+  cover occupies, and the rest of Baul's window went unused. The grid now spans the stash grid's
+  rectangle (929 x 861 of the 952 x 1007 window), a page holds up to 512 boxes, the black lattice
+  background covers all of it, the layout editor works across the whole window, and the game's
+  own Crafting Materials page keeps Baul's cover where it was. Nothing changes for the base game
+  or for the mods whose cover is the page (X-Mod, Falendar's UI Overhaul, Reign of Terror,
+  Grimarillion, DeathGrimDawn): their pages, plates and settings are the same as in 1.2.1. The
+  pages are generated again once, at the first start after the update.
+- For such a mod the `<W>x<H>` in the `[layout]` keys is the page's size now (`grid_941x936`,
+  `pad_941x936`, `label_941x936` for Loot Ascension). A `grid_346x625` line saved with 1.2.1 stays
+  in the file and is no longer read; open the editor again to place the grid on the whole window.
+
 ## 1.2.1
 
 Requires Grim Dawn 1.3.0.8 or 1.3.1.1, 64-bit, with Ultimate ASI Loader.

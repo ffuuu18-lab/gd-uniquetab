@@ -12,6 +12,14 @@ the mod. Nothing the mod does is written into `player.gdc` or into any `.gst` st
 future patch, a broken mod or a plain uninstall cannot make the game prune what you stored. If
 you remove the mod, your collection file stays on disk exactly as it was.
 
+## New in 1.2.1.1
+
+- **Loot Ascension's Baul UI gets the whole window.** On a caravan whose stash grid is wider than
+  its materials cover, the collection grid, its black background and the layout editor now span
+  the whole stash grid instead of the materials cover's corner. The base game and the other
+  stash-UI mods are unchanged. If you had saved a grid for Loot Ascension, open the editor once
+  more: the key is the page's size now (`grid_941x936`).
+
 ## New in 1.2.1
 
 - **The Lokarr set can be stored.** Lokarr's Gaze, Coat, Mantle and Boots - and Wilhelm's
@@ -461,7 +469,7 @@ is laid out as it always was. The in-game editor writes these lines for you.
 | `pad_screen`, `label_screen` = `<corner>,x,y,w,h` | the buttons or the label line pinned to a corner of the SCREEN instead of the window (below) |
 | `zoom_pct` = 100..200 | the item icons of the collection pages bigger, in percent - a commented line at 100 (*Bigger icons*, below) |
 
-`<W>x<H>` is the cover: `438x627` for the base game and DeathGrimDawn, `346x625` Loot Ascension,
+`<W>x<H>` is the cover: `438x627` for the base game and DeathGrimDawn, `941x936` Loot Ascension,
 `974x659` Reign of Terror, `975x968` X-Mod. The grid takes as many whole cells as fit from its
 top-left - a page holds as many boxes as the cover fits, at most 512 -; the buttons are
 re-arranged for the largest readable captions; the label's height limits `plate_label_size`.

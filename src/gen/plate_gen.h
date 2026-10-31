@@ -108,6 +108,10 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
                     std::string* error, const std::string& layoutHash = std::string(),
                     int rowGap = -1);
 
+// The leaf name of a widened page's cover plate (geo.widePlate): the page's ground with the mod's
+// own cover on it where it was, which the frame record names as the page's TransferPlate so the
+// engine freezes the plate widget's draw rectangle at the page. Painted with the derived set only.
+std::string plateCoverName(int plateW, int plateH, const std::string& plateTag);
 // The leaf name (no folder, no .tex) of one plate - the rule generatePlates and ut_plate.cpp share.
 std::string plateLeafName(int cellW, int cellH, int plateW, int plateH, const std::string& plateTag,
                           const std::string& layoutHash);

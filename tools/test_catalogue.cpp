@@ -496,16 +496,18 @@ struct GeoCase {
 // The frame numbers: the frame carries the view's own count (ut_layout.h utFrameBoxes: the whole
 // cover's fit at the view's cell sizes, 160..512), whatever the band fits today, so a live layout
 // change anywhere on the cover never needs a new overlay: vanilla 438x627 = 13 x 18 = 234 (the band
-// fits 10 x 16 = 160), Baul 346x625 = 10 x 18 = 180 (band 9 x 16 = 144), X-Mod 975x968 = 30 x 28
-// = 840 -> the 512 ceiling (band 30 x 25 wanted, 30 x 17 shown). Only Baul MOVES the page - which
-// is the whole reason the overlay is generated.
+// fits 10 x 16 = 160), X-Mod 975x968 = 30 x 28 = 840 -> the 512 ceiling (band 30 x 25 wanted,
+// 30 x 17 shown), Baul: its stash grid is wider than the 346x625 materials cover, so the page grid
+// takes the whole 929x861 window (origin 503 px left of the cover) and the plate is the page, the
+// cover and the grid together (941x936 at -503,1) -> the 512 ceiling. Only Baul MOVES the page -
+// which is the whole reason the overlay is generated.
 const GeoCase kGeoCases[] = {
     {"vanilla", nullptr, 105, 76, 333, 552, 438, 627,
      "ui/caravan/caravan_transfercomponent1_bg.tex", 0, 88, 234},
     {"X-Mod 3.04 (= Falendar)", "xmod\\X-Mod", 8, 76, 967, 866, 975, 968,
      "x-mod/caravan_transfercomponent1_bg.tex", 0, 88, 512},
-    {"Loot Ascension (Baul)", "lootascension\\LootAscension", 128, 76, 310, 550, 346, 625,
-     "baul/caravan_transfercomponent1_bg_n.tex", 513, 70, 180},
+    {"Loot Ascension (Baul)", "lootascension\\LootAscension", -503, 76, 929, 861, 941, 936,
+     "baul/caravan_transfercomponent1_bg_n.tex", 513, 70, 512},
 };
 
 int geometry() {
@@ -612,17 +614,24 @@ struct PlateCase {
     int n;
     std::vector<std::uint8_t> last;  // the last plate's bytes, for the cluster check
     std::string lastName;
+    std::vector<std::uint8_t> cover; // the cover plate of a page wider than its cover (cell 0x0)
+    std::string coverName;
 };
 
 bool platesSink(const std::string& name, const std::vector<std::uint8_t>& tex,
                 const gen::CellGrid& cell, int frames, void* ctx) {
     PlateCase* c = (PlateCase*)ctx;
-    ++c->n;
     if (!c->dump.empty()) {
         // the cross-check against tools/make_plates.py on the modded views, by hand
         FILE* f = std::fopen((c->dump + "\\" + name + ".tex").c_str(), "wb");
         if (f) { std::fwrite(tex.data(), 1, tex.size(), f); std::fclose(f); }
     }
+    if (cell.cellW == 0 && cell.cellH == 0) {   // the cover plate of a page wider than its cover
+        c->cover = tex;
+        c->coverName = name;
+        return true;
+    }
+    ++c->n;
     c->last = tex;
     c->lastName = name;
     if (c->dir.empty()) {
@@ -742,6 +751,31 @@ int plates(const std::string& dataDir, const std::string& dumpDir,
                     "our frame lines, %lld are neither\n", ok ? "ok  " : "FAIL", nFill, total,
                     rep.fillRgb, total ? 100.0 * double(nFill) / double(total) : 0.0, nLine,
                     nOther);
+        // A PAGE WIDER THAN ITS COVER has one plate more: the cover plate the frame record names,
+        // the page's size, the ground under the page with the mod's own cover on it - so, unlike
+        // the lattice plates, it carries the mod's art: well under half of it is the fill.
+        if (po.geo.widePlate) {
+            gen::PlateSurface cp;
+            long long cFill = 0, cTotal = 0;
+            const bool read = !c.cover.empty() && gen::plateDecodeTex(c.cover, cp, &why)
+                           && cp.w == po.geo.plateW && cp.h == po.geo.plateH;
+            if (read)
+                for (int y = 0; y < cp.h; ++y)
+                    for (int x = 0; x < cp.w; ++x) {
+                        ++cTotal;
+                        const std::uint8_t* pp = cp.at(x, y);
+                        if (pp[0] == fr && pp[1] == fg && pp[2] == fb) ++cFill;
+                    }
+            const bool cok = read && cTotal > 0 && cFill * 2 < cTotal;
+            std::printf("[test] %s: the cover plate %s is %dx%d, %lld of %lld pixels the fill (the"
+                        " mod's art under the page with its cover on it)\n", cok ? "ok  " : "FAIL",
+                        c.coverName.c_str(), cp.w, cp.h, cFill, cTotal);
+            if (!cok) rc = 1;
+        } else if (!c.cover.empty()) {
+            std::printf("[test] FAIL: plates %s: a cover plate %s on a page that is its cover\n",
+                        gc.label, c.coverName.c_str());
+            rc = 1;
+        }
         // X-Mod also has to prove the reagent cluster is gone: inside the 24 boxes' own
         // rectangle (x 332..612, y 207..663 in window units) not one pixel may be the materials
         // cover's, unless it happens to BE the fill colour.
@@ -1316,9 +1350,9 @@ int viewPass(const std::string& root) {
     for (const char* n : names) DeleteFileA((viewDir + "\\" + n).c_str());
     DeleteFileA((viewDir + "\\catalogue.stamp").c_str());
     {   // and so do the view's plates: the count below must see this run's plates only -
-        // a stale flag-off uniq_plate_32x128_346x625_lootascension.tex would make it seven
+        // a stale flag-off uniq_plate_32x128_941x936_lootascension.tex would make it eight
         WIN32_FIND_DATAA of;
-        HANDLE oh = FindFirstFileA((plateDir + "\\uniq_plate_*_346x625_lootascension.tex").c_str(), &of);
+        HANDLE oh = FindFirstFileA((plateDir + "\\uniq_plate_*_941x936_lootascension.tex").c_str(), &of);
         if (oh != INVALID_HANDLE_VALUE) {
             do DeleteFileA((plateDir + "\\" + of.cFileName).c_str()); while (FindNextFileA(oh, &of));
             FindClose(oh);
@@ -1350,18 +1384,18 @@ int viewPass(const std::string& root) {
     std::printf("[test] view: %s\n", r.plates.c_str());
     std::printf("[test] view: %s\n", r.plateGround.c_str());
     check(r.generated && r.view == "custom-lootascension", "the Baul view generates");
-    check(r.overlay.find("frame at 513,70 with 180 boxes") != std::string::npos,
-          "the frame is where Baul's materials page is, with all 180 boxes (the 346x625 cover's fit)");
-    check(r.summary.find(" on 237 pages ") != std::string::npos,
-          "237 pages with collect_mi=1, the default (132 with it off: 117 + 15 of Blueprints, 4 x 16 of 64x32)");
-    check(r.plates.find("cut at 605,71") != std::string::npos,
-          "the ground is the 346x625 cut of Baul's window art at 605,71");
+    check(r.overlay.find("frame at 513,70 with 512 boxes") != std::string::npos,
+          "the frame is where Baul's materials page is, with 512 boxes (the whole-window grid's fit)");
+    check(r.summary.find(" on 53 pages ") != std::string::npos,
+          "53 pages with collect_mi=1, the default (the grid spans Baul's whole 929x861 window)");
+    check(r.plates.find("cut at 10,71") != std::string::npos,
+          "the ground is the 941x936 cut of Baul's window art at 10,71 (the plate is the page)");
     check(r.plateGround.find("a flat 060606") != std::string::npos,
           "the modded ground is the flat sampled colour");
 
     // The WRITTEN records: the location and box list the engine will build the page from are
     // the ones in the archive on disk, so they are read back out of it rather than trusted from
-    // the report. Every collection box lies on the derived grid (origin 128,76, 310x550 usable).
+    // the report. Every collection box lies on the derived grid (origin -503,76, 929x861 usable).
     {
         const WrittenOverlay w = readWrittenOverlay(viewDir + "\\uniq-pages.arz");
         const WrittenOverlay s = readWrittenOverlay(startupDir + "\\uniq-pages.arz");
@@ -1373,10 +1407,10 @@ int viewPass(const std::string& root) {
                     s.maxX, s.maxY);
         check(w.ok && w.frameX == 513 && w.frameY == 70,
               "the WRITTEN frame record puts the page at 513,70");
-        check(w.frameBoxes == 180, "the written frame lists all 180 boxes");
-        check(w.pages == 237, "the written archive holds 237 collection pages");
-        check(w.minX == 128 && w.minY == 76 && w.maxX < 128 + 310 && w.maxY < 76 + 550,
-              "every written page box is on the derived grid (origin 128,76, 310x550)");
+        check(w.frameBoxes == 512, "the written frame lists all 512 boxes");
+        check(w.pages == 53, "the written archive holds 53 collection pages");
+        check(w.minX == -503 && w.minY == 76 && w.maxX < -503 + 929 && w.maxY < 76 + 861,
+              "every written page box is on the derived grid (origin -503,76, 929x861)");
         check(s.ok && s.frameX == 0 && s.frameY == 88 && s.frameBoxes == 234 &&
                   s.minX == 105 && s.minY == 76,
               "the start-up view's written frame is the vanilla 0,88 with 234 boxes on 105,76");
@@ -1385,19 +1419,20 @@ int viewPass(const std::string& root) {
     // the plate names carry the view, so two mods with one cover size cannot collide
     int tagged = 0;
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((plateDir + "\\uniq_plate_*_346x625_lootascension.tex").c_str(), &fd);
+    HANDLE h = FindFirstFileA((plateDir + "\\uniq_plate_*_941x936_lootascension.tex").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do { ++tagged; } while (FindNextFileA(h, &fd));
         FindClose(h);
     }
-    std::printf("[test] view: %d plate(s) named uniq_plate_<cell>_346x625_lootascension.tex\n", tagged);
-    check(tagged == kVanillaPlates, "every plate of the view carries the view's tag (the vanilla cell set: six)");
+    std::printf("[test] view: %d plate(s) named uniq_plate_<cell>_941x936_lootascension.tex\n", tagged);
+    check(tagged == kVanillaPlates + 1,
+          "every plate of the view carries the view's tag (the vanilla cell set: six, and the cover plate)");
 
     // the stamp is the view's own
     std::vector<std::uint8_t> stamp;
     check(readAll(viewDir + "\\catalogue.stamp", stamp), "the view folder has its own stamp");
     const std::string stampText(stamp.begin(), stamp.end());
-    check(stampText.find("GDUT-STAMP 11\n") == 0, "stamp format 11 (the junk list without the script entities)");
+    check(stampText.find("GDUT-STAMP 13\n") == 0, "stamp format 13 (the wide page's plate and cover record)");
     check(stampText.find("\ngroups=builtin:") != std::string::npos && stampText.find("+user:") == std::string::npos,
           "with no groups file the stamp names the built-in groups (by their text's hash) alone");
     check(stampText.find("\nplates=tagged\n") != std::string::npos,
@@ -1638,6 +1673,7 @@ bool resolveGrid(const std::string& outDir, const char* value, gen::LayoutGrid* 
     ut::UtLayoutSource src = {};
     src.x0 = geo.x0; src.y0 = geo.y0; src.usableW = geo.usableW; src.usableH = geo.usableH;
     src.plateW = geo.plateW; src.plateH = geo.plateH;
+    src.bmpX = geo.bmpX; src.bmpY = geo.bmpY; src.bmpKnown = 1;
     src.maxCellW = mw; src.maxCellH = mh; src.rowGap = gap;
     src.grid = value;
     src.padY = 25; src.padH = 14; src.padGap = 1; src.labelSize = 13; src.captionMax = 14;
@@ -1943,7 +1979,7 @@ int layoutPlates(const std::string& dataDir, const std::string& outDir) {
         if (f) { for (const std::string& nm : zr.names) std::fprintf(f, "%s\n", nm.c_str()); std::fclose(f); }
     }
 
-    // 9. the timing on the other covers: Baul (346x625) and a wide one (X-Mod 975x968)
+    // 9. the timing on the other covers: Baul (the 941x936 page) and a wide one (X-Mod 975x968)
     const char* mdir = std::getenv("UNIQUETAB_TEST_MODS_DIR");
     if (!mdir || !*mdir) {
         std::printf("[test] layout plates: Baul / X-Mod SKIPPED - UNIQUETAB_TEST_MODS_DIR is not set\n");

@@ -301,7 +301,14 @@ std::string UiGeometry::line() const {
     char buf[96];
     std::snprintf(buf, sizeof buf, "P\t%d\t%d\t%d\t%d\t%d\t%d\t", x0, y0, usableW, usableH,
                   plateW, plateH);
-    return std::string(buf) + plate;
+    std::string out = std::string(buf) + plate;
+    // The cover's position follows from the usable rectangle (bmpX = x0 + usableW - plateW)
+    // except on a page whose grid runs past its cover: then it is written out, two more fields.
+    if (bmpX != x0 + usableW - plateW || bmpY != y0 + usableH - plateH) {
+        std::snprintf(buf, sizeof buf, "\t%d\t%d", bmpX, bmpY);
+        out += buf;
+    }
+    return out;
 }
 
 bool materialBoxPositions(const GameData& g, const ModView& mods,
@@ -401,6 +408,7 @@ bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
     }
     int x0 = 0, y0 = 0;
     bool fromStash = false;
+    int wideR = 0, wideB = 0;   // the stash grid's right and bottom edge in page space, when it is wider than the cover
     if (haveInv) {
         const int ax = stash.i32("WindowLocationX") + inv.i32("inventoryX")
                      - page.i32("WindowLocationX");
@@ -412,6 +420,26 @@ bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
             x0 = ax;
             y0 = ay;
             fromStash = true;
+        } else if (inv.i32("inventoryXSize") > pw) {
+            // A stash grid WIDER than this page's cover (Baul: the whole window): the page's
+            // grid takes the stash grid's rectangle, the part left of its own cover included.
+            x0 = ax;
+            y0 = ay;
+            fromStash = true;
+            wideR = ax + inv.i32("inventoryXSize");
+            wideB = ay + inv.i32("inventoryYSize");
+            // ... but never past the caravan's own window art (the stash cover's rectangle).
+            ArzRecord tw, scov;
+            std::string twName = win.str("TransferWindow");
+            if (twName.empty()) twName = "records/ui/caravan/caravan_transferwindow.dbr";
+            int sw = 0, sh = 0;
+            if (recs(twName, tw) && recs(tw.str("TransferPlate"), scov)
+                && (mods.texSize(scov.str("bitmapName"), sw, sh) || coverSize(g, scov.str("bitmapName"), sw, sh))) {
+                const int artR = tw.i32("WindowLocationX") + scov.i32("bitmapPositionX") + sw - page.i32("WindowLocationX");
+                const int artB = tw.i32("WindowLocationY") + scov.i32("bitmapPositionY") + sh - page.i32("WindowLocationY");
+                if (artR < wideR) wideR = artR;
+                if (artB < wideB) wideB = artB;
+            }
         }
     }
     if (!fromStash) {
@@ -422,7 +450,11 @@ bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
         y0 = minY;
     }
     if (y0 < kPanelBandH) y0 = kPanelBandH;   // the label and the pad own the page's top band
-    const int usableW = pw - (x0 - bx), usableH = ph - (y0 - by);
+    int usableW = pw - (x0 - bx), usableH = ph - (y0 - by);
+    if (wideR > 0) {
+        usableW = wideR - x0;
+        if (wideB - y0 > usableH) usableH = wideB - y0;
+    }
     if (usableW < 32 || usableH < 32) {
         char buf[96];
         std::snprintf(buf, sizeof buf, "derived a %dx%d usable rectangle", usableW, usableH);
@@ -438,6 +470,16 @@ bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
     out.plateH = ph;
     out.bmpX = bx;
     out.bmpY = by;
+    if (wideR > 0) {
+        // The plate is the whole page - the cover and the widened grid together - so one plate
+        // of that size covers the grid, and the mod's own cover still fits on it (plate_gen's
+        // cover plate, which pages_gen's frame record names so the engine builds the page at it).
+        out.bmpX = std::min(bx, x0);
+        out.bmpY = std::min(by, y0);
+        out.plateW = std::max(bx + pw, x0 + usableW) - out.bmpX;
+        out.plateH = std::max(by + ph, y0 + usableH) - out.bmpY;
+        out.widePlate = true;
+    }
     out.plate = bitmap;
     out.tabStrip = stripLeft ? "left" : "top";
     {

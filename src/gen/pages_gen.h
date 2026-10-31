@@ -37,6 +37,7 @@ struct CatalogueItem;
 struct GroupsInput {
     const utg::GroupSet* set = nullptr;                    // a parsed uniquetab-groups.ini
     std::vector<std::string> viewKeys;                     // utg::viewKeysFor(view name)
+    std::string plateTag;                                  // ViewSpec::tag(): what the plate names carry
 };
 
 // The built-in rule set, parsed once. Null (with the reason) only if the template is broken.
