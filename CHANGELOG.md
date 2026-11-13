@@ -2,6 +2,45 @@
 
 Newest first.
 
+## 1.2.1.2
+
+Requires Grim Dawn 1.3.0.8 or 1.3.1.1, 64-bit, with Ultimate ASI Loader.
+
+### Fixed
+
+- **A Loot Ascension 1.4.5 record no longer turns the tab off.** One record in Loot Ascension
+  1.4.5's database is saved without compression. The mod could not read it, so it could not build
+  that game's collection, and the tab showed the plain materials page, which does not fit Baul's
+  caravan. The mod now reads such records. A mod record that still cannot be read is skipped, and
+  the log says how many were skipped and names the first; it no longer stops the whole collection.
+  With 1.4.5 the tab is back exactly as with 1.4.3: the 53 pages, the whole-window grid and its
+  background.
+
+### Added
+
+- **You can set the collection page yourself.** A new line under `[layout]`,
+  `page = x,y,w,h`, sets where the collection page is and how big its background is. The mod then
+  takes that rectangle as it is and reads nothing from the caravan or stash mod: the background is
+  our own frames on one flat colour, in the base game too, and the boxes start below the buttons.
+  Use it when a stash mod's page comes out the wrong size, or when the tab turns itself off because
+  the mod's page cannot be read. The numbers are the materials window's own pixels, as the outline
+  and the editor print them; the width and height are 64 to 2048, and the page must reach at least
+  32 pixels below the buttons. It takes effect at the next start of the game. The settings file
+  becomes `ini_version=45` and gains the commented line; every value you set is kept.
+- **The collection keeps backups of itself.** Each time a journal that holds items is opened (at
+  start-up, and when you enter a world in the other mode or another custom game) and then first
+  changed, the file as it was is copied to `backup\` beside it, as
+  `uniq-items-<yyyymmdd-hhmmss>.jsonl` (`uniq-items-hc-...` for hardcore; a custom game's in
+  `mods\<name>\backup\`; beside the journals in `journal_dir` when that is set). The newest 10 of
+  each journal are kept, and nothing else in `backup\` is ever deleted. A backup never holds up a
+  deposit or a take: if the copy cannot be made, the log says so once and the journal is written as
+  always. When a journal opens with no items while its newest backup holds some, the log says so
+  once, naming the backup and how to restore it. The mod never restores a backup itself: close the
+  game and copy the backup over `uniq-items.jsonl` (or `uniq-items-hc.jsonl`); an item taken out
+  since that backup would then be in the collection twice. `undeploy.bat` keeps the backups and
+  refuses to run while one is there, because they still hold your items: move `backup\` (and each
+  `mods\<name>\backup\`) away by hand first.
+
 ## 1.2.1.1
 
 Requires Grim Dawn 1.3.0.8 or 1.3.1.1, 64-bit, with Ultimate ASI Loader.

@@ -207,6 +207,9 @@ set "UNIQUETAB_OUT=%ST%"
 if errorlevel 1 set RC=1
 "%OUT%\test_journal.exe" --case-allstale
 if errorlevel 1 set RC=1
+rem The case re-opened the fixture and wrote it, so its backup\ holds the file as it was: the guard
+rem refuses on any backup (the case below proves that), so it goes before this verdict on the file.
+rd /s /q "%ST%\backup" 2>nul
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%ST%"
 set GRC=%ERRORLEVEL%
 echo [test] guard exit code with a journal whose entries are ALL marked not-stored = %GRC% (0 = allows, correct)
@@ -331,13 +334,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.
 set GRC=%ERRORLEVEL%
 findstr /c:"(mods\\lootascension)" "%JVIEW%\guard.txt" >nul
 if errorlevel 1 (echo [test] FAIL: the guard did not look at the custom game's journal & set RC=1)
-rem ... and with the custom game's journal gone as well, it allows.
+rem ... and with the custom game's journal gone as well (and the backup its re-open made), it allows.
 del /q "%JVIEW%\mods\lootascension\uniq-items.jsonl" 2>nul
+rd /s /q "%JVIEW%\mods\lootascension\backup" 2>nul
 powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JVIEW%" >nul
 set GRC2=%ERRORLEVEL%
 echo [test] guard over a custom game's journal = %GRC% (1 = refuses), with no journal left = %GRC2% (0 = allows)
 if not "%GRC%"=="1" (echo [test] FAIL: the guard allowed an uninstall over a custom game's collection & set RC=1)
 if not "%GRC2%"=="0" (echo [test] FAIL: the guard refused with no journal present & set RC=1)
+
+rem ---- the backups: backup\uniq-items-<yyyymmdd-hhmmss>.jsonl beside each journal ---------------
+rem Once per opening before its first write, only of a file with rows, the newest 10 kept, the WARN
+rem at an empty open (1.2.1.2, the Titan Quest port's 1.1.3).
+set "JBAK=%OUT%\journal-backup"
+if exist "%JBAK%" rd /s /q "%JBAK%"
+mkdir "%JBAK%"
+set "UNIQUETAB_OUT=%JBAK%"
+"%OUT%\test_journal.exe" --case-backup
+if errorlevel 1 set RC=1
+rem The uninstall guard: a backup in mods\x\backup\ with no journal anywhere -> refused.
+set "JBG=%OUT%\journal-backupguard"
+if exist "%JBG%" rd /s /q "%JBG%"
+mkdir "%JBG%\mods\x\backup"
+copy /b /y "%JBAK%\mods\qd\uniq-items.jsonl" "%JBG%\mods\x\backup\uniq-items-10000101-120000.jsonl" >nul
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\journal_guard.ps1" -OutDir "%JBG%" >nul
+set GRC4=%ERRORLEVEL%
+echo [test] guard over a backup in mods\x\backup\ with every journal gone = %GRC4% (1 = refuses)
+if not "%GRC4%"=="1" (echo [test] FAIL: the guard allowed an uninstall over a kept backup & set RC=1)
 
 rem ---- the folder move: views\ -> mods\ ----------------------------------------------------
 rem The old layout (views\custom-<name>\, views\basemods+custom-<name>\) renamed once to

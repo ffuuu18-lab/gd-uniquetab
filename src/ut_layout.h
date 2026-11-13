@@ -119,6 +119,23 @@ inline int utRectFormat(const UtRect& r, char* out, size_t cap) {
     return (n > 0 && (size_t)n < cap) ? n : 0;
 }
 
+// [layout] page = x,y,w,h: the collection page FORCED by the player - the plate and the grid's
+// page in the materials window's own pixels at UI scale 1 (the space of grid_<W>x<H>), with no
+// check against the mod's caravan at all. Accepted: four whole numbers, 64 <= w,h <= 2048,
+// |x|,|y| <= 4096, and at least 32 px of the page below the header band (y + h >= 76 + 32), so
+// an accepted page always leaves a grid; anything else is no key.
+enum { kUtPageMin = 64, kUtPageMax = 2048, kUtPageXYMax = 4096, kUtPageBottomMin = 76 + 32 };
+inline bool utPageParse(const char* s, UtRect* out) {
+    UtRect r;
+    if (!s || !out || !utRectParse(s, &r)) return false;
+    if (r.w < kUtPageMin || r.h < kUtPageMin || r.w > kUtPageMax || r.h > kUtPageMax) return false;
+    if (r.x < -kUtPageXYMax || r.x > kUtPageXYMax || r.y < -kUtPageXYMax || r.y > kUtPageXYMax)
+        return false;
+    if (r.y + r.h < kUtPageBottomMin) return false;
+    *out = r;
+    return true;
+}
+
 // "<W>x<H>": 1..4 digits, a lower-case x, 1..4 digits, both at least 1. Nothing else.
 inline bool utCoverKeyParse(const char* s, int* w, int* h) {
     if (!s) return false;
@@ -859,7 +876,24 @@ struct UtLayoutInput {
     int screenKnown;              // 1 = screenW/H and originX/Y are this frame's
     int screenW, screenH;         // the canvas, client px (GraphicsCanvas::GetWidth/GetHeight)
     float originX, originY;       // the materials window's screen origin, client px
+    // A FORCED page (uniquetab.ini's page=): the derived pad and label stay where the mod puts
+    // them, which may be outside the page, so a user pad or label (and padmat) is judged against
+    // `partPlate` - the page together with the derived pad and label - instead of the page alone.
+    // Zero = not forced, every part judged against `plate` as before. The grid always is.
+    int pageForced;
+    UtRect partPlate;
 };
+
+// The smallest rectangle holding both (a zero-size one is ignored).
+inline UtRect utRectBound(const UtRect& a, const UtRect& b) {
+    if (a.w <= 0 || a.h <= 0) return b;
+    if (b.w <= 0 || b.h <= 0) return a;
+    const int x0 = a.x < b.x ? a.x : b.x, y0 = a.y < b.y ? a.y : b.y;
+    const int x1 = a.x + a.w > b.x + b.w ? a.x + a.w : b.x + b.w;
+    const int y1 = a.y + a.h > b.y + b.h ? a.y + a.h : b.y + b.h;
+    const UtRect r = {x0, y0, x1 - x0, y1 - y0};
+    return r;
+}
 
 struct UtLayout {
     UtRect rect[kUtLayParts];     // the rectangles in force (a screen part's: window-local)
@@ -892,7 +926,7 @@ inline UtLayout resolveWindow(const UtLayoutInput& in, const int skip[kUtLayPart
         if (!in.user[p]) continue;
         const UtRect& u = *in.user[p];
         int why = kUtLayoutOk;
-        if (!utRectInside(u, in.plate)) {
+        if (!utRectInside(u, (in.pageForced && p != kUtLayGrid) ? in.partPlate : in.plate)) {
             why = kUtLayoutOutside;
         } else if (p == kUtLayGrid) {
             if (u.w < in.maxCellW || u.h < in.maxCellH + in.rowGap) why = kUtLayoutGridSmall;
@@ -1090,7 +1124,7 @@ inline UtMatPad utMatPadResolve(const UtLayoutInput& in, const UtLayout& lay,
     if (padmatUser) {
         if (lay.screen[kUtLayPad]) {
             m.padmatWhy = kUtMatWhyScreen;
-        } else if (!utRectInside(*padmatUser, in.plate)) {
+        } else if (!utRectInside(*padmatUser, in.pageForced ? in.partPlate : in.plate)) {
             m.padmatWhy = kUtMatWhyOutside;
         } else if (!utPadFit(*padmatUser, in.buttons, in.padGap, s, in.captionMax, in.widest,
                              in.widestCtx)
@@ -1192,6 +1226,9 @@ struct UtLayoutSource {
     // against the generated largest cell, the zoom is clamped per group instead (utZoomFit) -;
     // the layout plates do (utLayoutPlatesGrid: a zoom is a layout of its own).
     int zoom;
+    // 1 = the page is forced (uniquetab.ini's page= in force): a user pad or label is judged
+    // against the page together with the derived pad and label (UtLayoutInput::partPlate).
+    int pageForced;
 };
 
 // Builds the UtLayoutInput (the user rectangles land in `userStore`, which must outlive `in`) and
@@ -1213,6 +1250,10 @@ inline UtLayout utLayoutFromSource(const UtLayoutSource& src, UtLayoutInput* in,
     }
     I.def[kUtLayPad] = pad;
     I.def[kUtLayLabel] = utLabelDefault();
+    I.pageForced = src.pageForced ? 1 : 0;
+    I.partPlate = I.plate;
+    if (I.pageForced)
+        I.partPlate = utRectBound(utRectBound(I.plate, I.def[kUtLayPad]), I.def[kUtLayLabel]);
     const char* val[kUtLayParts] = {src.grid, src.pad, src.label};
     for (int p = 0; p < kUtLayParts; ++p)
         I.user[p] = (val[p] && utRectParse(val[p], &userStore[p])) ? &userStore[p] : nullptr;

@@ -367,6 +367,8 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
     std::size_t relicRare = 0, relicEpic = 0, relicLeg = 0, relicOther = 0, extras = 0;
     std::size_t unstorable = 0;
     std::string unstorableSample;
+    std::size_t undecodable = 0;
+    std::string undecodableFirst;
     ArzRecord rec;
     // One record through the rule. modLayer: a mod layer won it, so the mod rules apply - an
     // unknown class as "other" (Epic/Legendary only), and a classification catalogue.bin cannot
@@ -377,6 +379,12 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
         if (inList(key, kExtraExclude, sizeof kExtraExclude / sizeof *kExtraExclude)) return true;
         bool isExtra = inList(key, kExtraRecords, sizeof kExtraRecords / sizeof *kExtraRecords);
         if (!a.decode(e, rec)) {
+            // A mod layer never takes the whole view down for one unreadable record: it is
+            // skipped and counted (one warning below). A base-game record still fails.
+            if (modLayer) {
+                if (undecodable++ == 0) undecodableFirst = e.name + " in " + a.path();
+                return true;
+            }
             if (error) *error = "record " + e.name + " in " + a.path() + " does not decode";
             return false;
         }
@@ -447,6 +455,8 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
             }
         }
     }
+    if (undecodable)
+        warnings.push_back(undecodableText(undecodable, undecodableFirst));
     if (unstorable)
         warnings.push_back(std::to_string(unstorable) + " mod record(s) of a classification the "
                            "catalogue cannot store are skipped: " + unstorableSample +

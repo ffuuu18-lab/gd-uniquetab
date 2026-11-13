@@ -118,6 +118,8 @@ struct UiGeometry {
     int plateW = 438, plateH = 627;    // the cover texture's real pixel size
     int bmpX = 0, bmpY = 1;            // the cover's bitmapPositionX/Y (plate_gen translates by it)
     bool widePlate = false;            // the plate is the whole page (cover + a grid wider than it), not the cover
+    bool forced = false;               // the page is uniquetab.ini's page= (ForcedPage), not derived:
+                                       // every plate's ground is the flat fill
     std::string plate;                 // its bitmapName
     std::string tabStrip;              // "left" (vanilla) or "top" (both modded families)
     std::string note;                  // one line for the log
@@ -142,5 +144,26 @@ bool materialBoxPositions(const GameData& g, const ModView& mods,
                           std::vector<std::pair<int, int> >& out, std::string* error);
 bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
                     std::string* error);
+
+// uniquetab.ini's [layout] page = x,y,w,h: the page FORCED by the player, in the materials
+// window's own pixels at UI scale 1. Parsed by ut_layout.h's utPageParse (64 <= w,h <= 2048,
+// |x|,|y| <= 4096, y + h >= 108); `on` false = no key, the page is derived as before.
+struct ForcedPage {
+    bool on = false;
+    int x = 0, y = 0, w = 0, h = 0;
+    std::string text() const;   // "x,y,w,h", the stamp's page= value; empty when off
+};
+// False (and `out` off) when `value` is empty or does not parse.
+bool forcedPageParse(const std::string& value, ForcedPage& out);
+
+// The geometry of a FORCED page, with no check against the mod's caravan: the plate IS the page
+// (bmpX,bmpY,plateW,plateH = x,y,w,h), the grid is the page under the header band (x0 = x,
+// y0 = max(y, 76), to the page's right and bottom edge), widePlate whenever the page is not
+// exactly the materials cover's own rectangle (or that cover cannot be read). Fatal only what
+// the overlay itself needs: the materials window record and its box list (and a page that leaves
+// no grid under the band). The cover record, its texture, the stash anchor and the reagent boxes'
+// positions are not read for the page.
+bool forcedGeometry(const GameData& g, const ModView& mods, const ForcedPage& page,
+                    UiGeometry& out, std::string* error);
 
 } // namespace gen

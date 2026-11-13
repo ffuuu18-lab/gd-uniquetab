@@ -1348,6 +1348,13 @@ void layoutCompute(const LaySig& sig, LiveLayout* out) {
     src.bmpX = sig.bmpX;
     src.bmpY = sig.bmpY;
     src.bmpKnown = 1;
+    {   // page= in force: the derived pad and label may lie outside the forced page
+        UtRect fp;
+        char pg[sizeof(g_cfg.page)];
+        memcpy(pg, g_cfg.page, sizeof(pg));
+        pg[sizeof(pg) - 1] = 0;
+        src.pageForced = utPageParse(pg, &fp) ? 1 : 0;
+    }
     src.maxCellW = sig.maxCellW;
     src.maxCellH = sig.maxCellH;
     src.rowGap = sig.rowGap;

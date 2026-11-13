@@ -57,7 +57,9 @@ rem The collection is uniquetab\uniq-items.jsonl and the items it names are held
 rem private table - with the mod gone they are not in the game at all. tools\journal_guard.ps1
 rem exits 1 while that journal, or a custom game's own under mods\<name>\ (or the old
 rem views\custom-<name>\), still holds
-rem entries and no NEWER rescue-report.txt sits beside it.
+rem entries and no NEWER rescue-report.txt sits beside it, or while a backup of a journal is kept
+rem (uniq-items*.jsonl in a backup\ folder beside the journals: move backup\, and each
+rem mods\<name>\backup\, away by hand first).
 rem Use "undeploy.bat --force" to accept the loss.
 if defined FORCE (
     echo [undeploy] --force: skipping the collection check. Anything the mod still holds will be
@@ -78,7 +80,7 @@ rem yours - only its [unassigned] section is ever rewritten), uniquetab-groups.i
 rem yours: the mod never writes it), uniquetab-groups.ini.old* (an unedited copy an older build
 rem wrote, renamed), uniquetab-text.ini.old* (an older build's words, folded into the buttons file
 rem and renamed; uniquetab-text.ini itself is no longer written), the collection
-rem (uniq-items*.jsonl, their prune copies), the exports (uniq-export*.gds, uniq-export.csv),
+rem (uniq-items*.jsonl, their prune copies, the backups in backup\), the exports (uniq-export*.gds, uniq-export.csv),
 rem rescue-report.txt, uniquetab.log and its archives. Also kept, though the mod writes it:
 rem uniquetab.state (where the tab was left - the group, the row, the OWN filter; deleting it only
 rem resets that). So the folder is left in place holding them; delete it by hand when you are done.

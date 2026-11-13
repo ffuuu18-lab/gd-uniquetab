@@ -441,6 +441,15 @@ bool generatePlates(const GameData& g, const ModView* mods, const UiGeometry& ge
         rep.ground = line;
         ground.px.clear();
     }
+    // A FORCED PAGE (page=) is our lattice on our colour over that rectangle, on every view, the
+    // vanilla one included: its plates' ground is always the flat fill. Only the cover plate
+    // keeps its rule - what the stash cover holds under the page, else the fill.
+    if (geo.forced) {
+        if (!ground.px.empty() && ground.w == geo.plateW && ground.h == geo.plateH) under = ground;
+        ground.px.clear();
+        vanillaGround = false;
+        rep.ground += "; the page is forced (page=), so the plates' ground is the flat fill";
+    }
     // A MODDED GROUND IS A FLAT FILL - no pixel of the mod's art is copied. See plate_gen.h.
     if (!vanillaGround) {
         std::uint32_t rgb = 0;

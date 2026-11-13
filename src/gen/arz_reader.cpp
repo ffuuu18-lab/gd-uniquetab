@@ -249,8 +249,23 @@ bool ArzArchive::decode(const ArzEntry& e, ArzRecord& out) const {
     m_scratch.resize(e.csize);
     if (!m_file.readAt(std::uint64_t(24) + e.offset, e.csize, m_scratch.data())) return false;
     std::vector<std::uint8_t> raw(e.dsize);
-    if (!lz4BlockDecode(m_scratch.data(), e.csize, raw.data(), e.dsize)) return false;
+    // A record the packer could not shrink may be STORED: its csize equals its dsize and its
+    // bytes are the field stream itself, not an LZ4 block. Equal sizes alone prove nothing
+    // (a real LZ4 block can have them too), so LZ4 is tried first and the stored reading is
+    // taken only when LZ4 fails; the stored bytes must then walk as whole fields to the end.
+    bool stored = false;
+    if (!lz4BlockDecode(m_scratch.data(), e.csize, raw.data(), e.dsize)) {
+        if (e.csize != e.dsize) return false;
+        std::memcpy(raw.data(), m_scratch.data(), e.csize);
+        stored = true;
+    }
+    if (!walkFields(raw, stored, out)) { out.fields.clear(); return false; }
+    return true;
+}
+
+bool ArzArchive::walkFields(const std::vector<std::uint8_t>& raw, bool strict, ArzRecord& out) const {
     std::size_t p = 0, n = raw.size();
+    if (strict && (n == 0 || n % 4 != 0)) return false;
     while (p + 8 <= n) {
         ArzField f;
         f.type = rd16(raw.data() + p);
@@ -259,10 +274,15 @@ bool ArzArchive::decode(const ArzEntry& e, ArzRecord& out) const {
         p += 8;
         std::size_t end = p + std::size_t(count) * 4;
         if (end > n) return false;
+        // a stored block has no LZ4 framing to vouch for it: every field must be well formed
+        if (strict && (f.type > 3 || count == 0 || nameIdx >= m_strings.size())) return false;
         f.name = nameIdx < m_strings.size() ? m_strings[nameIdx] : "?" + std::to_string(nameIdx);
         f.raw.reserve(count);
         for (std::uint16_t i = 0; i < count; ++i) f.raw.push_back(rd32(raw.data() + p + i * 4));
         if (f.type == kFtString) {
+            if (strict)
+                for (std::uint32_t idx : f.raw)
+                    if (idx >= m_strings.size()) return false;
             f.strs.reserve(count);
             for (std::uint32_t idx : f.raw)
                 f.strs.push_back(idx < m_strings.size() ? m_strings[idx] : std::string());
@@ -270,7 +290,7 @@ bool ArzArchive::decode(const ArzEntry& e, ArzRecord& out) const {
         p = end;
         out.fields.push_back(std::move(f));
     }
-    return true;
+    return !strict || p == n;
 }
 
 // ---------------------------------------------------------------- ArzDatabase

@@ -116,6 +116,8 @@ void logSetFlushEachLine(int) {}
 #define INI_CUR "ini_version=" UT_STRV(UT_INI_VERSION) "\r\n"
 // zoom_pct's commented row (44): the first line of [layout] after its blurb, before the family lines.
 #define ZOOM_ROW ";zoom_pct=100\t\t\t; the item icons bigger, in percent (100..200): fewer per screen, the icons magnified\r\n"
+// page's commented row (45): right under zoom_pct's.
+#define PAGE_ROW ";page=\t\t\t\t; x,y,w,h forces the collection page and its background, in page pixels: x,y -4096..4096 (may be negative), w,h 64..2048, y+h at least 108; no mod check (next start)\r\n"
 
 static int g_fails = 0;
 static void check(bool ok, const char* what) {
@@ -542,7 +544,7 @@ static void zoomTests(const wchar_t* ini, const std::wstring& gameIni) {
         const size_t z = t.find("\r\n" ZOOM_ROW);
         const bool shaped = n > 0 && v != std::string::npos && z != std::string::npos;
         if (shaped) {
-            t.erase(z, strlen("\r\n" ZOOM_ROW) - 2);   // 43 had no zoom_pct row
+            t.erase(z, strlen("\r\n" ZOOM_ROW PAGE_ROW) - 2);   // 43 had no zoom_pct row (nor page)
             const size_t ks = t.find("\r\n[keys]\r\n"), ke = t.find("\r\n[advanced]\r\n");
             if (ks != std::string::npos && ke != std::string::npos && ks < ke) t.erase(ks, ke - ks);   // nor [keys]
             t.replace(v, 18, "\r\nini_version=43\r\n");
@@ -581,6 +583,50 @@ static void zoomTests(const wchar_t* ini, const std::wstring& gameIni) {
                     "vanilla; a game file that names none: %d (the default, not the main file's)",
                     inGame, inVanilla, unnamed);
         check(inGame == 175 && inVanilla == 120 && unnamed == 100, what);
+        writeText(ini, INI_CUR "[general]\r\nenabled=1\r\n");
+        ut::configReload(ini);
+    }
+    // PAGE (45): a hidden text row of [layout] right under zoom_pct; x,y,w,h with w,h 64..2048 and
+    // |x|,|y| <= 4096 (utPageParse) - anything else one WARN and no key; kept through a rewrite
+    {
+        int pi = -1;
+        for (int i = 0; i < ut::kUtCfgKeyCount; ++i)
+            if (!strcmp(ut::kUtCfgKeys[i].name, "page")) pi = i;
+        check(pi >= 0 && !strcmp(ut::kUtCfgKeys[pi].section, "layout") &&
+                  ut::kUtCfgKeys[pi].type == ut::kUtCfgStr && ut::kUtCfgKeys[pi].flags == ut::kUtCfgHidden &&
+                  ut::kUtCfgKeys[pi].check != nullptr && UtConfig().page[0] == 0,
+              "page is a hidden, checked text row of [layout], empty by default");
+        writeText(ini, INI_CUR "[layout]\r\npage=-503,70,941,936\r\n");
+        logClear();
+        ut::configReload(ini);
+        check(!strcmp(ut::g_cfg.page, "-503,70,941,936") && !logHas("page="), "page=-503,70,941,936 is taken");
+        static const char* const kBad[] = {"10,10,63,500", "10,10,500,2049", "4097,0,500,500",
+                                           "0,-4097,500,500", "1,2,300", "a,b,c,d", "1,2,300,400,5",
+                                           "0,-400,500,500"};
+        int refused = 0;
+        for (const char* b : kBad) {
+            writeText(ini, (std::string(INI_CUR "[layout]\r\npage=") + b + "\r\n").c_str());
+            logClear();
+            ut::configReload(ini);
+            if (ut::g_cfg.page[0] == 0 && logHas("config: page=") && logHas("- ignored")) ++refused;
+            else printf("    page=%s was not refused\n", b);
+        }
+        check(refused == int(sizeof(kBad) / sizeof(*kBad)), "eight bad values: each one WARN, no key");
+        // through the bump's rewrite: a 44 file holding a live page line keeps it, live, in its row
+        UtConfig c;
+        strcpy_s(c.page, "-503,70,941,936");
+        static char r[16384];
+        const size_t n = ut::configRender(r, sizeof(r), c);
+        std::string t(r, n);
+        const size_t v = t.find("\r\nini_version=" UT_STRV(UT_INI_VERSION) "\r\n");
+        const bool live = n > 0 && t.find("\r\npage=-503,70,941,936\t") != std::string::npos;
+        if (v != std::string::npos) t.replace(v, 18, "\r\nini_version=44\r\n");   // a 44 file
+        writeText(ini, t.c_str());
+        logClear();
+        ut::configReload(ini);
+        check(live && logHas("migrated from ini_version=44 to " UT_STRV(UT_INI_VERSION)) &&
+                  !strcmp(ut::g_cfg.page, "-503,70,941,936") && sameFile(ini, std::string(r, n).c_str()),
+              "a live page line is written live in its row and survives the 44 -> 45 rewrite byte for byte");
         writeText(ini, INI_CUR "[general]\r\nenabled=1\r\n");
         ut::configReload(ini);
     }
@@ -738,7 +784,7 @@ int main() {
     check(ut::configReload(ini), "the second reload parses it");
     check(logHas("4 of 4 settings are in the file"), "the self-check counts the visible keys only");
     check(!logHas("not in the file and use their default"), "and nags about nothing");
-    check(ut::g_cfg.iniVersion == UT_INI_VERSION && UT_INI_VERSION == 44, "ini_version is 44");
+    check(ut::g_cfg.iniVersion == UT_INI_VERSION && UT_INI_VERSION == 45, "ini_version is 45");
     {
         DWORD len = 0;
         char* text = readAll(ini, &len);
@@ -753,7 +799,7 @@ int main() {
         check(!strncmp(text, kHead, strlen(kHead)),
               "the header says what the file is, and names the buttons file and the groups file");
         static const char* const kGeneral =
-            "\r\nini_version=44\r\n"
+            "\r\nini_version=45\r\n"
             "\r\n[general]\r\n"
             "enabled=1                 ; 0 = the mod goes quiet: no tab, nothing new collected. Nothing is lost\r\n"
             "collect_mi=1              ; 1 = monster infrequents are collected, one roll per item; 0 = they are not, and the ones you stored stay in the collection, hidden until it is 1 again (from the next start)\r\n"
@@ -763,7 +809,7 @@ int main() {
             "; Where the item grid, the buttons and the label sit. The in-game editor writes these\r\n"
             "; lines: the EDIT button on the pad, or the editor_open chord of [keys] (Ctrl+right-click\r\n"
             "; unless you change it), opens the editor. Delete a line to get that part's default back.\r\n"
-            ZOOM_ROW
+            ZOOM_ROW PAGE_ROW
             "\r\n[keys]\r\n";
         check(strstr(text, kGeneral) != nullptr,
               "ini_version, [general] with the four keys, [layout] with its three comment lines (the EDIT button and the "
@@ -911,7 +957,7 @@ int main() {
     {
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(patch(text, "ini_version=44", "ini_version=38"), "pretend the file is one version old");
+        check(patch(text, "ini_version=45", "ini_version=38"), "pretend the file is one version old");
         writeAll(ini, text, len);
         free(text);
         logClear();
@@ -937,7 +983,7 @@ int main() {
         const char* kLine = "collect_mi=1              ; 1 = monster infrequents are collected, one roll per item; 0 = they are not, and the ones you stored stay in the collection, hidden until it is 1 again (from the next start)\r\n";
         std::string old39 = before;
         const size_t at = old39.find(kLine);
-        const size_t ver = old39.find("ini_version=44\r\n");
+        const size_t ver = old39.find("ini_version=45\r\n");
         check(at != std::string::npos && ver != std::string::npos,
               "the 44 file shows collect_mi=1 (the default) in [general], after enabled");
         if (at != std::string::npos && ver != std::string::npos) {
@@ -946,7 +992,7 @@ int main() {
             writeText(ini, old39.c_str());
             logClear();
             ut::configReload(ini);
-            check(logHas("migrated from ini_version=39 to 44"),
+            check(logHas("migrated from ini_version=39 to 45"),
                   "the 39 file migrates (its commented rows count as defaulted, as on any bump)");
             check(ut::g_cfg.collectMi == 1 && ut::g_cfg.tooltipMark == 0 &&
                       !strcmp(ut::g_cfg.logLevel, "warn") && !strcmp(ut::g_cfg.plateGround, "101010"),
@@ -987,7 +1033,7 @@ int main() {
                 return true;
             };
             bool ok = cutRow("\r\n;max_per_record=1\t") && cutRow("\r\n;rescue=0\t");
-            const size_t v = t.find("ini_version=44\r\n");
+            const size_t v = t.find("ini_version=45\r\n");
             ok = ok && v != std::string::npos;
             if (ok) t.replace(v, 14, "ini_version=40");
             const size_t en = t.find("\r\ncollect_mi=");
@@ -1006,7 +1052,7 @@ int main() {
         writeText(ini, atDefault.c_str());
         logClear();
         ut::configReload(ini);
-        check(logHas("migrated from ini_version=40 to 44") && ut::g_cfg.maxPerRecord == 1 &&
+        check(logHas("migrated from ini_version=40 to 45") && ut::g_cfg.maxPerRecord == 1 &&
                   ut::g_cfg.rescue == 0 && ut::g_cfg.tooltipMark == 0 && !strcmp(ut::g_cfg.logLevel, "warn"),
               "it migrates, every value kept");
         check(sameFile(ini, before.c_str()),
@@ -1015,7 +1061,7 @@ int main() {
         writeText(ini, set.c_str());
         logClear();
         ut::configReload(ini);
-        check(logHas("migrated from ini_version=40 to 44") && ut::g_cfg.maxPerRecord == 2 && ut::g_cfg.rescue == 1,
+        check(logHas("migrated from ini_version=40 to 45") && ut::g_cfg.maxPerRecord == 2 && ut::g_cfg.rescue == 1,
               "max_per_record=2 and rescue=1 in a 40 file: migrated, both kept");
         {
             DWORD l2 = 0;
@@ -1090,7 +1136,7 @@ int main() {
                      "; Where the item grid, the buttons and the label sit. The in-game editor writes these\r\n"
                      "; lines: the EDIT button on the pad, or the editor_open chord of [keys] (Ctrl+right-click\r\n"
                      "; unless you change it), opens the editor. Delete a line to get that part's default back.\r\n"
-                     ZOOM_ROW
+                     ZOOM_ROW PAGE_ROW
                      "grid_438x627=99,73,320,552\r\npad_438x627=98,27,320,44\r\nlabel_438x627=103,4,333,23\r\n"
                      "grid_974x659=46,218,928,374\r\npad_974x659=0,1,780,153\r\nlabel_974x659=428,165,317,23\r\n"
                      "\r\n[keys]\r\n") != nullptr,
@@ -1109,8 +1155,8 @@ int main() {
                      "collect_quick_pass, group_buttons"),
               "INFO: the 21 dropped/merged keys, named");
         check(!logHas("is not read from uniquetab.ini any more"), "no merge WARN: all were defaults");
-        check(logHas("19 setting(s) kept, 10 new one(s) defaulted"),
-              "19 rows kept; collect_mi (new in 40), edit_button (43), zoom_pct and the seven [keys] rows (44) defaulted");
+        check(logHas("19 setting(s) kept, 11 new one(s) defaulted"),
+              "19 rows kept; collect_mi (new in 40), edit_button (43), zoom_pct and the seven [keys] rows (44), page (45) defaulted");
         check(exists(state) && sameFile(state,
                                         "; uniquetab.state - written by the mod: where the tab was left in this game.\r\n"
                                         "; Not a setting: delete it to start on the materials page.\r\n"
@@ -1355,7 +1401,7 @@ int main() {
         }
         DWORD len = 0;
         char* text = readAll(ini, &len);
-        check(patch(text, "ini_version=44", "ini_version=38"), "pretend the file is one version old");
+        check(patch(text, "ini_version=45", "ini_version=38"), "pretend the file is one version old");
         writeAll(ini, text, len);
         free(text);
         logClear();
@@ -1422,7 +1468,7 @@ int main() {
         char* text = readAll(ini, &after);
         const char* tail =
             "default back.\r\n"
-            ZOOM_ROW
+            ZOOM_ROW PAGE_ROW
             "grid_438x627=105,120,333,460\r\n"
             "pad_438x627=102,30,320,80\r\n"
             "\r\n[keys]\r\n";
@@ -1723,7 +1769,7 @@ int main() {
         logClear();
         ut::configSetView("custom-reignofterror");
         check(logHas("mods\\reignofterror\\uniquetab.ini (no ini_version) migrated to a complete file, "
-                     "ini_version=44 - 4 setting(s) and 2 [layout] line(s) kept, every other value "
+                     "ini_version=45 - 4 setting(s) and 2 [layout] line(s) kept, every other value "
                      "copied once from the main uniquetab.ini"),
               "one INFO line for the game file");
         check(ut::g_cfg.plateLabelSize == 24 && !strcmp(ut::g_cfg.plateGround, "101010") &&
@@ -1913,7 +1959,7 @@ int main() {
         DWORD len = 0;
         char* text = readAll(ini, &len);
         check(strstr(text, "default back.\r\n"
-                           ZOOM_ROW
+                           ZOOM_ROW PAGE_ROW
                            "pad_438x627=102,30,320,80\r\n"
                            "pad_screen=tr,8,8,320,44\r\n"
                            "label_screen=TL , 12, 6, 317, 16\r\n"
@@ -1938,7 +1984,7 @@ int main() {
         {
             DWORD l2 = 0;
             char* t2 = readAll(ini, &l2);
-            check(patch(t2, "ini_version=44", "ini_version=38"), "pretend the file is one version old");
+            check(patch(t2, "ini_version=45", "ini_version=38"), "pretend the file is one version old");
             writeAll(ini, t2, l2);
             free(t2);
         }
@@ -2054,7 +2100,7 @@ int main() {
         {
             DWORD l = 0;
             char* t = readAll(ini, &l);
-            check(patch(t, "ini_version=44", "ini_version=43"), "pretend the remapped file is a 43 one");
+            check(patch(t, "ini_version=45", "ini_version=43"), "pretend the remapped file is a 43 one");
             writeAll(ini, t, l);
             free(t);
         }
@@ -2063,7 +2109,7 @@ int main() {
         {
             static char again[16384];
             const size_t n = ut::configRender(again, sizeof(again), ut::g_cfg);
-            check(logHas("migrated from ini_version=43 to 44") && n > 0 &&
+            check(logHas("migrated from ini_version=43 to 45") && n > 0 &&
                       sameFile(ini, std::string(again, n).c_str()) &&
                       hasText(ini, "\r\nbutton_next=Ctrl+F3\t\t; the button after it\r\n") &&
                       bindIs(ut::g_cfg.keys.buttonNext, kUtKeyKey, VK_F3, kUtKeyModCtrl),
@@ -2076,14 +2122,14 @@ int main() {
             const size_t kb = old43.find("\r\n[advanced]\r\n");
             const bool cut = ka != std::string::npos && kb != std::string::npos && ka < kb;
             if (cut) old43.erase(ka, kb - ka);
-            old43 = edit(edit(old43, "ini_version=44", "ini_version=43"), "tooltip_mark=1 ", "tooltip_mark=0 ");
+            old43 = edit(edit(old43, "ini_version=45", "ini_version=43"), "tooltip_mark=1 ", "tooltip_mark=0 ");
             check(cut && !old43.empty() && old43.find("rows_up") == std::string::npos,
                   "a 43 file: no [keys] section, tooltip_mark=0");
             writeText(ini, old43.c_str());
             logClear();
             ut::configReload(ini);
             const std::string want = edit(fresh, "tooltip_mark=1 ", "tooltip_mark=0 ");
-            check(logHas("migrated from ini_version=43 to 44") && logHas("4 setting(s) kept") &&
+            check(logHas("migrated from ini_version=43 to 45") && logHas("4 setting(s) kept") &&
                       sameFile(ini, want.c_str()) && ut::g_cfg.tooltipMark == 0 &&
                       !memcmp(&ut::g_cfg.keys, &d, sizeof(d)),
                   "rewritten once: the 44 template byte for byte, tooltip_mark=0 kept, the seven [keys] rows new and commented");

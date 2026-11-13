@@ -53,6 +53,12 @@ static const char* const kLogLevels[] = {"error", "warn", "info", "debug", "trac
      kUtCfgHidden, keyValueOk<action>}
 
 namespace {
+const char* pageValueOk(const char* value) {
+    UtRect r;
+    return utPageParse(value, &r) ? nullptr
+                                  : "not x,y,w,h (four whole numbers, w and h 64..2048, x and y "
+                                    "-4096..4096, y+h at least 108)";
+}
 const char* screenValueOk(const char* value) {
     UtScreenRect r;
     return utScreenRectParse(value, &r) ? nullptr
@@ -82,6 +88,10 @@ const UtCfgKey kUtCfgKeys[] = {
     // editor writes (absent until set) ---------------------------------------------------------
     UT_INT("layout", "zoom_pct", zoomPct, 100, 100, 200, UT_H | kUtCfgRefuse,
            "the item icons bigger, in percent (100..200): fewer per screen, the icons magnified"),
+    // page (45): the collection page forced - a hidden text row, checked by utPageParse
+    {"layout", "page", kUtCfgStr, 0, 0, 0, "", UT_OFF(page), UT_CAP(page), nullptr,
+     "x,y,w,h forces the collection page and its background, in page pixels: x,y -4096..4096 (may be negative), w,h 64..2048, y+h at least 108; no mod check (next start)",
+     UT_H, pageValueOk},
     UT_SCREEN("pad_screen", padScreen,
               "the buttons pinned to a screen corner: tl|tr|bl|br,x,y,w,h in page pixels"),
     UT_SCREEN("label_screen", labelScreen,

@@ -30,6 +30,7 @@
 #include <string.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -2089,6 +2090,112 @@ static int caseMain(const char* mode, const char* arg) {
         return g_fail ? 1 : 0;
     }
 
+    // ==== THE BACKUPS (1.2.1.2, the Titan Quest port's 1.1.3 section Q) ==========================
+    // <the journal's folder>\backup\<leaf>-<yyyymmdd-hhmmss>.jsonl: once per opening, before its
+    // first write, only of a file with rows; the newest 10 kept; the WARN at an empty open. Each
+    // set is a custom game's view (mods\<name>\uniq-items.jsonl); "opened again" is a switch to
+    // another view and back.
+    if (!strcmp(mode, "--case-backup")) {
+        if (!ut::journalInit(nullptr)) {
+            printf("  [FAIL] journalInit\n");
+            return 1;
+        }
+        const std::string base = ut::journalBaseDir();
+        auto logText = [&]() {
+            ut::logFlush();
+            std::string t;
+            slurp(narrowPath(log).c_str(), &t);
+            return t;
+        };
+        auto logMark = [&]() { return logText().size(); };
+        auto logHas = [&](size_t from, const char* what) {
+            const std::string t = logText();
+            int n = 0;
+            for (size_t at = t.find(what, from); at != std::string::npos; at = t.find(what, at + 1)) ++n;
+            return n;
+        };
+        auto backups = [&](const char* set) {   // every file named uniq-items-* there, by name
+            std::vector<std::string> v;
+            WIN32_FIND_DATAA fd;
+            const HANDLE h = FindFirstFileA((base + "\\mods\\" + set + "\\backup\\uniq-items-*").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) return v;
+            do v.push_back(fd.cFileName); while (FindNextFileA(h, &fd));
+            FindClose(h);
+            std::sort(v.begin(), v.end());
+            return v;
+        };
+        auto inBackup = [&](const char* set, const std::string& name) {
+            return base + "\\mods\\" + set + "\\backup\\" + name;
+        };
+        auto there = [](const std::string& p) { return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES; };
+        unsigned int seed = 0;
+        auto deposit = [&]() {
+            char rec[96];
+            _snprintf_s(rec, sizeof(rec), _TRUNCATE, "records/items/gearhead/q%03u_head.dbr", ++seed);
+            ut::UtReplicaCapture c;
+            fill(&c, rec, 1, 1);
+            bool rb = false;
+            return ut::journalDepositCommit(c, 1, &rb);
+        };
+        auto reopen = [&](const char* view) {
+            return ut::journalFollow(0, "custom-qz") && ut::journalFollow(0, view);
+        };
+        bool ok = ut::journalFollow(0, "custom-qd") && deposit();
+        check(ok && backups("qd").empty(), "backup: a set's first file: no backup (nothing was there)");
+        std::string one;
+        slurp(ut::journalPath(), &one);
+        ok = reopen("custom-qd") && deposit() && deposit();
+        std::vector<std::string> b = backups("qd");
+        std::string kept;
+        check(ok && b.size() == 1 && slurp(inBackup("qd", b[0]).c_str(), &kept) && kept == one,
+              "backup: the opened set's first write keeps the file as it was, its second write none");
+        if (!b.empty()) DeleteFileA(inBackup("qd", b[0]).c_str());
+        for (int i = 0; i < 10; ++i) {
+            char n[80];
+            _snprintf_s(n, sizeof(n), _TRUNCATE, "uniq-items-1000010%d-000000.jsonl", i);
+            spit(inBackup("qd", n).c_str(), one);
+        }
+        const std::string notes = inBackup("qd", "uniq-items-notes.jsonl");
+        spit(notes.c_str(), one);   // not a backup's name: never deleted
+        ok = reopen("custom-qd") && deposit();
+        b = backups("qd");
+        check(ok && b.size() == 11 && !there(inBackup("qd", "uniq-items-10000100-000000.jsonl")) &&
+                  there(inBackup("qd", "uniq-items-10000101-000000.jsonl")) && there(notes),
+              "backup: the 11th deletes the oldest; a file of another name in the folder stays");
+        const std::string emptyHeader = "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":0}\n";
+        CreateDirectoryA((base + "\\mods").c_str(), nullptr);
+        CreateDirectoryA((base + "\\mods\\qe").c_str(), nullptr);
+        spit((base + "\\mods\\qe\\uniq-items.jsonl").c_str(), emptyHeader);
+        ok = ut::journalFollow(0, "custom-qe") && deposit();
+        check(ok && backups("qe").empty(), "backup: a journal with no rows: no backup");
+        CreateDirectoryA((base + "\\mods\\qf").c_str(), nullptr);
+        CreateDirectoryA((base + "\\mods\\qf\\backup").c_str(), nullptr);
+        spit(inBackup("qf", "uniq-items-10000101-000000.jsonl").c_str(),
+             "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":25}\n");
+        spit((base + "\\mods\\qf\\uniq-items.jsonl").c_str(), emptyHeader);
+        size_t mark = logMark();
+        ok = ut::journalFollow(0, "custom-qf");
+        check(ok && ut::journalCount() == 0 && logHas(mark, "uniq-items.jsonl holds 0 row(s) and its newest backup") == 1 &&
+                  logHas(mark, "uniq-items-10000101-000000.jsonl holds 25 - if the collection was not emptied") == 1 &&
+                  logHas(mark, "in the collection twice") == 1,
+              "backup: an empty journal and a backup of 25 rows: one WARN at the open, nothing restored");
+        mark = logMark();
+        ok = ok && reopen("custom-qf");
+        check(ok && ut::journalCount() == 0 && logHas(mark, "its newest backup") == 0,
+              "backup: the same empty journal and backup opened again: no second WARN");
+        for (int i = 0; i < 10 && ok; ++i) ok = deposit();
+        spit(inBackup("qf", "uniq-items-10000102-000000.jsonl").c_str(),
+             "{\"journal\":\"grim dawn uniquetab\",\"format\":4,\"entries\":40}\n");
+        mark = logMark();
+        ok = ok && reopen("custom-qf");
+        check(ok && ut::journalCount() == 10 && logHas(mark, "its newest backup") == 0,
+              "backup: 10 rows and a backup of 40 (taken out since): no WARN");
+        ut::logFlush();
+        printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "ALL PASS", g_fail,
+               g_fail == 1 ? "" : "s");
+        return g_fail ? 1 : 0;
+    }
+
     // ==== THE FOLDER MOVE: views\ -> mods\ ====================================================
     // 1.2.0 kept a custom game's own files in views\custom-<leaf>\ and its /basemods variant's
     // generated set in views\basemods+custom-<leaf>\. The first start of this build renames them
@@ -2990,6 +3097,7 @@ static int mainBody(int argc, char** argv) {
          !strcmp(argv[1], "--dump-csv") || !strcmp(argv[1], "--case-gds") ||
          !strcmp(argv[1], "--case-gdsempty") || !strcmp(argv[1], "--dump-gds") ||
          !strcmp(argv[1], "--case-views") || !strcmp(argv[1], "--case-folders") ||
+         !strcmp(argv[1], "--case-backup") ||
          !strcmp(argv[1], "--store-row") ||
          // (m): a format-3 file as an installed mod writes it
          !strcmp(argv[1], "--case-v3upgrade"))) {

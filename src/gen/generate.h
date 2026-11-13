@@ -72,6 +72,11 @@ struct GenInputs {
     // a flip regenerates every view once. Default ON, as uniquetab.ini's default (collect_mi=1); the
     // DLL always sets it from the ini (ut_generate.cpp generationInputs).
     bool collectMi = true;
+    // uniquetab.ini's [layout] page (x,y,w,h; empty = none): the page FORCED, nothing of the
+    // caravan derived (ui_geometry.h forcedGeometry). A stamp input ("page=<x,y,w,h>" only while
+    // set, beside plate_ground's line), so a changed value regenerates the view once. A value that
+    // does not parse (the DLL has refused it already) is one warning and no page.
+    std::string page;
 };
 
 // Called once, after the decision to (re)generate and before any archive is read, so the caller

@@ -11,7 +11,9 @@
 #     says the mod still holds at
 #     least one item, or
 #   * rescue-report.txt is missing or OLDER than the journal (i.e. the last rescue run does
-#     not cover what the journal now contains).
+#     not cover what the journal now contains), or
+#   * a backup of a journal is kept (any uniq-items*.jsonl in a backup\ folder beside the
+#     journals).
 # Exit 0 = safe to uninstall.  It reads files and writes nothing.
 #
 # A journal is `uniq-items.jsonl` (softcore) or `uniq-items-hc.jsonl` (hardcore): JSON Lines,
@@ -402,6 +404,23 @@ foreach ($s in $sets) {
         $legacy = if ($s.Legacy) { Join-Path $s.Dir $m.Legacy } else { "" }
         $rc = Invoke-GuardOne ($m.Mode + $s.Label) (Join-Path $s.Dir $m.Journal) $legacy
         if ($rc -ne 0) { $verdict = 1 }
+    }
+    # The backups (backup\ beside the set's journals: the file as it was before a session's first
+    # write) are the player's data like the journals: any uniq-items*.jsonl there refuses.
+    $bdir = Join-Path $s.Dir "backup"
+    if (Test-Path -LiteralPath $bdir -PathType Container) {
+        try {
+            $baks = @(Get-ChildItem -LiteralPath $bdir -File -Force -ErrorAction Stop |
+                Where-Object { $_.Name -like "uniq-items*.jsonl" })
+        } catch {
+            Write-Host "[guard] REFUSE: the folder `"$bdir`" cannot be listed ($($_.Exception.Message))"
+            $verdict = 1
+            continue
+        }
+        if ($baks.Count -gt 0) {
+            Write-Host "[guard] REFUSE:$($s.Label) backup\ holds $($baks.Count) backup(s) of the collection - move them away by hand first"
+            $verdict = 1
+        }
     }
 }
 exit $verdict

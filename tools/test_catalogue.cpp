@@ -62,6 +62,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_set>
@@ -1228,6 +1229,229 @@ bool mirrorFiles(const std::string& src, const std::string& dst, const char* sub
 // generated, so its outputs go to a folder of their own and the start-up view's must not move.
 // The mod is read out of UNIQUETAB_TEST_MODS_DIR, never installed; the plates go to a scratch
 // override root, never to a game.
+// ---- a synthetic archive with STORED records (csize == dsize, the raw field stream) ----------
+// The writer the packers use (arz_writer) always emits an LZ4 block, so the stored case - one
+// record of Loot Ascension 1.4.5's archive - is built here by hand: v3 header, the record bodies
+// at 24, the record table, the string table. `bodies` are the field streams; `stored[i]` writes
+// body i as it is, else as a literals-only LZ4 block.
+struct RawRec {
+    std::string name;
+    std::vector<std::uint8_t> body;
+    bool stored;
+};
+void put16(std::vector<std::uint8_t>& o, unsigned v) { o.push_back(std::uint8_t(v)); o.push_back(std::uint8_t(v >> 8)); }
+void put32(std::vector<std::uint8_t>& o, std::uint32_t v) { for (int i = 0; i < 4; ++i) o.push_back(std::uint8_t(v >> (8 * i))); }
+std::vector<std::uint8_t> rawArz(const std::vector<RawRec>& recs, const std::vector<std::string>& strings) {
+    std::vector<std::uint8_t> data, table, strs;
+    for (const RawRec& r : recs) {
+        std::vector<std::uint8_t> blk;
+        if (r.stored) blk = r.body;
+        else gen::lz4BlockStoreLiterals(r.body.data(), r.body.size(), blk);
+        std::uint32_t nameIdx = 0;
+        for (std::size_t i = 0; i < strings.size(); ++i) if (strings[i] == r.name) nameIdx = std::uint32_t(i);
+        put32(table, nameIdx);
+        put32(table, 0);                            // no record type
+        put32(table, std::uint32_t(data.size()));   // offset, from byte 24
+        put32(table, std::uint32_t(blk.size()));
+        put32(table, std::uint32_t(r.body.size()));
+        put32(table, 0);
+        put32(table, 0);                            // mtime
+        data.insert(data.end(), blk.begin(), blk.end());
+    }
+    put32(strs, std::uint32_t(strings.size()));
+    for (const std::string& s : strings) {
+        put32(strs, std::uint32_t(s.size()));
+        strs.insert(strs.end(), s.begin(), s.end());
+    }
+    std::vector<std::uint8_t> out;
+    put16(out, 2);
+    put16(out, 3);
+    put32(out, std::uint32_t(24 + data.size()));
+    put32(out, std::uint32_t(table.size()));
+    put32(out, std::uint32_t(recs.size()));
+    put32(out, std::uint32_t(24 + data.size() + table.size()));
+    put32(out, std::uint32_t(strs.size()));
+    out.insert(out.end(), data.begin(), data.end());
+    out.insert(out.end(), table.begin(), table.end());
+    out.insert(out.end(), strs.begin(), strs.end());
+    return out;
+}
+// One string field: type 2, one value, the name's and the value's string indexes.
+void strField(std::vector<std::uint8_t>& body, std::uint32_t name, std::uint32_t value) {
+    put16(body, 2);
+    put16(body, 1);
+    put32(body, name);
+    put32(body, value);
+}
+bool writeFileBytes(const std::string& path, const std::vector<std::uint8_t>& b) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) return false;
+    const bool ok = std::fwrite(b.data(), 1, b.size(), f) == b.size();
+    std::fclose(f);
+    return ok;
+}
+int countFiles(const std::string& pattern) {
+    int n = 0;
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern.c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do ++n; while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    return n;
+}
+void deleteFiles(const std::string& dir, const char* pattern) {
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA((dir + "\\" + pattern).c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do DeleteFileA((dir + "\\" + fd.cFileName).c_str()); while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+}
+std::string readTextFile(const std::string& p) {
+    std::vector<std::uint8_t> b;
+    readAll(p, b);
+    return std::string(b.begin(), b.end());
+}
+
+// THE STORED RECORD AND THE FORCED PAGE (1.2.1.2). Part 1: a stored record reads back, a stored
+// block of garbage fails, and a mod layer's undecodable record is skipped with ONE warning. Part 2:
+// a forced page (page=) on the vanilla view - the P line, the plates of the page's size on the
+// flat fill, the cover plate, the frame naming uniq_cover.dbr, the stamp's page= line, a second
+// value regenerating - and a derivation that fails without page= (a synthetic mod whose cover
+// texture does not exist) generating with it.
+void storedAndForcedPass(const std::string& game, const std::string& root,
+                         const std::function<void(bool, const char*)>& check) {
+    // ---- part 1: the reader
+    const std::string bmod = root + "\\brokencover";
+    CreateDirectoryA(bmod.c_str(), nullptr);
+    CreateDirectoryA((bmod + "\\database").c_str(), nullptr);
+    const std::vector<std::string> strs = {
+        "records/items/lootchests/levelequationdefault.dbr", "records/test/stored_garbage.dbr",
+        "records/ui/caravan/caravan_materialcoverimage.dbr", "templateName",
+        "database/templates/fixeditemlevelequation.tpl", "equation", "1*1", "bitmapName",
+        "ui/caravan/no_such_cover.tex", "database/templates/ingameui/bitmapsingle.tpl"};
+    RawRec stored{strs[0], {}, true};
+    strField(stored.body, 3, 4);
+    strField(stored.body, 5, 6);   // 24 bytes, as the real one
+    RawRec garbage{strs[1], std::vector<std::uint8_t>(24, 0xFF), true};
+    RawRec cover{strs[2], {}, false};
+    strField(cover.body, 3, 9);
+    strField(cover.body, 7, 8);
+    const std::string arzPath = bmod + "\\database\\brokencover.arz";
+    check(writeFileBytes(arzPath, rawArz({stored, garbage, cover}, strs)), "the synthetic archive is written");
+    {
+        gen::ArzArchive a;
+        std::string err;
+        gen::ArzRecord r;
+        const gen::ArzEntry* e1 = a.load(arzPath, &err) ? a.entry(strs[0]) : nullptr;
+        const gen::ArzEntry* e2 = a.entry(strs[1]);
+        const bool s1 = e1 && e1->csize == 24 && e1->dsize == 24 && a.decode(*e1, r) &&
+                        r.str("templateName") == strs[4] && r.str("equation") == "1*1";
+        check(s1, "a STORED record (csize == dsize == 24, the raw field stream) reads back, both fields");
+        check(e2 && !a.decode(*e2, r) && r.fields.empty(), "a stored block of garbage still fails");
+        const gen::ArzEntry* e3 = a.entry(strs[2]);
+        check(e3 && a.decode(*e3, r) && r.str("bitmapName") == strs[8], "an LZ4 record beside them reads as before");
+    }
+    gen::ViewSpec bv;
+    bv.customDir = bmod;
+    const std::string bview = root + "\\views\\custom-brokencover";
+    const std::string bplates = root + "\\plateroot-brokencover";
+    CreateDirectoryA(bview.c_str(), nullptr);
+    CreateDirectoryA(bplates.c_str(), nullptr);
+    deleteFiles(bplates, "uniq_plate_*.tex");
+    DeleteFileA((bview + "\\catalogue.stamp").c_str());
+    gen::GenReport br;
+    gen::GenInputs bin;
+    const bool bok = gen::ensureOutputsGuarded(game, bview, bview + "\\uniq-pages.arz", bplates, "EN", "",
+                                               br, nullptr, nullptr, &bv, &bin);
+    std::printf("[test] forced: brokencover without page= - %s\n", bok ? "generated" : br.error.c_str());
+    check(!bok && br.error.find("cannot read the pixel size of the cover") != std::string::npos,
+          "without page= the synthetic mod's view fails: its cover texture does not exist");
+    // ... and with it
+    bin.page = "-40,0,520,700";
+    gen::GenReport fr;
+    const bool fok = gen::ensureOutputsGuarded(game, bview, bview + "\\uniq-pages.arz", bplates, "EN", "",
+                                               fr, nullptr, nullptr, &bv, &bin);
+    int undec = 0;
+    for (const std::string& w : fr.warnings) {
+        std::printf("[test] forced: brokencover warning: %s\n", w.c_str());
+        if (w.find("mod record(s) that do not decode are skipped") != std::string::npos) {
+            ++undec;
+            if (w.find("1 mod record(s)") != 0 || w.find("stored_garbage.dbr") == std::string::npos) undec += 10;
+        }
+    }
+    std::printf("[test] forced: brokencover with page=%s - %s; %s\n", bin.page.c_str(),
+                fok ? "generated" : fr.error.c_str(), fr.geometry.c_str());
+    check(fok && fr.generated && fr.geometry.find("page FORCED by page=-40,0,520,700") != std::string::npos,
+          "with page= the same view generates: nothing of its caravan is derived");
+    check(undec == 1, "the mod's undecodable record is skipped: ONE warning, the count and the first name");
+    {
+        gen::ArzArchive a;
+        std::string err;
+        gen::ArzRecord cr, fr2;
+        const gen::ArzEntry* ce = a.load(bview + "\\uniq-pages.arz", &err) ? a.entry("records/ui/caravan/uniq_cover.dbr") : nullptr;
+        const gen::ArzEntry* fe = a.entry("records/ui/caravan/uniq_frame.dbr");
+        check(ce && a.decode(*ce, cr) && fe && a.decode(*fe, fr2) &&
+                  fr2.str("TransferPlate") == "records/ui/caravan/uniq_cover.dbr" &&
+                  cr.str("bitmapName") == "ui/caravan/uniq_plate_cover_520x700_brokencover.tex" &&
+                  cr.i32("bitmapPositionX") == -40 && cr.i32("bitmapPositionY") == 0 &&
+                  cr.str("templateName") == strs[9],
+              "the frame names uniq_cover.dbr: the page's plate at -40,0, the cover record's other fields kept");
+    }
+
+    // ---- part 2: a forced page on the VANILLA view
+    const std::string fdir = root + "\\forced";
+    const std::string fplates = root + "\\plateroot-forced";
+    CreateDirectoryA(fdir.c_str(), nullptr);
+    CreateDirectoryA(fplates.c_str(), nullptr);
+    deleteFiles(fplates, "uniq_plate_*.tex");
+    DeleteFileA((fdir + "\\catalogue.stamp").c_str());
+    gen::GenInputs vin;
+    vin.page = "-60,1,560,700";
+    gen::GenReport vr;
+    const bool vok = gen::ensureOutputsGuarded(game, fdir, fdir + "\\uniq-pages.arz", fplates, "EN", "",
+                                               vr, nullptr, nullptr, nullptr, &vin);
+    std::printf("[test] forced: vanilla page=%s - %s; %s\n", vin.page.c_str(), vok ? "generated" : vr.error.c_str(),
+                vr.geometry.c_str());
+    std::printf("[test] forced: %s\n[test] forced: %s\n", vr.plates.c_str(), vr.plateGround.c_str());
+    const std::string groups = readTextFile(fdir + "\\uniq-groups.txt");
+    const std::size_t pl = groups.find("\nP\t");
+    const std::string pline = pl == std::string::npos ? std::string() : groups.substr(pl + 1, groups.find('\r', pl + 1) - pl - 1);
+    std::printf("[test] forced: %s\n", pline.c_str());
+    check(vok && pline.find("P\t-60\t76\t560\t625\t560\t700\t") == 0,
+          "the P line: the grid -60,76 560x625 under the band, the plate 560x700 (its position follows: -60,1)");
+    const int lattice = countFiles(fplates + "\\uniq_plate_*x*_560x700.tex");
+    const int coverPlate = countFiles(fplates + "\\uniq_plate_cover_560x700.tex");
+    std::printf("[test] forced: %d lattice plate(s) of 560x700, %d cover plate\n", lattice, coverPlate);
+    check(lattice == kVanillaPlates && coverPlate == 1, "plates of the page's size (the six cells) and its cover plate");
+    check(vr.plateGround.find("a flat") != std::string::npos,
+          "a forced page's ground is the flat fill, on the vanilla view too (the derived vanilla view fills nothing)");
+    {
+        gen::ArzArchive a;
+        std::string err;
+        gen::ArzRecord fr2;
+        const gen::ArzEntry* fe = a.load(fdir + "\\uniq-pages.arz", &err) ? a.entry("records/ui/caravan/uniq_frame.dbr") : nullptr;
+        check(fe && a.decode(*fe, fr2) && fr2.str("TransferPlate") == "records/ui/caravan/uniq_cover.dbr",
+              "the vanilla frame record names uniq_cover.dbr");
+    }
+    const std::string st1 = readTextFile(fdir + "\\catalogue.stamp");
+    check(st1.find("\npage=-60,1,560,700\n") != std::string::npos, "the stamp carries page=-60,1,560,700");
+    gen::GenReport same;
+    gen::ensureOutputsGuarded(game, fdir, fdir + "\\uniq-pages.arz", fplates, "EN", "", same, nullptr, nullptr,
+                              nullptr, &vin);
+    vin.page = "-60,1,560,640";
+    gen::GenReport v2;
+    const bool v2ok = gen::ensureOutputsGuarded(game, fdir, fdir + "\\uniq-pages.arz", fplates, "EN", "", v2,
+                                                nullptr, nullptr, nullptr, &vin);
+    std::printf("[test] forced: page=%s - %s (%s)\n", vin.page.c_str(), v2ok ? "generated" : v2.error.c_str(),
+                v2.reason.c_str());
+    check(same.upToDate && v2ok && !v2.upToDate && v2.generated &&
+              v2.reason.find("the forced page changed (page=-60,1,560,700 -> -60,1,560,640)") == 0 &&
+              readTextFile(fdir + "\\catalogue.stamp").find("\npage=-60,1,560,640\n") != std::string::npos,
+          "the same value is up to date; a second value regenerates once");
+}
+
 int viewPass(const std::string& root) {
     const char* mdir = std::getenv("UNIQUETAB_TEST_MODS_DIR");
     if (!mdir || !*mdir) {
@@ -1573,6 +1797,8 @@ int viewPass(const std::string& root) {
                   "the custom view's stamp carries the tagged-plates line");
         }
     }
+
+    storedAndForcedPass(game, root, check);   // 1.2.1.2: the stored record, the forced page
 
     // A custom game that leaves records/ui/caravan alone needs no view of its own: the
     // start-up view already describes its caravan. The Crucible is that case and it ships

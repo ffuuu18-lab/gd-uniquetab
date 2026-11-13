@@ -95,6 +95,13 @@ gen::GenInputs generationInputs(HMODULE selfModule, const gen::ViewSpec& spec) {
     in.journals.push_back(base + "\\uniq-items.jsonl");
     in.journals.push_back(base + "\\uniq-items-hc.jsonl");
     in.collectMi = g_cfg.collectMi != 0;
+    // page= of the view's settings file (read after configSetView, like collect_mi): the page
+    // forced, a stamp input, so a changed value regenerates this view once; the parser has
+    // already refused a bad value (one WARN), which leaves the member empty
+    char page[sizeof(g_cfg.page)];
+    memcpy(page, g_cfg.page, sizeof(page));
+    page[sizeof(page) - 1] = 0;
+    in.page = page;
     return in;
 }
 

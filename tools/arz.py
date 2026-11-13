@@ -138,10 +138,46 @@ class ArzArchive:
         self._cache[key] = rec
         return rec
 
-    def _decode(self, entry: ArzRecordEntry) -> Dict[str, object]:
+    def raw_block(self, entry: ArzRecordEntry):
+        """The record's field stream and whether it was STORED.
+
+        A record the packer could not shrink may be stored (csize == dsize, the raw field
+        stream). Equal sizes alone prove nothing, so LZ4 is tried first; a stored block must
+        walk as whole, well-formed fields to its last byte (the twin of ArzArchive::decode).
+        Every reader of record blocks in tools\\ goes through here."""
         start = 24 + entry.offset
-        raw = lz4.block.decompress(self._blob[start:start + entry.csize],
-                                   uncompressed_size=entry.dsize)
+        block = self._blob[start:start + entry.csize]
+        try:
+            raw = lz4.block.decompress(block, uncompressed_size=entry.dsize)
+            if len(raw) != entry.dsize:
+                raise ValueError("short LZ4 block")
+            return raw, False
+        except Exception:
+            if entry.csize != entry.dsize:
+                raise
+        raw = bytes(block)
+        if not self._stored_walks(raw):
+            raise ValueError("%s: stored record does not walk" % entry.name)
+        return raw, True
+
+    def _stored_walks(self, raw: bytes) -> bool:
+        n = len(raw)
+        if n == 0 or n % 4:
+            return False
+        p = 0
+        while p + 8 <= n:
+            ftype, count, name_idx = struct.unpack_from("<HHI", raw, p)
+            start = p + 8
+            p = start + 4 * count
+            if p > n or ftype > 3 or count == 0 or name_idx >= len(self.strings):
+                return False
+            if ftype == 2 and any(i >= len(self.strings)
+                                  for i in struct.unpack_from("<%dI" % count, raw, start)):
+                return False
+        return p == n
+
+    def _decode(self, entry: ArzRecordEntry) -> Dict[str, object]:
+        raw, _stored = self.raw_block(entry)
         out: Dict[str, object] = {}
         strings = self.strings
         p = 0

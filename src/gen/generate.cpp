@@ -211,6 +211,15 @@ std::string stampMismatch(const std::string& old, const std::string& now) {
     if (was != is)
         return "catalogue.stamp does not match: it is \"" + was + "\" and this build writes \"" +
                is + "\" (the mod was updated)";
+    // the forced page (uniquetab.ini's page=) is the one stamp line a player edits by hand
+    auto pageOf = [](const std::string& s) {
+        const std::size_t at = s.find("\npage=");
+        return at == std::string::npos ? std::string() : s.substr(at + 6, s.find('\n', at + 1) - at - 6);
+    };
+    const std::string pw = pageOf(old), pn = pageOf(now);
+    if (pw != pn)
+        return "the forced page changed (page=" + (pw.empty() ? std::string("none") : pw) + " -> " +
+               (pn.empty() ? std::string("none") : pn) + ")";
     return "catalogue.stamp does not match the game files (the game was updated)";
 }
 
@@ -322,6 +331,13 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
     // collect_mi: a line only while it is on, so a flag-off stamp is byte for byte the one an
     // earlier build wrote (no regeneration for it) and a flip either way regenerates once.
     if (in.collectMi) extra += "collect_mi=1\n";
+    // page: the forced page, a line only while set (beside plate_ground's), canonical x,y,w,h
+    ForcedPage forced;
+    if (!in.page.empty() && !forcedPageParse(in.page, forced))
+        report.warnings.push_back("page=" + in.page + " is not x,y,w,h with w and h 64..2048, x and y "
+                                  "-4096..4096, y+h at least 108 - "
+                                  "the page is derived from the database");
+    if (forced.on) extra += "page=" + forced.text() + "\n";
     {
         const utg::MergeStats& ms = groupsLoad.stats;
         if (groupsLoad.from == utg::GroupsFile::Loaded) {
@@ -404,6 +420,7 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
     gin.set = &groupSet;
     gin.viewKeys = utg::viewKeysFor(v.name());
     gin.plateTag = v.tag();
+    gin.page = forced;
     // the groups' monster-infrequent blocks ([view:collect_mi], ut_groups_default.h) are on only
     // with the flag: off, no MI is in the catalogue and no block pages one (a stored one waits in
     // the journal, counted below and on the label)
@@ -497,10 +514,9 @@ bool ensureOutputs(const std::string& gameDir, const std::string& modDir,
     report.geometry = po.geo.note;   // names the record the origin came from, for a modded view
     if (prep.painted) {
         std::snprintf(line, sizeof line,
-                      "%zu cover plate(s) painted, %zu written to \"%s\", %zu already current; %s",
-                      prep.painted, plates.written, plateDir.c_str(), plates.same,
-                      prep.ground.c_str());
-        report.plates = line;
+                      "%zu cover plate(s) painted, %zu written to \"%s\", %zu already current; ",
+                      prep.painted, plates.written, plateDir.c_str(), plates.same);
+        report.plates = line + prep.ground;   // the ground's note is not cut
         report.plateGround = prep.fill;   // empty on the vanilla view: nothing is filled there
     }
     for (const std::string& w : prep.warnings) report.warnings.push_back(w);
@@ -756,6 +772,8 @@ bool planLayoutPlates(const std::string& outDir, const LayoutGrid& grid,
     std::sort(plan.cells.begin(), plan.cells.end(), [](const CellGrid& a, const CellGrid& b) {
         return a.cellW != b.cellW ? a.cellW < b.cellW : a.cellH < b.cellH;
     });
+    // a forced page (the stamp's page= line) keeps the flat ground on the user grid's plates too
+    plan.geo.forced = stamp.find("\npage=") != std::string::npos;
     plan.geo.x0 = grid.x;
     plan.geo.y0 = grid.y;
     plan.geo.usableW = grid.w;

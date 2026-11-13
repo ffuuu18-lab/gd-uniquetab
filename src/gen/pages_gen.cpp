@@ -183,8 +183,14 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
     if (!rules) return false;
 
     // The grid rectangle and the plate are read out of the merged database, not compiled in.
-    if (!(mods ? deriveGeometry(g, *mods, out.geo, error)
-               : deriveGeometry(g, out.geo, error))) return false;
+    // ... unless the player forces the page (page=): then nothing of the caravan is derived.
+    if (groupsIn && groupsIn->page.on) {
+        static const ModView kNone;
+        if (!forcedGeometry(g, mods ? *mods : kNone, groupsIn->page, out.geo, error)) return false;
+    } else if (!(mods ? deriveGeometry(g, *mods, out.geo, error)
+                      : deriveGeometry(g, out.geo, error))) {
+        return false;
+    }
 
     // The materials window the engine will build, mod layer included: its fields are what the
     // frame and every page copy, so the frame follows a mod that MOVES the page
@@ -385,8 +391,22 @@ bool generatePages(const GameData& g, const std::vector<CatalogueItem>& items,
     if (out.geo.widePlate) {
         ArzRecord crec;
         if (!merged(g, mods, van.str("TransferPlate").c_str(), crec)) {
-            if (error) *error = "the materials page has no readable TransferPlate record";
-            return false;
+            if (!out.geo.forced) {
+                if (error) *error = "the materials page has no readable TransferPlate record";
+                return false;
+            }
+            // A forced page needs no cover of the mod's: the base game's cover record's fields,
+            // else the minimal set (the template, then the three fields written below).
+            ArzRecord bw;
+            if (!(g.db->get(kMaterialWindow, bw) && g.db->get(bw.str("TransferPlate"), crec))) {
+                crec.fields.clear();
+                ArzField t;
+                t.name = "templateName";
+                t.type = kFtString;
+                t.strs.push_back("database/templates/ingameui/bitmapsingle.tpl");
+                t.raw.push_back(0);
+                crec.fields.push_back(t);
+            }
         }
         std::vector<ArzOutField> cf;
         for (const ArzField& f : crec.fields) {

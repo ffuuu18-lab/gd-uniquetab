@@ -4,8 +4,9 @@
 //
 // See ut_rescue.h for why this exists. Everything in this file is plain Win32 file I/O; the
 // engine half of the rescue (the take-path mirror) lives in ut_reagent.cpp.  The mod writes
-// only its own files here (uniq-items*.jsonl, the exports, the copies aside), always whole and
-// always atomically; the game's own save files are never touched.
+// only its own files here (uniq-items*.jsonl, the exports, the copies aside, the backups in
+// backup\ beside the journal), always whole and always atomically; the game's own save files are
+// never touched.
 //
 // ===== uniq-items.jsonl, format 2 - ONE HUMAN-READABLE FILE ===================================
 //
@@ -149,6 +150,7 @@
 #include "ut_rescue.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <algorithm>
@@ -339,6 +341,9 @@ long g_indexAuditRuns = 0;
 long g_indexAuditFails = 0;
 char g_indexAuditWhy[256] = {0};
 char g_path[MAX_PATH] = {0};      // <journal dir>\uniq-items.jsonl - THE journal
+// The journal's name without ".jsonl" (uniq-items, uniq-items-hc): the backups' leaf. Set with
+// g_path (composePaths), under g_cs.
+char g_leaf[64] = {0};
 char g_reportPath[MAX_PATH] = {0};
 // The resolved journal folder, kept so the three paths can be re-composed when the
 // mode switches, and the mode itself - 0 the softcore names, 1 the `-hc` ones. See ut_rescue.h.
@@ -579,6 +584,128 @@ void stampNow(char* out, size_t cap) {
     GetLocalTime(&st);
     _snprintf_s(out, cap, _TRUNCATE, "%04u%02u%02u-%02u%02u%02u", st.wYear, st.wMonth, st.wDay,
                 st.wHour, st.wMinute, st.wSecond);
+}
+
+// ---- the backups --------------------------------------------------------------------------------
+// <the journal's folder>\backup\<leaf>-<yyyymmdd-hhmmss>.jsonl (local time, as the .bad- stamp):
+// once per opening of a journal (journalInit, and each mode or view switch), before its first
+// write replaces the file, the file as it is on disk (never one with no rows). The newest
+// kBackupsKept of the leaf stay; only a name of exactly that shape is ever deleted. A backup never
+// blocks a write: whatever fails is one WARN. Nothing is ever restored by the mod.
+const int kBackupsKept = 10;
+bool g_backupDue = false;   // caller holds g_cs
+
+// The open journal's backup folder.
+bool backupDir(char* out, size_t cap) {
+    out[0] = 0;
+    const char* slash = strrchr(g_path, '\\');
+    if (!slash) return false;
+    return _snprintf_s(out, cap, _TRUNCATE, "%.*s\\backup", (int)(slash - g_path), g_path) > 0;
+}
+
+// True when `name` is exactly <leaf>-<8 digits>-<6 digits>.jsonl.
+bool backupNamed(const char* name, const char* leaf) {
+    const size_t n = strlen(leaf);
+    if (strncmp(name, leaf, n) != 0 || name[n] != '-') return false;
+    const char* d = name + n + 1;
+    for (int i = 0; i < 15; ++i)
+        if (i == 8 ? d[i] != '-' : (d[i] < '0' || d[i] > '9')) return false;
+    return strcmp(d + 15, ".jsonl") == 0;
+}
+
+// The backups of `leaf` in `dir`: how many, and the oldest and newest names (the stamp orders
+// them). No allocation.
+int scanBackups(const char* dir, const char* leaf, char* oldest, char* newest) {
+    oldest[0] = newest[0] = 0;
+    char glob[MAX_PATH];
+    if (_snprintf_s(glob, sizeof(glob), _TRUNCATE, "%s\\%s-*.jsonl", dir, leaf) < 0) return 0;
+    WIN32_FIND_DATAA fd;
+    const HANDLE h = FindFirstFileA(glob, &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    int n = 0;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || !backupNamed(fd.cFileName, leaf)) continue;
+        ++n;
+        if (!oldest[0] || strcmp(fd.cFileName, oldest) < 0) strcpy_s(oldest, MAX_PATH, fd.cFileName);
+        if (!newest[0] || strcmp(fd.cFileName, newest) > 0) strcpy_s(newest, MAX_PATH, fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return n;
+}
+
+// Caller holds g_cs: the file on disk has rows and this opening has not replaced it yet.
+void backupBeforeWrite() {
+    char dir[MAX_PATH], bak[MAX_PATH], stamp[32];
+    stampNow(stamp, sizeof(stamp));
+    if (!backupDir(dir, sizeof(dir)) ||
+        strlen(dir) + 1 + strlen(g_leaf) + 1 + strlen(stamp) + strlen(".jsonl") >= MAX_PATH) {
+        logW("journal: no backup of %s this session - the backup's path would be over the %d "
+             "characters the game's file calls allow",
+             g_path, MAX_PATH - 1);
+        return;
+    }
+    _snprintf_s(bak, sizeof(bak), _TRUNCATE, "%s\\%s-%s.jsonl", dir, g_leaf, stamp);
+    CreateDirectoryA(dir, nullptr);   // there already: fine
+    if (!CopyFileA(g_path, bak, TRUE)) {
+        const DWORD e = GetLastError();
+        logW("journal: the backup %s could NOT be made (error %lu) - the journal is written all the "
+             "same", bak, e);
+        return;
+    }
+    logI("journal: the file as it was is kept as %s", bak);
+    char oldest[MAX_PATH], newest[MAX_PATH];
+    for (int i = 0; i < 64 && scanBackups(dir, g_leaf, oldest, newest) > kBackupsKept; ++i) {
+        char old[MAX_PATH];
+        _snprintf_s(old, sizeof(old), _TRUNCATE, "%s\\%s", dir, oldest);
+        if (!DeleteFileA(old)) break;
+    }
+}
+
+// The "entries" of a journal's header (its first line, read from the first 1 KB).
+bool headerEntries(const char* path, unsigned int* entries) {
+    const HANDLE h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    char buf[1024];
+    DWORD got = 0;
+    const BOOL r = ReadFile(h, buf, sizeof(buf) - 1, &got, nullptr);
+    CloseHandle(h);
+    if (!r) return false;
+    buf[got] = 0;
+    if (char* nl = strchr(buf, '\n')) *nl = 0;
+    const char* e = strstr(buf, "\"entries\":");
+    if (!e || e[10] < '0' || e[10] > '9') return false;
+    *entries = (unsigned int)strtoul(e + 10, nullptr, 10);
+    return true;
+}
+
+// At the open (caller holds g_cs): one WARN when the journal read no rows and its newest backup
+// holds some, once per backup in a process. A journal with rows is never warned about: a backup
+// is the file at a session's start, so the takes since then explain any shrink.
+char g_backupSaid[MAX_PATH] = {};   // the backup the WARN last named
+void sayIfSmallerThanBackup(size_t rows) {
+    char dir[MAX_PATH], oldest[MAX_PATH], newest[MAX_PATH], bak[MAX_PATH];
+    if (rows || !backupDir(dir, sizeof(dir)) || !scanBackups(dir, g_leaf, oldest, newest)) return;
+    unsigned int held = 0;
+    if (_snprintf_s(bak, sizeof(bak), _TRUNCATE, "%s\\%s", dir, newest) < 0 || !headerEntries(bak, &held))
+        return;
+    if (held == 0 || strcmp(bak, g_backupSaid) == 0) return;
+    _snprintf_s(g_backupSaid, sizeof(g_backupSaid), _TRUNCATE, "%s", bak);
+    logW("***** journal: %s holds 0 row(s) and its newest backup %s holds %u - if the collection "
+         "was not emptied by taking items out, close the game and copy that backup over the "
+         "journal; every item taken out since that backup would then be in the collection twice "
+         "(the mod never restores one itself) *****",
+         g_path, bak, held);
+}
+
+// After an open's read (journalInit, journalFollow): the WARN above, and whether this opening's
+// first write keeps the file as it was. Takes g_cs.
+void backupAtOpen() {
+    EnterCriticalSection(&g_cs);
+    const size_t rowsRead = g_entries ? g_entries->size() : 0;
+    if (!InterlockedCompareExchange(&g_readOnly, 0, 0)) sayIfSmallerThanBackup(rowsRead);
+    g_backupDue = rowsRead > 0;   // the file on disk has rows: kept before the first write
+    LeaveCriticalSection(&g_cs);
 }
 
 // ---- the text writer -------------------------------------------------------------------------
@@ -934,6 +1061,10 @@ void buildText(const std::vector<Entry>& entries, std::string* out) {
 
 bool writeFile() {
     if (!g_entries || !g_path[0]) return false;
+    if (g_backupDue) {
+        g_backupDue = false;
+        backupBeforeWrite();
+    }
     // The one-shot "the file we read was not clean" rule: copy it aside BEFORE the first
     // overwrite, so a user who mangled one line can get the original back. Best effort - a
     // failed copy must never stop the journal being written.
@@ -2031,6 +2162,7 @@ bool fileExists(const char* path) {
 void composePaths(const char* dir, int mode) {
     const char* suffix = mode == 1 ? "-hc" : "";
     _snprintf_s(g_path, sizeof(g_path), _TRUNCATE, "%s\\uniq-items%s.jsonl", dir, suffix);
+    _snprintf_s(g_leaf, sizeof(g_leaf), _TRUNCATE, "uniq-items%s", suffix);
     _snprintf_s(g_csvPath, sizeof(g_csvPath), _TRUNCATE, "%s\\uniq-export%s.csv", dir, suffix);
     _snprintf_s(g_gdsPath, sizeof(g_gdsPath), _TRUNCATE, "%s\\uniq-export%s.gds", dir, suffix);
 }
@@ -2131,6 +2263,7 @@ bool journalInit(HMODULE selfModule, const char* journalDir) {
              "can overwrite it - this session's deposits are held in memory only");
         had = true;
     }
+    backupAtOpen();   // before the ladder: a migrated .bin is no file on disk with rows
     if (had) {
         // Rule 1. NEVER migrate on top of an existing readable journal.
         if (haveBin) {
@@ -3149,6 +3282,7 @@ bool journalFollow(int variant, const char* viewKey) {
     InterlockedExchange(&g_readOnly, 0);
     InterlockedExchange(&g_copyAside, 0);
     InterlockedExchange(&g_readOnlySaid, 0);
+    g_backupDue = false;
     InterlockedExchange(&g_saveVariant, (LONG)variant);
     _snprintf_s(g_viewKey, sizeof(g_viewKey), _TRUNCATE, "%s", key);
     _snprintf_s(g_dir, sizeof(g_dir), _TRUNCATE, "%s", dir);
@@ -3168,6 +3302,7 @@ bool journalFollow(int variant, const char* viewKey) {
              "whatever is holding the file and restart *****", g_path);
         had2 = true;
     }
+    backupAtOpen();
     // After the read, not before: the file IS this mode's file, whatever its header said.
     InterlockedExchange(&g_saveVariant, (LONG)variant);
     // The exports are derived from the entry list that just changed under them, so arm the ones

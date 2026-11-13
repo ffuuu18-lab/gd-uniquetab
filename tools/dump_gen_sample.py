@@ -52,10 +52,7 @@ def main(out_path: str) -> int:
 
 def _fields(arch, entry):
     """Field lines with the raw types: the last field of a name wins, sorted by name."""
-    import lz4.block
-
-    raw = lz4.block.decompress(arch._blob[24 + entry.offset: 24 + entry.offset + entry.csize],
-                               uncompressed_size=entry.dsize)
+    raw, _stored = arch.raw_block(entry)
     last = {}
     p = 0
     while p + 8 <= len(raw):

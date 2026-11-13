@@ -12,6 +12,22 @@ the mod. Nothing the mod does is written into `player.gdc` or into any `.gst` st
 future patch, a broken mod or a plain uninstall cannot make the game prune what you stored. If
 you remove the mod, your collection file stays on disk exactly as it was.
 
+## New in 1.2.1.2
+
+- **Loot Ascension 1.4.5 works again.** One of its database records is saved uncompressed, and
+  the mod could not read it, so that game's tab fell back to a materials page that does not fit
+  Baul's caravan. Such records are read now. A mod record that still cannot be read is skipped,
+  and the log names it, instead of stopping the whole collection.
+- **Your own page.** `page=x,y,w,h` under `[layout]` sets the collection page and its background,
+  whatever the caravan or stash mod says: our frames on one flat colour, on that rectangle, with
+  no checks against the mod. It is a commented line in the file; remove the `;` to use it. It
+  takes effect at the next start of the game (*Settings*, *[layout]*, "Your own page").
+- **Backups of your collection.** Before a session first changes a journal that holds items, the
+  mod copies the file as it was to `backup\uniq-items-<date-time>.jsonl` beside it (hardcore and
+  each custom game have their own), and keeps the newest 10. If a collection ever opens empty
+  while its newest backup holds items, the log says so and tells you how to restore it; the mod
+  never restores one on its own (see *Your collection, and backing it up*).
+
 ## New in 1.2.1.1
 
 - **Loot Ascension's Baul UI gets the whole window.** On a caravan whose stash grid is wider than
@@ -408,12 +424,12 @@ commented out at its default.
 | `tooltip_mark` | 1 = every item tooltip says whether it is in your collection |
 | `log_level` | how much goes in the log: error, warn, info, debug, trace (trace also writes every line at once) |
 
-The file says `ini_version=44`. An older file is carried over on the first start with every value
+The file says `ini_version=45`. An older file is carried over on the first start with every value
 kept: a file older than 40 gets the `collect_mi=1` line, and `max_per_record` and `rescue` move from
 `[general]` into `[advanced]` - commented out at their default, or as a live line there if you had
 set them (`max_per_record=2` stays `max_per_record=2`); a 1.2.0 file (42) gains the commented
 `edit_button` line, the commented `zoom_pct` line under `[layout]` and the commented `[keys]`
-section. A custom game's own file says the same number and is carried over the same way, on that
+section; a 1.2.1 file (44) gains the commented `page` line under `[layout]`. A custom game's own file says the same number and is carried over the same way, on that
 game's first entry: every line it has is kept, and a setting it does not set keeps its default
 (the main file's value is not copied into it).
 
@@ -468,6 +484,7 @@ is laid out as it always was. The in-game editor writes these lines for you.
 | `grid_<W>x<H>`, `pad_<W>x<H>`, `label_<W>x<H>` = `x,y,w,h` | your own rectangles for the caravan cover of that size, in the materials window's own pixels at UI scale 1 (the outline prints them) |
 | `pad_screen`, `label_screen` = `<corner>,x,y,w,h` | the buttons or the label line pinned to a corner of the SCREEN instead of the window (below) |
 | `zoom_pct` = 100..200 | the item icons of the collection pages bigger, in percent - a commented line at 100 (*Bigger icons*, below) |
+| `page` = `x,y,w,h` | the collection page and its background FORCED to that rectangle, whatever the caravan or stash mod says - a commented line, empty (*Your own page*, below) |
 
 `<W>x<H>` is the cover: `438x627` for the base game and DeathGrimDawn, `941x936` Loot Ascension,
 `974x659` Reign of Terror, `975x968` X-Mod. The grid takes as many whole cells as fit from its
@@ -497,6 +514,27 @@ hand that is smaller than that is shown as just said, but the editor keeps SAVE 
 it large enough. The game's own materials page keeps its normal size. The game's own
 interface-scale setting (its UI scale slider) makes the icons bigger too - with the whole
 interface, the caravan and the HUD, and the tab then shows as many items per screen as before.
+
+**Your own page.** Normally the mod works out where the collection page is and how big its
+background is from the caravan the game loads - the base game's, or a stash mod's. When that goes
+wrong for a mod (the tab is the wrong size, or the log says the generation failed and the plate is
+disabled), remove the `;` in front of `;page=` and give the page yourself: `page=-503,70,941,936`
+is `x,y,w,h` in the materials window's own pixels at UI scale 1, the same numbers the outline and
+the editor print. Then the mod reads nothing of the caravan for the page: the background is exactly
+that rectangle, painted as our own frames on one flat colour (`plate_ground`, else the vanilla
+tone) - nothing of anybody's window art, in the base game too -, and the grid is the part of it
+below the buttons' band (from y 76 down). The width and height must be 64 to 2048 and `x`, `y`
+within 4096 either way, and the page must reach at least 32 pixels below the band (`y + h` at
+least 108); anything else is ignored with one line in the log. It is checked against
+nothing else: a rectangle off the window is drawn off the window. The buttons and the label stay
+where the game puts them even when they fall outside your page, and your own `pad_` and `label_`
+lines may sit there too. Everything else follows the page: the `grid_`, `pad_` and `label_` lines
+are keyed by its size (`grid_941x936=...` for the line above), and the editor works inside it. It
+is a generation setting: the collection is rebuilt once with the new page and the change shows at
+the NEXT start of the game (the game reads the page's record when it builds its interface). One
+value per settings file: a custom game's own file has its own, and the main file's serves the base
+game. Delete the line, or put the `;` back, to return to the automatic page (again at the next
+start).
 
 **Off the window.** `pad_screen=tr,8,8,320,44` puts the buttons in the top-right corner of the
 screen: the corner is `tl`, `tr`, `bl` or `br`, `x,y` the distance from that corner inwards and
@@ -750,6 +788,7 @@ Everything lives in `x64\uniquetab\`:
 | --- | --- | --- |
 | `uniq-items.jsonl` | **this is your collection** (softcore) | yours - back it up |
 | `uniq-items-hc.jsonl` | the same, hardcore | yours - back it up |
+| `backup\uniq-items*-<yyyymmdd-hhmmss>.jsonl` | a journal as it was before a session's first change, the newest 10 of each kept (see *Backups* below) | yours - the mod deletes only copies of that exact name beyond the newest 10 |
 | `uniq-export.gds`, `uniq-export-hc.gds`, `uniq-export.csv` | a stash file GD Stash can import, a spreadsheet | the mod's, rewritten from the collection |
 | `uniquetab.ini` | your settings | yours |
 | `uniquetab-buttons.ini` | the main campaign's buttons and words | yours (the mod wrote it once; it rewrites only `[unassigned]`, and adds a new built-in group's button once) |
@@ -760,6 +799,7 @@ Everything lives in `x64\uniquetab\`:
 | `rescue-report.txt` | what the last rescue handed back or skipped | the mod's |
 | `catalogue.bin`, `catalogue.stamp`, `uniq-*.txt`, `uniq-pages.arz` | generated from your game | the mod's; delete them and they come back |
 | `mods\<name>\uniq-items*.jsonl` | **that custom game's collection** | yours - back it up like the main one; never deleted by the mod |
+| `mods\<name>\backup\` | that custom game's journals' last 10 copies | yours, as `backup\` above |
 | `mods\<name>\uniquetab.ini`, `uniquetab-buttons.ini` | that custom game's own settings and buttons | yours |
 | `mods\<name>\` (the rest), `mods\<name>\basemods\` | the generated set again for a custom game you have entered (without and with `/basemods`), its `uniquetab.state`, its own log (+ three older copies), its exports and rescue report | the mod's |
 
@@ -769,6 +809,20 @@ identity, one item per line. It is plain text - you can open it, search it, and 
 forget an item. Copy it somewhere safe as often as you would back up a save. An item you own that
 no group takes any more stays in it, not shown (the label counts it as `+N not on these pages`)
 until a group takes it again - nothing you deposited ever leaves the collection.
+
+**Backups.** The mod keeps copies of its own: each time a journal that holds items is opened (at
+start-up, and when you enter a world in the other mode or another custom game) and then first
+changed, the file as it was is copied to `backup\` beside it, named
+`<journal>-<yyyymmdd-hhmmss>.jsonl` (the date and time of the copy; hardcore's start
+`uniq-items-hc-`, a custom game's are in `mods\<name>\backup\`, and with `journal_dir` set they are
+beside the journals there). The newest 10 of each journal are kept and older ones deleted; nothing
+else in `backup\` is touched. When a journal opens with no items while its newest backup holds
+some, the log says so once, with the backup's name and its count. The mod never restores a backup
+itself. To restore one: close the game, then copy the backup over the journal under the
+journal's own name (`uniq-items.jsonl`, or `uniq-items-hc.jsonl` for a hardcore one). A backup is
+the collection as it was then: an item taken out since comes back into it, so you may then have
+that item twice. A backup is no substitute for your own copy somewhere else - it sits on the same
+disk as the journal.
 
 `uniq-export*.gds` is written beside it for convenience: point **GD Stash** at it to browse your
 collection outside the game. It is an export, not the original - the `.jsonl` is the one to keep.
@@ -781,8 +835,8 @@ deleting it loses nothing you made.
 
 | folder | yours | the mod's |
 | --- | --- | --- |
-| `x64\uniquetab\` | the journals `uniq-items.jsonl` and `uniq-items-hc.jsonl` (the collection; in `journal_dir` when that is set); `uniquetab.ini` (the mod writes it once, then only a one-shot setting going back, the editor's SAVE and an upgrade); `uniquetab-buttons.ini` (written once, then only `[unassigned]` and, once, a new built-in group's button); the optional `uniquetab-groups.ini` (never written) | `uniquetab.state`; the logs `uniquetab.log` (+ three older copies); `rescue-report.txt`; the exports `uniq-export*.gds`, `uniq-export.csv`; the generated set `catalogue.bin`, `catalogue.stamp`, `uniq-records.txt`, `uniq-pages.txt`, `uniq-pages.arz`, `uniq-groups.txt` |
-| `x64\uniquetab\mods\<name>\` (a custom game you entered; `<name>` is its folder under the game's `mods\`) | that game's journals (in `<journal_dir>\mods\<name>\` when `journal_dir` is set), its own complete `uniquetab.ini` (written once from the main file's values, then only a one-shot going back, the editor's SAVE and an upgrade) and its `uniquetab-buttons.ini` | its exports and `rescue-report.txt`; the generated set (the same six files), log (+ three older copies) and `uniquetab.state` of the game run without `/basemods` |
+| `x64\uniquetab\` | the journals `uniq-items.jsonl` and `uniq-items-hc.jsonl` (the collection) and their backups in `backup\` (both in `journal_dir` when that is set); `uniquetab.ini` (the mod writes it once, then only a one-shot setting going back, the editor's SAVE and an upgrade); `uniquetab-buttons.ini` (written once, then only `[unassigned]` and, once, a new built-in group's button); the optional `uniquetab-groups.ini` (never written) | `uniquetab.state`; the logs `uniquetab.log` (+ three older copies); `rescue-report.txt`; the exports `uniq-export*.gds`, `uniq-export.csv`; the generated set `catalogue.bin`, `catalogue.stamp`, `uniq-records.txt`, `uniq-pages.txt`, `uniq-pages.arz`, `uniq-groups.txt` |
+| `x64\uniquetab\mods\<name>\` (a custom game you entered; `<name>` is its folder under the game's `mods\`) | that game's journals and their backups in `backup\` (in `<journal_dir>\mods\<name>\` when `journal_dir` is set), its own complete `uniquetab.ini` (written once from the main file's values, then only a one-shot going back, the editor's SAVE and an upgrade) and its `uniquetab-buttons.ini` | its exports and `rescue-report.txt`; the generated set (the same six files), log (+ three older copies) and `uniquetab.state` of the game run without `/basemods` |
 | `x64\uniquetab\mods\<name>\basemods\` (the same game run with `/basemods`) | - | that variant's generated set, its log (+ three older copies) and its `uniquetab.state` |
 | `settings\ui\caravan\` in the game's root folder | - | the page backgrounds, `uniq_plate_*.tex`, and nothing else |
 
@@ -931,6 +985,7 @@ anything.
 | the page backgrounds | `settings\ui\caravan\uniq_plate_*.tex` | removes them (nothing else in that folder) |
 | the generated set | `catalogue.bin`, `catalogue.stamp`, `uniq-*.txt`, `uniq-pages.arz` | removes them |
 | your collection and its exports | `uniq-items*.jsonl`, `uniq-export*` | keeps them - and refuses to run while the mod still holds items |
+| the collection's backups | `backup\` (and each `mods\<name>\backup\`) | keeps them - and refuses to run while one is there: they still hold your items, so move them away by hand first |
 | your settings, buttons and groups | `uniquetab.ini`, `uniquetab-buttons.ini`, `uniquetab-groups.ini`, the `.old` copies | keeps them |
 | the mod's notes | `uniquetab.state`, `uniquetab.log` (+ copies), `rescue-report.txt` | keeps them |
 | every custom game's folder | `mods\` (and an old `views\`) | never touches it |

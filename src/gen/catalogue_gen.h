@@ -111,6 +111,13 @@ bool collectItems(const GameData& g, std::vector<CatalogueItem>& items,
                   std::vector<std::string>& warnings, std::string* error,
                   bool collectMi = false);
 
+// The ONE warning for a mod layer's records that do not decode (skipped, never fatal): the
+// count and the first one's name. A base-game record that does not decode still fails.
+inline std::string undecodableText(std::size_t count, const std::string& first) {
+    return std::to_string(count) + " mod record(s) that do not decode are skipped (the first: " +
+           first + ")";
+}
+
 // The record-local MI test, shared by collectItems and the view probe: one of the 25 equipment
 // classes (isEquipmentClass) and itemClassification Rare - faction-store and crafted rares too.
 // key and fileDescription are unused (kept so a record-local rule needs no caller change).

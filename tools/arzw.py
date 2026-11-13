@@ -40,8 +40,7 @@ Field = Tuple[str, int, Sequence]           # (name, type, values)
 def read_typed(arc: ArzArchive, name: str) -> List[Field]:
     """Decode one record keeping field order and field TYPE (arz.py drops the type)."""
     entry = arc.entries[name.replace("\\", "/").lower()]
-    raw = lz4.block.decompress(arc._blob[24 + entry.offset:24 + entry.offset + entry.csize],
-                               uncompressed_size=entry.dsize)
+    raw, _stored = arc.raw_block(entry)
     out: List[Field] = []
     p, n = 0, len(raw)
     while p + 8 <= n:

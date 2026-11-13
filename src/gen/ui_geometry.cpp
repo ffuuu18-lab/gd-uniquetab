@@ -3,6 +3,7 @@
 #include "gen/arc_reader.h"
 #include "gen/arz_reader.h"
 #include "gen/catalogue_gen.h"
+#include "ut_layout.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -492,6 +493,100 @@ bool deriveGeometry(const GameData& g, const ModView& mods, UiGeometry& out,
                       pw, ph, bx, by, out.tabStrip.c_str());
         out.note = std::string(buf) + " (" + bitmap + ")";
     }
+    return true;
+}
+
+std::string ForcedPage::text() const {
+    if (!on) return std::string();
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%d,%d,%d,%d", x, y, w, h);
+    return buf;
+}
+
+bool forcedPageParse(const std::string& value, ForcedPage& out) {
+    out = ForcedPage();
+    ut::UtRect r;
+    if (value.empty() || !ut::utPageParse(value.c_str(), &r)) return false;
+    out.on = true;
+    out.x = r.x;
+    out.y = r.y;
+    out.w = r.w;
+    out.h = r.h;
+    return true;
+}
+
+bool forcedGeometry(const GameData& g, const ModView& mods, const ForcedPage& fp,
+                    UiGeometry& out, std::string* error) {
+    if (!g.db) { if (error) *error = "game data not loaded"; return false; }
+    if (!fp.on) { if (error) *error = "no forced page"; return false; }
+    auto recs = [&](const std::string& name, ArzRecord& r) {
+        return mods.get(name, r) || g.db->get(name, r);
+    };
+    // What the overlay itself needs stays fatal: the materials window and its box list.
+    ArzRecord page;
+    if (!recs(kMaterialWindow, page)) {
+        if (error) *error = std::string(kMaterialWindow) + " is not in the database";
+        return false;
+    }
+    const ArzField* boxes = page.find("reagentBoxes");
+    if (!boxes || boxes->strs.empty()) {
+        if (error) *error = std::string(kMaterialWindow) + " names no reagent box";
+        return false;
+    }
+    UiGeometry o;
+    o.forced = true;
+    o.bmpX = fp.x;
+    o.bmpY = fp.y;
+    o.plateW = fp.w;
+    o.plateH = fp.h;
+    o.x0 = fp.x;
+    o.y0 = std::max(fp.y, kPanelBandH);   // the label and the pad own the page's top band
+    o.usableW = fp.w;
+    o.usableH = fp.y + fp.h - o.y0;
+    if (o.usableH < 32) {
+        char buf[160];
+        std::snprintf(buf, sizeof buf, "page=%s leaves a %dx%d grid under the header band (y %d)",
+                      fp.text().c_str(), o.usableW, o.usableH, kPanelBandH);
+        if (error) *error = buf;
+        return false;
+    }
+    // The materials cover's own rectangle, read for the comparison only: the page is that
+    // rectangle exactly, or the plate is the page's own (widePlate) and the frame names it.
+    std::string bitmap, coverWhy;
+    int bx = 0, by = 0, pw = 0, ph = 0;
+    bool coverKnown = false;
+    ArzRecord crec;
+    const std::string cover = page.str("TransferPlate");
+    if (cover.empty() || !recs(cover, crec)) {
+        coverWhy = "the cover record cannot be read";
+    } else {
+        bitmap = crec.str("bitmapName");
+        bx = crec.i32("bitmapPositionX");
+        by = crec.i32("bitmapPositionY");
+        coverKnown = mods.texSize(bitmap, pw, ph) || coverSize(g, bitmap, pw, ph);
+        if (!coverKnown) coverWhy = "the pixel size of the cover \"" + bitmap + "\" cannot be read";
+    }
+    o.widePlate = !(coverKnown && bx == fp.x && by == fp.y && pw == fp.w && ph == fp.h);
+    o.plate = bitmap;
+    ArzRecord win;
+    o.tabStrip = "top";
+    if (recs(kCaravanWindow, win) && win.i32("tabSpacingY") != 0 && win.i32("tabSpacingX") == 0)
+        o.tabStrip = "left";
+    char buf[320];
+    if (coverKnown)
+        std::snprintf(buf, sizeof buf,
+                      "page FORCED by page=%s in uniquetab.ini: grid %d,%d %dx%d, plate %dx%d at "
+                      "%d,%d (the cover is %dx%d at %d,%d%s); nothing derived from the caravan",
+                      fp.text().c_str(), o.x0, o.y0, o.usableW, o.usableH, o.plateW, o.plateH,
+                      o.bmpX, o.bmpY, pw, ph, bx, by, o.widePlate ? "" : " - the page is the cover");
+    else
+        std::snprintf(buf, sizeof buf,
+                      "page FORCED by page=%s in uniquetab.ini: grid %d,%d %dx%d, plate %dx%d at "
+                      "%d,%d (%s); nothing derived from the caravan",
+                      fp.text().c_str(), o.x0, o.y0, o.usableW, o.usableH, o.plateW, o.plateH,
+                      o.bmpX, o.bmpY, coverWhy.c_str());
+    o.note = buf;
+    out = o;
     return true;
 }
 

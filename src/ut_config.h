@@ -23,7 +23,9 @@
 // gains the new number. 44 added zoom_pct, the one hidden row of [layout] (a commented line under
 // the section's blurb; refused outside 100..200, never clamped: kUtCfgRefuse), and [keys] (THE
 // KEYS below): a 43 file is rewritten once and gains the zoom line and the seven commented [keys]
-// rows. Every other
+// rows. 45 added page, a hidden TEXT row of [layout] under zoom_pct (the forced page, checked by
+// ut_layout.h utPageParse; a refused value is one WARN and no key): a 44 file gains its commented
+// line. Every other
 // key that is still parsed is a HIDDEN row (kUtCfgHidden): it is written as one commented line of
 // the [advanced] blob at the end of the file - ";key=default<tabs>; what it does" - and a hidden
 // key the user sets to a value other than its default is written LIVE in the same place (the ';'
@@ -117,7 +119,7 @@
 // every key that still exists keeps the user's value, new keys take their default, keys this
 // build no longer has are dropped with one log line naming them, and the file is rewritten in the
 // current layout. See configReload().
-#define UT_INI_VERSION 44
+#define UT_INI_VERSION 45
 
 // One family's lines, in file order. Plain bytes, zero-filled when unused, so UtConfig stays a
 // POD that the change test can memcmp.
@@ -230,6 +232,13 @@ struct UtConfig {
     // settings file like the layout lines. Clamped per group where a small grid cannot hold one
     // magnified cell (ut_layout.h utZoomFit).
     int zoomPct = 100;
+    // page (45) = "x,y,w,h": the collection page FORCED - the plate and the grid's page in the
+    // materials window's own pixels at UI scale 1 (ut_layout.h utPageParse: w,h 64..2048, |x|,|y|
+    // <= 4096, y + h >= 108; anything else is one WARN and no key). A generation input (the stamp's page= line):
+    // the plate IS this rectangle, the grid the part of it under the header band, on a flat
+    // ground, with no check against the mod's caravan. A hidden row of [layout], per settings
+    // file; empty = derived from the merged database as before.
+    char page[32] = {0};
     // grid_<W>x<H>, pad_<W>x<H>, label_<W>x<H>, padmat_<W>x<H> = x,y,w,h: the user's rectangles
     // for the caravan cover of that size (vanilla: 438x627). padmat_ is the pad on the game's own
     // materials page when the pad in force would cover real material boxes there.

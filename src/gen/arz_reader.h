@@ -95,11 +95,14 @@ public:
     const std::vector<std::string>& strings() const { return m_strings; }
     // Entry by key ("records/..." any case, '\\' or '/'); nullptr when absent.
     const ArzEntry* entry(const std::string& name) const;
-    // Decodes one entry. False when the block is corrupt.
+    // Decodes one entry. False when the block is corrupt. A block LZ4 cannot decode whose
+    // csize equals its dsize is read as STORED (the raw field stream) when its fields walk
+    // whole and well formed to its last byte.
     bool decode(const ArzEntry& e, ArzRecord& out) const;
     static std::string normKey(const std::string& name);
 
 private:
+    bool walkFields(const std::vector<std::uint8_t>& raw, bool strict, ArzRecord& out) const;
     std::string m_path, m_tag;
     FileHandle m_file;
     std::uint64_t m_fileSize = 0;
